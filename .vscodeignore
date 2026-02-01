@@ -1,0 +1,22 @@
+# Source files (compiled version is in out/)
+src/**
+tsconfig.json
+
+# Development files
+.vscode-test/**
+.vscode/**
+.gitignore
+
+# Build artifacts
+*.vsix
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/**
+.github/**
+
+# Documentation for development
+*.md.backup
