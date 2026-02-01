@@ -32,7 +32,12 @@ export function activate(context: vscode.ExtensionContext) {
             } else {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor) {
-                    await countFileTokens(activeEditor.document.uri, true);
+                    // Check if there's a selection
+                    if (!activeEditor.selection.isEmpty) {
+                        await countSelectionTokens(activeEditor);
+                    } else {
+                        await countFileTokens(activeEditor.document.uri, true);
+                    }
                 } else {
                     vscode.window.showInformationMessage("No file is currently open.");
                 }
@@ -59,6 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Event Listeners with debounce
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => debouncedUpdateStatusBar(editor)),
+        vscode.window.onDidChangeTextEditorSelection(e => debouncedUpdateStatusBar(e.textEditor)),
         vscode.workspace.onDidChangeTextDocument(e => {
             if (vscode.window.activeTextEditor && e.document === vscode.window.activeTextEditor.document) {
                 debouncedUpdateStatusBar(vscode.window.activeTextEditor);
@@ -117,6 +123,16 @@ async function handleUri(uri: vscode.Uri) {
     } else {
         await countFileTokens(uri, true);
     }
+}
+
+async function countSelectionTokens(editor: vscode.TextEditor): Promise<void> {
+    const selectedText = editor.document.getText(editor.selection);
+    const count = tokenizerService.countTokens(selectedText);
+    const modelInfo = tokenizerService.getModelInfo();
+
+    vscode.window.showInformationMessage(
+        `📝 Selection: ${formatNumber(count)} tokens (${modelInfo?.label || tokenizerService.getModel()})`
+    );
 }
 
 async function countFileTokens(uri: vscode.Uri, showNotification = false): Promise<number> {
@@ -178,6 +194,11 @@ async function countTokensInDirectory(uri: vscode.Uri, token: vscode.Cancellatio
         if (type === vscode.FileType.Directory) {
             total += await countTokensInDirectory(entryUri, token);
         } else if (type === vscode.FileType.File) {
+            // Skip binary files in folder counting
+            if (isBinaryFile(entryUri.fsPath)) {
+                continue;
+            }
+
             try {
                 const arr = await vscode.workspace.fs.readFile(entryUri);
                 const text = new TextDecoder().decode(arr);
@@ -205,11 +226,21 @@ function updateStatusBarImmediate(editor: vscode.TextEditor | undefined) {
         return;
     }
 
-    const text = editor.document.getText();
+    let text: string;
+    let isSelection = false;
+
+    // Check if there's a selection
+    if (!editor.selection.isEmpty) {
+        text = editor.document.getText(editor.selection);
+        isSelection = true;
+    } else {
+        text = editor.document.getText();
+    }
+
     const count = tokenizerService.countTokens(text);
     const modelInfo = tokenizerService.getModelInfo();
 
-    statusBarItem.text = `$(hubot) ${formatNumber(count)} tokens`;
+    statusBarItem.text = `$(hubot) ${formatNumber(count)} token${count !== 1 ? 's' : ''}${isSelection ? ' (selection)' : ''}`;
     statusBarItem.tooltip = `Token count for ${modelInfo?.label || tokenizerService.getModel()}\nClick to change model`;
     statusBarItem.show();
 }

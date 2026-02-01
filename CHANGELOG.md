@@ -4,6 +4,14 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [1.0.2] - 2026-02-01
+
+### Added
+- **Selection Token Count**: When text is selected in the editor, "Count Tokens" now counts only the selection instead of the entire file.
+
+### Fixed
+- **Folder Counting**: Binary files (images, PDFs, executables) are now correctly skipped when counting tokens in folders.
+
 ## [1.0.1] - 2026-02-01
 
 ### Fixed
