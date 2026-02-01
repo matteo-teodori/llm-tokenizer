@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="icon.png" alt="Tokenizer Icon" width="128" />
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/icon.png" alt="LLM Tokenizer Icon" width="128" />
   <p>
     <b>The ultimate AI token counter for your IDE.</b><br>
     Supports 35+ models including GPT-5, Claude 4.5, Gemini 3, DeepSeek V3, and Llama 3.
@@ -13,7 +13,7 @@
 
 **Optimized for developers building with LLMs.**
 
-Tokenizer gives you **instant visibility** into your token usage directly within your IDE. Whether you're optimizing prompts, estimating API costs, or ensuring your context window limits aren't exceeded, Tokenizer removes the guesswork.
+LLM Tokenizer gives you **instant visibility** into your token usage directly within your IDE. Whether you're optimizing prompts, estimating API costs, or ensuring your context window limits aren't exceeded, LLM Tokenizer removes the guesswork.
 
 - **Check Context Limits**: Know instantly if your file fits within the context window of your favorite AI model.
 - **Estimate Costs**: Get a clear sense of input token volume before sending requests to expensive APIs.
@@ -62,7 +62,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 
 ## Requirements
 
-VS Code 1.108.0+
+VS Code 1.85.0+
 
 ## Release Notes
 

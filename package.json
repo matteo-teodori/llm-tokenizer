@@ -1,9 +1,9 @@
 {
-  "name": "tokenizer",
-  "displayName": "Tokenizer",
+  "name": "llm-tokenizer",
+  "displayName": "LLM Tokenizer",
   "description": "AI token counter for files and folders - supports 35+ models (GPT-5, Claude 4.5, Gemini 3, Grok, DeepSeek, and more)",
   "license": "MIT",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "matteoteodori",
   "author": {
     "name": "Matteo Teodori",
@@ -12,10 +12,10 @@
   "icon": "icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/matteo-teodori/tokenizer"
+    "url": "https://github.com/matteo-teodori/llm-tokenizer"
   },
   "engines": {
-    "vscode": "^1.108.0"
+    "vscode": "^1.85.0"
   },
   "categories": [
     "Other",
@@ -40,34 +40,34 @@
   "contributes": {
     "commands": [
       {
-        "command": "tokenizer.countTokens",
+        "command": "llm-tokenizer.countTokens",
         "title": "Count Tokens (AI Model)",
-        "category": "Tokenizer"
+        "category": "LLM Tokenizer"
       },
       {
-        "command": "tokenizer.selectModel",
-        "title": "Select Tokenizer Model",
-        "category": "Tokenizer"
+        "command": "llm-tokenizer.selectModel",
+        "title": "Select LLM Model",
+        "category": "LLM Tokenizer"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "command": "tokenizer.countTokens",
+          "command": "llm-tokenizer.countTokens",
           "group": "1_modification@99"
         }
       ],
       "explorer/context": [
         {
-          "command": "tokenizer.countTokens",
+          "command": "llm-tokenizer.countTokens",
           "group": "1_modification@99"
         }
       ]
     },
     "configuration": {
-      "title": "Tokenizer",
+      "title": "LLM Tokenizer",
       "properties": {
-        "tokenizer.defaultModel": {
+        "llm-tokenizer.defaultModel": {
           "type": "string",
           "default": "gpt-5.2",
           "description": "Default model used for token counting",
@@ -157,10 +157,13 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "release:patch": "npm version patch && npm run compile && vsce publish && ovsx publish",
+    "release:minor": "npm version minor && npm run compile && vsce publish && ovsx publish",
+    "release:major": "npm version major && npm run compile && vsce publish && ovsx publish"
   },
   "devDependencies": {
-    "@types/vscode": "^1.108.1",
+    "@types/vscode": "^1.85.0",
     "@types/glob": "^9.0.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "25.1.0",

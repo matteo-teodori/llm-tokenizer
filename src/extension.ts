@@ -6,10 +6,10 @@ let statusBarItem: vscode.StatusBarItem;
 let tokenizerService: TokenizerService;
 let debounceTimer: NodeJS.Timeout | undefined;
 
-const STORAGE_KEY = 'tokenizer.selectedModel';
+const STORAGE_KEY = 'llm-tokenizer.selectedModel';
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Tokenizer extension is now active!');
+    console.log('LLM Tokenizer extension is now active!');
 
     tokenizerService = new TokenizerService();
 
@@ -21,12 +21,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Initialize Status Bar Item
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    statusBarItem.command = 'tokenizer.selectModel';
+    statusBarItem.command = 'llm-tokenizer.selectModel';
     context.subscriptions.push(statusBarItem);
 
     // Register Commands
     context.subscriptions.push(
-        vscode.commands.registerCommand('tokenizer.countTokens', async (uri: vscode.Uri) => {
+        vscode.commands.registerCommand('llm-tokenizer.countTokens', async (uri: vscode.Uri) => {
             if (uri) {
                 await handleUri(uri);
             } else {
@@ -41,7 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('tokenizer.selectModel', async () => {
+        vscode.commands.registerCommand('llm-tokenizer.selectModel', async () => {
             const items = buildQuickPickItems();
             const selected = await vscode.window.showQuickPick(items, {
                 placeHolder: "Select AI Model for Token Counting",
