@@ -64,13 +64,9 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 
 VS Code 1.85.0+
 
-## Release Notes
+## Changelog
 
-### 1.0.0
-- Initial release with 37 AI models
-- Grouped model selection
-- Persistent preferences
-- Research-based token accuracy
+See [CHANGELOG.md](CHANGELOG.md) for detailed release notes.
 
 ---
 
