@@ -4,6 +4,12 @@
     <b>The ultimate AI token counter for your IDE.</b><br>
     Supports 35+ models including GPT-5, Claude 4.5, Gemini 3, DeepSeek V3, and Llama 3.
   </p>
+  
+  <p>
+    <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
+      <img src="https://img.shields.io/badge/Install-VS%20Code-blue?style=for-the-badge&logo=visual-studio-code" alt="Install from VS Code Marketplace">
+    </a>
+  </p>
 </div>
 
 ---
