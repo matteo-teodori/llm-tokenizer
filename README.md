@@ -1,5 +1,6 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/icon.png" alt="LLM Tokenizer Icon" width="128" />
+  <h1>LLM Tokenizer</h1>
   <p>
     <b>The ultimate AI token counter for your IDE.</b><br>
     Supports 35+ models including GPT-5, Claude 4.5, Gemini 3, DeepSeek V3, and Llama 3.
@@ -31,11 +32,20 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 
 ## Features
 
+### 🎯 Core Features
 - **Real-time Token Count**: View the token count of the active file in the Status Bar
+- **Context Limit Warnings**: Visual indicators (⚠️ 80%, 🔴 100%) when approaching model limits
+- **Project-wide Counting**: Track total tokens across your entire workspace with smart caching
+- **Multi-file Selection**: Select multiple files/folders in explorer for batch token counting
 - **37 AI Models**: OpenAI, Anthropic, Google, xAI, DeepSeek, Meta, and more
+- **Selection Counting**: Count tokens in selected text within the editor
 - **Folder Analysis**: Right-click a folder to count tokens recursively
-- **Grouped Model Selection**: Models organized by provider
+- **Grouped Model Selection**: Models organized by provider for easy switching
 - **Persistent Preferences**: Selected model is remembered across sessions
+
+### ⚙️ Configuration
+- `llm-tokenizer.defaultModel`: Choose your preferred AI model
+- `llm-tokenizer.statusBarDisplay`: Display mode - "file", "project", or "both"
 
 ## Supported Models
 
@@ -52,9 +62,22 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 
 ## Usage
 
+### Basic Operations
 1. **Open a file**: Token count appears in Status Bar (bottom right)
 2. **Click Status Bar item** to change model
-3. **Right-click file/folder** → **Count Tokens**
+3. **Right-click file/folder** → **Count Tokens** (opens detailed Tree View summary)
+4. **Select multiple files** (Ctrl/Cmd+Click) → Right-click → **Count Tokens** for batch processing
+5. **Select text** in editor → **Count Tokens** to count only selection
+
+### Configuration
+Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
+- **Status Bar Display**: Choose between "file" (current file only), "project" (workspace total), or "both"
+- **Default Model**: Set your preferred model for token counting
+
+### Context Warnings
+- **Green** 🤖: Normal usage (< 80% of context limit)
+- **Yellow** ⚠️: Approaching limit (80-99%)
+- **Red** 🔴: Exceeds context limit (≥ 100%)
 
 ## Accuracy Notes
 

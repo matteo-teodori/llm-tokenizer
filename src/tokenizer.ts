@@ -20,6 +20,8 @@ export interface ModelInfo {
      * For tiktoken: multiply result by this factor
      */
     tokenFactor: number;
+    /** Context window limit in tokens (if undefined, no limit warnings) */
+    contextLimit?: number;
 }
 
 /**
@@ -30,87 +32,87 @@ export const MODEL_REGISTRY: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────
     // OpenAI (tiktoken o200k_base/cl100k_base - EXACT)
     // ─────────────────────────────────────────────────────────────
-    { id: "gpt-5.2", label: "GPT-5.2", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0 },
-    { id: "gpt-oss-120b", label: "GPT-OSS 120B", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0 },
-    { id: "gpt-4o", label: "GPT-4o", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0 },
-    { id: "gpt-4o-mini", label: "GPT-4o Mini", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0 },
-    { id: "o1", label: "o1", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0 },
-    { id: "o3-mini", label: "o3-mini", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0 },
-    { id: "gpt-4", label: "GPT-4 (Legacy)", provider: "OpenAI", encoding: "cl100k_base", tokenFactor: 1.0 },
-    { id: "gpt-3.5-turbo", label: "GPT-3.5 Turbo (Legacy)", provider: "OpenAI", encoding: "cl100k_base", tokenFactor: 1.0 },
+    { id: "gpt-5.2", label: "GPT-5.2", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 400000 },
+    { id: "gpt-oss-120b", label: "GPT-OSS 120B", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "gpt-4o", label: "GPT-4o", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "gpt-4o-mini", label: "GPT-4o Mini", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "o1", label: "o1", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "o3-mini", label: "o3-mini", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "gpt-4", label: "GPT-4 (Legacy)", provider: "OpenAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "gpt-3.5-turbo", label: "GPT-3.5 Turbo (Legacy)", provider: "OpenAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 16385 },
 
     // ─────────────────────────────────────────────────────────────
     // Anthropic (~3.5 chars/token for English - Anthropic official)
     // Using cl100k_base with 1.05x factor as approximation
     // ─────────────────────────────────────────────────────────────
-    { id: "claude-4.5-sonnet", label: "Claude Sonnet 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05 },
-    { id: "claude-4.5-opus", label: "Claude Opus 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05 },
-    { id: "claude-4.5-haiku", label: "Claude Haiku 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05 },
-    { id: "claude-3.5-sonnet", label: "Claude 3.5 Sonnet", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05 },
-    { id: "claude-3-opus", label: "Claude 3 Opus", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05 },
-    { id: "claude-3-haiku", label: "Claude 3 Haiku", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05 },
+    { id: "claude-4.5-sonnet", label: "Claude Sonnet 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
+    { id: "claude-4.5-opus", label: "Claude Opus 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
+    { id: "claude-4.5-haiku", label: "Claude Haiku 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
+    { id: "claude-3.5-sonnet", label: "Claude 3.5 Sonnet", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
+    { id: "claude-3-opus", label: "Claude 3 Opus", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
+    { id: "claude-3-haiku", label: "Claude 3 Haiku", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
 
     // ─────────────────────────────────────────────────────────────
     // Google Gemini (~4 chars/token - Google official)
     // ─────────────────────────────────────────────────────────────
-    { id: "gemini-3-flash", label: "Gemini 3 Flash Preview", provider: "Google", encoding: "char_approx", tokenFactor: 4.0 },
-    { id: "gemini-3-pro", label: "Gemini 3 Pro Preview", provider: "Google", encoding: "char_approx", tokenFactor: 4.0 },
-    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", provider: "Google", encoding: "char_approx", tokenFactor: 4.0 },
-    { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite", provider: "Google", encoding: "char_approx", tokenFactor: 4.0 },
-    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "Google", encoding: "char_approx", tokenFactor: 4.0 },
-    { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", provider: "Google", encoding: "char_approx", tokenFactor: 4.0 },
-    { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro", provider: "Google", encoding: "char_approx", tokenFactor: 4.0 },
+    { id: "gemini-3-flash", label: "Gemini 3 Flash Preview", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-3-pro", label: "Gemini 3 Pro Preview", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
 
     // ─────────────────────────────────────────────────────────────
     // xAI Grok (assumed similar to modern BPE, ~4 chars/token)
     // ─────────────────────────────────────────────────────────────
-    { id: "grok-4.1-fast", label: "Grok 4.1 Fast", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0 },
-    { id: "grok-4-fast", label: "Grok 4 Fast", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0 },
-    { id: "grok-code-fast-1", label: "Grok Code Fast 1", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0 },
+    { id: "grok-4.1-fast", label: "Grok 4.1 Fast", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 2000000 },
+    { id: "grok-4-fast", label: "Grok 4 Fast", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 2000000 },
+    { id: "grok-code-fast-1", label: "Grok Code Fast 1", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
 
     // ─────────────────────────────────────────────────────────────
     // DeepSeek (~3.3 chars/token, 0.3 tokens/char - Official docs)
     // ─────────────────────────────────────────────────────────────
-    { id: "deepseek-v3.2", label: "DeepSeek V3.2", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33 },
-    { id: "deepseek-v3", label: "DeepSeek V3", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33 },
+    { id: "deepseek-v3.2", label: "DeepSeek V3.2", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33, contextLimit: 128000 },
+    { id: "deepseek-v3", label: "DeepSeek V3", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33, contextLimit: 128000 },
 
     // ─────────────────────────────────────────────────────────────
     // Meta Llama (tiktoken-based for Llama 3+)
     // ─────────────────────────────────────────────────────────────
-    { id: "llama-3.2", label: "Llama 3.2", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.0 },
-    { id: "codellama", label: "CodeLlama", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.1 },
+    { id: "llama-3.2", label: "Llama 3.2", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "codellama", label: "CodeLlama", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.1, contextLimit: 100000 },
 
     // ─────────────────────────────────────────────────────────────
     // Mistral (BPE similar to GPT-4)
     // ─────────────────────────────────────────────────────────────
-    { id: "mistral-large", label: "Mistral Large", provider: "Mistral", encoding: "cl100k_base", tokenFactor: 1.0 },
+    { id: "mistral-large", label: "Mistral Large", provider: "Mistral", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
 
     // ─────────────────────────────────────────────────────────────
     // Alibaba Qwen (BPE, 151K vocab, similar to GPT-4)
     // ─────────────────────────────────────────────────────────────
-    { id: "qwen-2.5-coder", label: "Qwen 2.5 Coder", provider: "Alibaba", encoding: "cl100k_base", tokenFactor: 1.0 },
+    { id: "qwen-2.5-coder", label: "Qwen 2.5 Coder", provider: "Alibaba", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
 
     // ─────────────────────────────────────────────────────────────
     // Moonshot Kimi
     // ─────────────────────────────────────────────────────────────
-    { id: "kimi-k2.5", label: "Kimi K2.5", provider: "Moonshot", encoding: "cl100k_base", tokenFactor: 1.0 },
+    { id: "kimi-k2.5", label: "Kimi K2.5", provider: "Moonshot", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 256000 },
 
     // ─────────────────────────────────────────────────────────────
     // Xiaomi MiMo
     // ─────────────────────────────────────────────────────────────
-    { id: "mimo-v2-flash", label: "MiMo-V2-Flash", provider: "Xiaomi", encoding: "cl100k_base", tokenFactor: 1.0 },
+    { id: "mimo-v2-flash", label: "MiMo-V2-Flash", provider: "Xiaomi", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 256000 },
 
     // ─────────────────────────────────────────────────────────────
     // MiniMax
     // ─────────────────────────────────────────────────────────────
-    { id: "minimax-m2.1", label: "MiniMax M2.1", provider: "MiniMax", encoding: "cl100k_base", tokenFactor: 1.0 },
+    { id: "minimax-m2.1", label: "MiniMax M2.1", provider: "MiniMax", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 1000000 },
 
     // ─────────────────────────────────────────────────────────────
     // Zhipu GLM (vocab 151,552 - similar structure to GPT-4)
     // ─────────────────────────────────────────────────────────────
-    { id: "glm-4.7", label: "GLM 4.7", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0 },
-    { id: "glm-4.6", label: "GLM 4.6", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0 },
-    { id: "glm-4.5", label: "GLM 4.5", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0 },
+    { id: "glm-4.7", label: "GLM 4.7", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "glm-4.6", label: "GLM 4.6", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "glm-4.5", label: "GLM 4.5", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
 ];
 
 export type ModelId = typeof MODEL_REGISTRY[number]['id'];
@@ -163,5 +165,32 @@ export class TokenizerService {
                 return Math.ceil(text.length / 4);
             }
         }
+    }
+
+    /**
+     * Get context window usage status for the current model
+     * @param tokenCount Number of tokens to check against limit
+     * @returns Object with percentage used and status (ok/warning/error)
+     */
+    getContextStatus(tokenCount: number): {
+        percentage: number;
+        status: 'ok' | 'warning' | 'error';
+        limit: number | undefined;
+    } {
+        const model = this.getModelInfo();
+        if (!model?.contextLimit) {
+            return { percentage: 0, status: 'ok', limit: undefined };
+        }
+
+        const percentage = (tokenCount / model.contextLimit) * 100;
+        let status: 'ok' | 'warning' | 'error' = 'ok';
+
+        if (percentage >= 100) {
+            status = 'error';
+        } else if (percentage >= 80) {
+            status = 'warning';
+        }
+
+        return { percentage, status, limit: model.contextLimit };
     }
 }

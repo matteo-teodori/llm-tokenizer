@@ -3,7 +3,7 @@
   "displayName": "LLM Tokenizer",
   "description": "AI token counter for files and folders - supports 35+ models (GPT-5, Claude 4.5, Gemini 3, Grok, DeepSeek, and more)",
   "license": "MIT",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "publisher": "matteoteodori",
   "author": {
     "name": "Matteo Teodori",
@@ -147,6 +147,21 @@
             "GLM 4.6",
             "GLM 4.5"
           ]
+        },
+        "llm-tokenizer.statusBarDisplay": {
+          "type": "string",
+          "enum": [
+            "file",
+            "project",
+            "both"
+          ],
+          "enumDescriptions": [
+            "Show only current file token count",
+            "Show only project-wide token count",
+            "Show both file and project token counts"
+          ],
+          "default": "file",
+          "description": "Choose what to display in the status bar"
         }
       }
     }

@@ -4,6 +4,21 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [1.1.0] - 2026-02-04
+
+### Added
+- **Context Limit Warnings**: Visual indicators (⚠️ at 80%, 🔴 at 100%) when approaching or exceeding model context limits
+- **Project-wide Token Count**: New status bar option for entire workspace token counting with smart caching
+- **Multi-file Tree View**: Interactive summary with hierarchical folder structure, clickable files, and folder token totals
+- **Folder Token Totals**: Each folder in the tree view now displays its total token count
+
+### Changed
+- **Codebase Refactoring**: Reorganized into modular architecture for better maintainability
+- **Model Accuracy**: Updated model registry with verified 2026 specifications, including precise context limits (e.g., Grok 4 at 2M, Gemini 3 at ~1M) and corrected token factors
+
+### Fixed
+- **Empty Files**: Empty files now correctly show as 0 tokens instead of being marked as binary
+
 ## [1.0.2] - 2026-02-01
 
 ### Added
