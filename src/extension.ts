@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+const ignore = require('ignore');
+
 import { TokenizerService, MODEL_REGISTRY } from './tokenizer';
 import { StatusBarManager } from './statusbar';
 import { showMultiFileSummary } from './webview';
@@ -218,6 +220,7 @@ async function handleMultipleUris(uris: vscode.Uri[]): Promise<void> {
             let filesProcessed = 0;
             const processedFiles: { path: string; tokens: number }[] = [];
             const skippedFiles: { path: string; reason: string }[] = [];
+            const ignoredFiles: { path: string }[] = [];
 
             for (let i = 0; i < uris.length; i++) {
                 if (token.isCancellationRequested) {
@@ -237,12 +240,30 @@ async function handleMultipleUris(uris: vscode.Uri[]): Promise<void> {
 
                 const stat = await vscode.workspace.fs.stat(uri);
 
+                // Get gitignore instance for the workspace (if setting is enabled)
+                const shouldIgnore = vscode.workspace.getConfiguration('llm-tokenizer').get<boolean>('ignoreGitignoredFiles', true);
+                const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+                let ig = undefined;
+
+                if (shouldIgnore && workspaceFolder) {
+                    ig = ignore();
+                    try {
+                        const gitignorePath = vscode.Uri.joinPath(workspaceFolder.uri, '.gitignore');
+                        const gitignoreContent = await vscode.workspace.fs.readFile(gitignorePath);
+                        ig.add(new TextDecoder().decode(gitignoreContent));
+                    } catch (e) {
+                        // No .gitignore found or cannot read it
+                    }
+                }
+
                 if (stat.type === vscode.FileType.Directory) {
-                    const result = await countTokensInDirectory(uri, token);
+                    // We pass down the ignore instance
+                    const result = await countTokensInDirectory(uri, token, ig, workspaceFolder?.uri);
                     totalTokens += result.count;
                     filesProcessed += result.files.length;
                     processedFiles.push(...result.files);
                     skippedFiles.push(...result.skipped);
+                    ignoredFiles.push(...result.ignored);
                 } else {
                     // Check if binary BEFORE counting to distinguish from empty files
                     if (isBinaryFile(uri.fsPath)) {
@@ -268,6 +289,7 @@ async function handleMultipleUris(uris: vscode.Uri[]): Promise<void> {
                 filesProcessed,
                 processedFiles,
                 skippedFiles,
+                ignoredFiles,
                 modelLabel: modelInfo?.label || tokenizerService.getModel(),
                 contextStatus: tokenizerService.getContextStatus(totalTokens)
             });
@@ -325,11 +347,14 @@ async function countFileTokens(
 
 async function countTokensInDirectory(
     uri: vscode.Uri,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    ig?: ReturnType<typeof ignore>,
+    workspaceUri?: vscode.Uri
 ): Promise<DirectoryCountResult> {
     let total = 0;
     const files: { path: string; tokens: number }[] = [];
     const skipped: { path: string; reason: string }[] = [];
+    const ignored: { path: string }[] = [];
 
     const entries = await vscode.workspace.fs.readDirectory(uri);
 
@@ -343,11 +368,21 @@ async function countTokensInDirectory(
 
         const entryUri = vscode.Uri.joinPath(uri, name);
 
+        // Check against gitignore
+        if (ig && workspaceUri) {
+            const relativePath = path.posix.relative(workspaceUri.path, entryUri.path);
+            if (relativePath && ig.ignores(relativePath)) {
+                ignored.push({ path: entryUri.fsPath });
+                continue;
+            }
+        }
+
         if (type === vscode.FileType.Directory) {
-            const result = await countTokensInDirectory(entryUri, token);
+            const result = await countTokensInDirectory(entryUri, token, ig, workspaceUri);
             total += result.count;
             files.push(...result.files);
             skipped.push(...result.skipped);
+            ignored.push(...result.ignored);
         } else if (type === vscode.FileType.File) {
             if (isBinaryFile(entryUri.fsPath)) {
                 skipped.push({
@@ -370,7 +405,7 @@ async function countTokensInDirectory(
         }
     }
 
-    return { count: total, files, skipped };
+    return { count: total, files, skipped, ignored };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -409,9 +444,30 @@ async function updateProjectTokenCountAsync(): Promise<void> {
         const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**');
         let total = 0;
 
+        const shouldIgnore = vscode.workspace.getConfiguration('llm-tokenizer').get<boolean>('ignoreGitignoredFiles', true);
+        let ig = undefined;
+        if (shouldIgnore) {
+            ig = ignore();
+            try {
+                const gitignorePath = vscode.Uri.joinPath(workspaceFolder.uri, '.gitignore');
+                const gitignoreContent = await vscode.workspace.fs.readFile(gitignorePath);
+                ig.add(new TextDecoder().decode(gitignoreContent));
+            } catch (e) {
+                // No .gitignore found or cannot read it
+            }
+        }
+
         for (const file of files) {
             if (isBinaryFile(file.fsPath)) {
                 continue;
+            }
+
+            // Filter out files that match .gitignore
+            if (ig) {
+                const relativePath = path.posix.relative(workspaceFolder.uri.path, file.path);
+                if (relativePath && ig.ignores(relativePath)) {
+                    continue;
+                }
             }
 
             try {

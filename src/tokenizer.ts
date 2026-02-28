@@ -45,6 +45,8 @@ export const MODEL_REGISTRY: ModelInfo[] = [
     // Anthropic (~3.5 chars/token for English - Anthropic official)
     // Using cl100k_base with 1.05x factor as approximation
     // ─────────────────────────────────────────────────────────────
+    { id: "claude-4.6-sonnet", label: "Claude Sonnet 4.6", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
+    { id: "claude-4.6-opus", label: "Claude Opus 4.6", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-4.5-sonnet", label: "Claude Sonnet 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-4.5-opus", label: "Claude Opus 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-4.5-haiku", label: "Claude Haiku 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
@@ -105,7 +107,8 @@ export const MODEL_REGISTRY: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────
     // MiniMax
     // ─────────────────────────────────────────────────────────────
-    { id: "minimax-m2.1", label: "MiniMax M2.1", provider: "MiniMax", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 1000000 },
+    { id: "minimax-m2.5", label: "MiniMax M2.5", provider: "MiniMax", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "minimax-m2.1", label: "MiniMax M2.1", provider: "MiniMax", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 196000 },
 
     // ─────────────────────────────────────────────────────────────
     // Zhipu GLM (vocab 151,552 - similar structure to GPT-4)

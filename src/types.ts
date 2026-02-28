@@ -31,12 +31,20 @@ export interface SkippedFile {
 }
 
 /**
+ * Ignored file info (from .gitignore)
+ */
+export interface IgnoredFile {
+    path: string;
+}
+
+/**
  * Result from directory token counting
  */
 export interface DirectoryCountResult {
     count: number;
     files: ProcessedFile[];
     skipped: SkippedFile[];
+    ignored: IgnoredFile[];
 }
 
 /**

@@ -4,6 +4,16 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [1.2.0] - 2026-02-28
+
+### Added
+- **.gitignore Support**: The extension now automatically excludes files matching the project's `.gitignore` rules from both workspace-wide and folder-level token counting, providing much more accurate results.
+- **Gitignore Setting**: Added a new VS Code setting (`llm-tokenizer.ignoreGitignoredFiles`) to toggle this behavior (enabled by default).
+- **Ignored Files UI**: The Multi-file Token Summary webview now includes a dedicated "Ignored Files" section to clearly show which files were skipped due to `.gitignore` rules.
+- **New AI Models**: Added support for the latest models including:
+  - Anthropic: Claude 4.6 Sonnet, Claude 4.6 Opus
+  - MiniMax: MiniMax M2.5
+
 ## [1.1.0] - 2026-02-04
 
 ### Added

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { FileNode, ProcessedFile, SkippedFile } from './types';
+import { FileNode, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 import { escapePathForHtml, formatNumber } from './utils';
 
 /**
@@ -173,6 +173,27 @@ export function buildSkippedFilesHtml(files: SkippedFile[]): string {
     return `
         <details>
             <summary><strong>Skipped Files (${files.length})</strong></summary>
+            <ul class="tree-list root-list">
+                ${renderTreeAsHtml(tree, true)}
+            </ul>
+        </details>
+    `;
+}
+
+/**
+ * Build HTML for ignored files section
+ * @param files - Array of ignored files
+ * @returns HTML string for the ignored files tree
+ */
+export function buildIgnoredFilesHtml(files: IgnoredFile[]): string {
+    if (files.length === 0) {
+        return '';
+    }
+
+    const tree = buildFileTree(files);
+    return `
+        <details>
+            <summary><strong>Ignored Files (${files.length})</strong></summary>
             <ul class="tree-list root-list">
                 ${renderTreeAsHtml(tree, true)}
             </ul>

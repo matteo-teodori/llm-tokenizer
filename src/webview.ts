@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { TokenizerService } from './tokenizer';
-import { ContextStatusResult, ProcessedFile, SkippedFile } from './types';
+import { ContextStatusResult, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 import { formatNumber, getStatusColor } from './utils';
-import { buildProcessedFilesHtml, buildSkippedFilesHtml } from './fileTree';
+import { buildProcessedFilesHtml, buildSkippedFilesHtml, buildIgnoredFilesHtml } from './fileTree';
 
 /**
  * Configuration for multi-file summary webview
@@ -12,6 +12,7 @@ export interface MultiFileSummaryConfig {
     filesProcessed: number;
     processedFiles: ProcessedFile[];
     skippedFiles: SkippedFile[];
+    ignoredFiles: IgnoredFile[];
     modelLabel: string;
     contextStatus: ContextStatusResult;
 }
@@ -81,6 +82,7 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
         filesProcessed,
         processedFiles,
         skippedFiles,
+        ignoredFiles,
         modelLabel,
         contextStatus
     } = config;
@@ -90,6 +92,7 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
     const contextInfo = generateContextInfoHtml(contextStatus);
     const processedFilesHtml = buildProcessedFilesHtml(processedFiles);
     const skippedFilesHtml = buildSkippedFilesHtml(skippedFiles);
+    const ignoredFilesHtml = buildIgnoredFilesHtml(ignoredFiles);
 
     return `
 <!DOCTYPE html>
@@ -184,10 +187,12 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
     <p><strong>Total Tokens:</strong> ${formatNumber(totalTokens)}</p>
     <p><strong>Files Processed:</strong> ${filesProcessed}</p>
     ${skippedFiles.length > 0 ? `<p><strong>Files Skipped:</strong> ${skippedFiles.length}</p>` : ''}
+    ${ignoredFiles.length > 0 ? `<p><strong>Files Ignored:</strong> ${ignoredFiles.length}</p>` : ''}
     <p><strong>Model:</strong> ${modelLabel}</p>
     ${contextInfo}
     ${processedFilesHtml}
     ${skippedFilesHtml}
+    ${ignoredFilesHtml}
     <script>
         const vscode = acquireVsCodeApi();
         document.querySelectorAll('.file-link').forEach(link => {

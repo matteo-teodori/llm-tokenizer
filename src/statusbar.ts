@@ -64,7 +64,7 @@ export class StatusBarManager {
             this.fileStatusBar.color = indicator.color;
 
             // Build tooltip
-            let tooltip = `Token count for ${modelInfo?.label || this.tokenizerService.getModel()}\nClick to change model`;
+            let tooltip = `Token count for ${isSelection ? 'selection' : 'file'}\nModel: ${modelInfo?.label || this.tokenizerService.getModel()}\nClick to change model`;
             if (contextStatus.limit) {
                 tooltip += `\n\nContext: ${contextStatus.percentage.toFixed(1)}% of ${formatNumber(contextStatus.limit)} limit`;
                 if (contextStatus.status === 'warning') {
