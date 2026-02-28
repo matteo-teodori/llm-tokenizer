@@ -35,7 +35,7 @@ export class StatusBarManager {
     /**
      * Update file status bar based on active editor
      */
-    public updateFileStatusBar(editor: vscode.TextEditor | undefined): void {
+    public async updateFileStatusBar(editor: vscode.TextEditor | undefined): Promise<void> {
         if (!editor || !editor.document) {
             this.fileStatusBar.hide();
             return;
@@ -53,7 +53,13 @@ export class StatusBarManager {
                 ? document.getText(editor.selection)
                 : document.getText();
 
-            const count = this.tokenizerService.countTokens(text);
+            const count = await this.tokenizerService.countTokens(text);
+
+            // Check if document was closed or selection changed while counting
+            if (document.isClosed || (!isSelection && !editor.selection.isEmpty)) {
+                return;
+            }
+
             const modelInfo = this.tokenizerService.getModelInfo();
             const contextStatus = this.tokenizerService.getContextStatus(count);
             const indicator = getStatusIndicator(contextStatus.status);

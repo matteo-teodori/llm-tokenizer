@@ -3,7 +3,7 @@
   <h1>LLM Tokenizer</h1>
   <p>
     <b>The ultimate AI token counter for your IDE.</b><br>
-    Supports 35+ models including GPT-5, Claude 4.5, Gemini 3, DeepSeek V3, and Llama 3.
+    Supports 35+ models including GPT, Claude, Gemini, DeepSeek, and Llama.
   </p>
   
   <p>
@@ -34,10 +34,11 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 
 ### 🎯 Core Features
 - **Real-time Token Count**: View the token count of the active file in the Status Bar
+- **Uncompromised Performance**: Uses background Node.js `worker_threads` for heavy asynchronous processing, ensuring VS Code never freezes even on massive 100MB+ files or entire workspaces
 - **Context Limit Warnings**: Visual indicators (⚠️ 80%, 🔴 100%) when approaching model limits
 - **Project-wide Counting**: Track total tokens across your entire workspace with smart caching
 - **Multi-file Selection**: Select multiple files/folders in explorer for batch token counting
-- **37 AI Models**: OpenAI, Anthropic, Google, xAI, DeepSeek, Meta, and more
+- **35+ AI Models**: OpenAI, Anthropic, Google, xAI, DeepSeek, Meta, and more
 - **Selection Counting**: Count tokens in selected text within the editor
 - **Folder Analysis**: Right-click a folder to count tokens recursively
 - **Grouped Model Selection**: Models organized by provider for easy switching
@@ -46,33 +47,35 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 ### ⚙️ Configuration
 - `llm-tokenizer.defaultModel`: Choose your preferred AI model
 - `llm-tokenizer.statusBarDisplay`: Display mode - "file", "project", or "both"
+- `llm-tokenizer.ignoreGitignoredFiles`: Exclude gitignored files from project-wide and directory token counting
 
 ## Supported Models
 
 | Provider   | Models                                                                 |
 |------------|------------------------------------------------------------------------|
 | OpenAI     | GPT-5.2, GPT-OSS 120B, GPT-4o, GPT-4o Mini, o1, o3-mini               |
-| Anthropic  | Claude Sonnet/Opus/Haiku 4.5, Claude 3.5 Sonnet, Claude 3 Opus/Haiku  |
+| Anthropic  | Claude Sonnet/Opus 4.6, Claude Sonnet/Opus/Haiku 4.5, Claude 3.5 Sonnet, Claude 3 Opus/Haiku  |
 | Google     | Gemini 3 Flash/Pro, Gemini 2.5 Flash/Pro/Lite, Gemini 2.0/1.5        |
 | xAI        | Grok 4.1 Fast, Grok 4 Fast, Grok Code Fast 1                          |
 | DeepSeek   | DeepSeek V3.2, DeepSeek V3                                            |
 | Meta       | Llama 3.2, CodeLlama                                                  |
 | Zhipu      | GLM 4.7, GLM 4.6, GLM 4.5                                             |
-| Others     | Mistral Large, Qwen 2.5 Coder, Kimi K2.5, MiMo-V2-Flash, MiniMax M2.1 |
+| Others     | Mistral Large, Qwen 2.5 Coder, Kimi K2.5, MiMo-V2-Flash, MiniMax M2.5/M2.1 |
 
 ## Usage
 
 ### Basic Operations
 1. **Open a file**: Token count appears in Status Bar (bottom right)
 2. **Click Status Bar item** to change model
-3. **Right-click file/folder** → **Count Tokens** (opens detailed Tree View summary)
-4. **Select multiple files** (Ctrl/Cmd+Click) → Right-click → **Count Tokens** for batch processing
-5. **Select text** in editor → **Count Tokens** to count only selection
+3. **Right-click a single file** → **Count Tokens** (shows a popup notification with the token count)
+4. **Right-click a folder** (or multiple files) → **Count Tokens** (opens a detailed Tree View summary)
+5. **Select text** in editor → **Count Tokens** to count only the selection
 
 ### Configuration
 Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
-- **Status Bar Display**: Choose between "file" (current file only), "project" (workspace total), or "both"
+- **Status Bar Display**: Choose between "file", "project", or "both" (default is "both")
 - **Default Model**: Set your preferred model for token counting
+- **Ignore Gitignored Files**: Exclude `.gitignore` matched files from counts (checked by default)
 
 ### Context Warnings
 - **Green** 🤖: Normal usage (< 80% of context limit)

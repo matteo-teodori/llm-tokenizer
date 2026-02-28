@@ -1,4 +1,6 @@
-import { getEncoding, Tiktoken } from "js-tiktoken";
+import * as path from 'path';
+import { Worker } from 'worker_threads';
+import { TokenizeRequest, TokenizeResponse } from './worker';
 
 /**
  * Model metadata for token counting
@@ -120,20 +122,40 @@ export const MODEL_REGISTRY: ModelInfo[] = [
 
 export type ModelId = typeof MODEL_REGISTRY[number]['id'];
 
-// Cache encoders to avoid re-initialization
-const encoderCache: Map<string, Tiktoken> = new Map();
-
-function getEncoder(encoding: 'cl100k_base' | 'p50k_base' | 'o200k_base'): Tiktoken {
-    if (!encoderCache.has(encoding)) {
-        encoderCache.set(encoding, getEncoding(encoding));
-    }
-    return encoderCache.get(encoding)!;
-}
+// rimosso il caching dell'encoder perché se ne occupa il worker
 
 export class TokenizerService {
     private currentModelId: string = "gpt-5.2";
+    private worker: Worker;
+    private messageIdCounter = 0;
+    private pendingRequests: Map<number, { resolve: (count: number) => void, reject: (err: Error) => void }> = new Map();
 
-    constructor() { }
+    constructor() {
+        // In the compiled extension, worker.js will be in the same output directory (`out/worker.js` or `dist/worker.js`)
+        const workerPath = path.join(__dirname, 'worker.js');
+        this.worker = new Worker(workerPath);
+
+        this.worker.on('message', (response: TokenizeResponse) => {
+            const pending = this.pendingRequests.get(response.messageId);
+            if (pending) {
+                if (response.error) {
+                    // Fallback handled by the worker already, but just in case
+                    pending.resolve(response.count);
+                } else {
+                    pending.resolve(response.count);
+                }
+                this.pendingRequests.delete(response.messageId);
+            }
+        });
+
+        this.worker.on('error', (err) => {
+            console.error('Tokenizer Worker error:', err);
+        });
+    }
+
+    public dispose() {
+        this.worker.terminate();
+    }
 
     public setModel(modelId: string) {
         this.currentModelId = modelId;
@@ -147,27 +169,25 @@ export class TokenizerService {
         return MODEL_REGISTRY.find(m => m.id === this.currentModelId);
     }
 
-    public countTokens(text: string): number {
+    public async countTokens(text: string): Promise<number> {
         const model = this.getModelInfo();
         if (!model) {
-            // Fallback: ~4 chars per token
             return Math.ceil(text.length / 4);
         }
 
-        if (model.encoding === 'char_approx') {
-            // Character-based approximation: divide by chars-per-token ratio
-            return Math.ceil(text.length / model.tokenFactor);
-        } else {
-            // Tiktoken-based exact counting
-            try {
-                const enc = getEncoder(model.encoding);
-                const baseCount = enc.encode(text).length;
-                return Math.ceil(baseCount * model.tokenFactor);
-            } catch (e) {
-                console.error(`Error encoding with ${model.encoding}:`, e);
-                return Math.ceil(text.length / 4);
-            }
-        }
+        return new Promise((resolve, reject) => {
+            const messageId = ++this.messageIdCounter;
+            this.pendingRequests.set(messageId, { resolve, reject });
+
+            const request: TokenizeRequest = {
+                messageId,
+                text,
+                encoding: model.encoding,
+                tokenFactor: model.tokenFactor
+            };
+
+            this.worker.postMessage(request);
+        });
     }
 
     /**

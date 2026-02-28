@@ -4,6 +4,14 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [1.2.1] - 2026-02-28
+
+### Added
+- **Performance Improvements (Web Worker)**: Token counting is now fully offloaded to Node.js `worker_threads` to ensure the VS Code UI (main thread) never freezes or stutters even when processing massive 100MB+ files or counting tokens across large workspaces.
+
+### Fixed
+- **Selection Counting**: Fixed an issue where using "Count Tokens" from the context menu on a selected block of text incorrectly counted the entire file instead of the selection.
+
 ## [1.2.0] - 2026-02-28
 
 ### Added

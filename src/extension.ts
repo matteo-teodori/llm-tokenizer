@@ -190,7 +190,13 @@ async function handleSingleUri(uri: vscode.Uri): Promise<void> {
     if (stat.type === vscode.FileType.Directory) {
         await handleMultipleUris([uri]);
     } else {
-        await countFileTokens(uri, true);
+        // Check if the clicked file is the currently active editor and has a selection
+        const activeEditor = vscode.window.activeTextEditor;
+        if (activeEditor && activeEditor.document.uri.toString() === uri.toString() && !activeEditor.selection.isEmpty) {
+            await countSelectionTokens(activeEditor);
+        } else {
+            await countFileTokens(uri, true);
+        }
     }
 }
 
@@ -303,7 +309,7 @@ async function handleMultipleUris(uris: vscode.Uri[]): Promise<void> {
 
 async function countSelectionTokens(editor: vscode.TextEditor): Promise<void> {
     const selectedText = editor.document.getText(editor.selection);
-    const count = tokenizerService.countTokens(selectedText);
+    const count = await tokenizerService.countTokens(selectedText);
     const modelInfo = tokenizerService.getModelInfo();
 
     vscode.window.showInformationMessage(
@@ -327,7 +333,7 @@ async function countFileTokens(
     try {
         const document = await vscode.workspace.openTextDocument(uri);
         const text = document.getText();
-        const count = tokenizerService.countTokens(text);
+        const count = await tokenizerService.countTokens(text);
 
         if (showNotification) {
             const modelInfo = tokenizerService.getModelInfo();
@@ -395,7 +401,7 @@ async function countTokensInDirectory(
             try {
                 const arr = await vscode.workspace.fs.readFile(entryUri);
                 const text = new TextDecoder().decode(arr);
-                const count = tokenizerService.countTokens(text);
+                const count = await tokenizerService.countTokens(text);
                 total += count;
                 files.push({ path: entryUri.fsPath, tokens: count });
             } catch (e) {

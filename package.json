@@ -3,7 +3,7 @@
   "displayName": "LLM Tokenizer",
   "description": "AI token counter for files and folders - supports 35+ models (GPT, Claude, Gemini, Grok, DeepSeek, and more)",
   "license": "MIT",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "matteoteodori",
   "author": {
     "name": "Matteo Teodori",
@@ -41,7 +41,7 @@
     "commands": [
       {
         "command": "llm-tokenizer.countTokens",
-        "title": "Count Tokens (AI Model)",
+        "title": "Count Tokens",
         "category": "LLM Tokenizer"
       },
       {
