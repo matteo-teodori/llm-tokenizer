@@ -1,20 +1,23 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/icon.png" alt="LLM Tokenizer Icon" width="128" />
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/icon.png" alt="LLM Tokenizer Icon" width="120" />
+
   <h1>LLM Tokenizer</h1>
-  <p>
-    <b>The ultimate AI token counter for your IDE.</b><br>
-    Supports 35+ models including GPT, Claude, Gemini, DeepSeek, and Llama.
-  </p>
-  
+
+  <p><b>The ultimate AI token counter for your IDE.</b><br>
+  Real-time token counting for 60+ models — GPT, Claude, Gemini, Grok, DeepSeek, Llama, and more.</p>
+
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
-      <img src="https://img.shields.io/badge/Install-VS%20Code-blue?style=for-the-badge&logo=visual-studio-code" alt="Install from VS Code Marketplace">
+      <img src="https://vsmarketplacebadges.dev/version-short/matteoteodori.llm-tokenizer.svg?style=for-the-badge&colorA=555555&colorB=0078d4&label=VS%20Marketplace" alt="VS Code Marketplace Version">
+    </a>
+    <a href="https://open-vsx.org/extension/matteoteodori/llm-tokenizer">
+      <img src="https://img.shields.io/open-vsx/v/matteoteodori/llm-tokenizer?style=for-the-badge&label=Open%20VSX&color=a855f7" alt="Open VSX Version">
+    </a>
+    <a href="https://github.com/matteo-teodori/llm-tokenizer/blob/main/LICENSE">
+      <img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge" alt="MIT License">
     </a>
   </p>
 </div>
-
----
-
 
 ---
 
@@ -38,7 +41,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 - **Context Limit Warnings**: Visual indicators (⚠️ 80%, 🔴 100%) when approaching model limits
 - **Project-wide Counting**: Track total tokens across your entire workspace with smart caching
 - **Multi-file Selection**: Select multiple files/folders in explorer for batch token counting
-- **35+ AI Models**: OpenAI, Anthropic, Google, xAI, DeepSeek, Meta, and more
+- **60+ AI Models**: OpenAI, Anthropic, Google, xAI, DeepSeek, Meta, Mistral, Alibaba, and more
 - **Selection Counting**: Count tokens in selected text within the editor
 - **Folder Analysis**: Right-click a folder to count tokens recursively
 - **Grouped Model Selection**: Models organized by provider for easy switching
@@ -51,16 +54,20 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 
 ## Supported Models
 
-| Provider   | Models                                                                 |
-|------------|------------------------------------------------------------------------|
-| OpenAI     | GPT-5.2, GPT-OSS 120B, GPT-4o, GPT-4o Mini, o1, o3-mini               |
-| Anthropic  | Claude Sonnet/Opus 4.6, Claude Sonnet/Opus/Haiku 4.5, Claude 3.5 Sonnet, Claude 3 Opus/Haiku  |
-| Google     | Gemini 3 Flash/Pro, Gemini 2.5 Flash/Pro/Lite, Gemini 2.0/1.5        |
-| xAI        | Grok 4.1 Fast, Grok 4 Fast, Grok Code Fast 1                          |
-| DeepSeek   | DeepSeek V3.2, DeepSeek V3                                            |
-| Meta       | Llama 3.2, CodeLlama                                                  |
-| Zhipu      | GLM 4.7, GLM 4.6, GLM 4.5                                             |
-| Others     | Mistral Large, Qwen 2.5 Coder, Kimi K2.5, MiMo-V2-Flash, MiniMax M2.5/M2.1 |
+| Provider   | Models                                                                                              |
+|------------|-----------------------------------------------------------------------------------------------------|
+| OpenAI     | GPT-5.5, GPT-5.4, GPT-5.3 Codex, GPT-5.2, GPT-5, GPT-OSS 120B, GPT-4o, GPT-4o Mini, o4-mini, o3-pro, o3, o1, o3-mini, GPT-4, GPT-3.5 Turbo |
+| Anthropic  | Claude Opus 4.7, Claude Sonnet/Opus 4.6, Claude Sonnet/Opus/Haiku 4.5, Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3 Opus/Haiku |
+| Google     | Gemini 3.1 Pro, Gemini 3 Flash/Pro, Gemini 2.5 Flash/Pro/Lite, Gemini 2.0 Flash, Gemini 1.5 Pro   |
+| xAI        | Grok 4.3, Grok 4.2, Grok 4.1 Fast, Grok 4 Fast, Grok Code Fast 1, Grok 3                          |
+| DeepSeek   | DeepSeek V4 Pro/Flash, DeepSeek V3.2, V3.1, V3, DeepSeek R1                                        |
+| Meta       | Llama 4 Maverick, Llama 4 Scout, Llama 3.3, Llama 3.2, CodeLlama                                  |
+| Mistral    | Mistral Large 3, Mistral Small 4, Mistral Large                                                     |
+| Alibaba    | Qwen 3.6 Plus, Qwen 3.5, Qwen3, QwQ 32B, Qwen 2.5 Coder                                           |
+| Moonshot   | Kimi K2.6, Kimi K2.5                                                                                |
+| MiniMax    | MiniMax M2.7, M2.5, M2.1                                                                            |
+| Zhipu      | GLM 5.1, GLM 5, GLM 4.7, GLM 4.6, GLM 4.5                                                         |
+| Xiaomi     | MiMo-V2-Flash                                                                                       |
 
 ## Usage
 

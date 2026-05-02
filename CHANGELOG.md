@@ -4,6 +4,26 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [1.3.0] - 2026-05-02
+
+### Added
+- **30+ New AI Models**: Comprehensive model registry update across all major providers:
+  - **OpenAI**: GPT-5.5, GPT-5.4, GPT-5.3 Codex, GPT-5, o3, o3-pro, o4-mini
+  - **Anthropic**: Claude Opus 4.7, Claude 3.7 Sonnet
+  - **Google**: Gemini 3.1 Pro
+  - **xAI**: Grok 4.3, Grok 4.2, Grok 3
+  - **DeepSeek**: DeepSeek R1, DeepSeek V3.1, DeepSeek V4 Pro, DeepSeek V4 Flash
+  - **Meta**: Llama 4 Scout, Llama 4 Maverick, Llama 3.3
+  - **Mistral**: Mistral Large 3, Mistral Small 4
+  - **Alibaba**: Qwen3, QwQ 32B, Qwen 3.5, Qwen 3.6 Plus
+  - **Moonshot**: Kimi K2.6 (256K context)
+  - **MiniMax**: MiniMax M2.7 (204,800 context)
+  - **Zhipu**: GLM-5, GLM-5.1
+
+### Changed
+- Updated extension description to reflect 60+ supported models
+- Updated README with professional badge banner and full model table
+
 ## [1.2.1] - 2026-02-28
 
 ### Added

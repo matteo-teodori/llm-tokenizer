@@ -34,10 +34,17 @@ export const MODEL_REGISTRY: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────
     // OpenAI (tiktoken o200k_base/cl100k_base - EXACT)
     // ─────────────────────────────────────────────────────────────
+    { id: "gpt-5.5", label: "GPT-5.5", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "gpt-5.4", label: "GPT-5.4", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "gpt-5.3-codex", label: "GPT-5.3 Codex", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "gpt-5.2", label: "GPT-5.2", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 400000 },
+    { id: "gpt-5", label: "GPT-5", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "gpt-oss-120b", label: "GPT-OSS 120B", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 128000 },
     { id: "gpt-4o", label: "GPT-4o", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 128000 },
     { id: "gpt-4o-mini", label: "GPT-4o Mini", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "o4-mini", label: "o4-mini", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "o3-pro", label: "o3-pro", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "o3", label: "o3", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "o1", label: "o1", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "o3-mini", label: "o3-mini", provider: "OpenAI", encoding: "o200k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "gpt-4", label: "GPT-4 (Legacy)", provider: "OpenAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
@@ -47,11 +54,13 @@ export const MODEL_REGISTRY: ModelInfo[] = [
     // Anthropic (~3.5 chars/token for English - Anthropic official)
     // Using cl100k_base with 1.05x factor as approximation
     // ─────────────────────────────────────────────────────────────
+    { id: "claude-4.7-opus", label: "Claude Opus 4.7", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-4.6-sonnet", label: "Claude Sonnet 4.6", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-4.6-opus", label: "Claude Opus 4.6", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-4.5-sonnet", label: "Claude Sonnet 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-4.5-opus", label: "Claude Opus 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-4.5-haiku", label: "Claude Haiku 4.5", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
+    { id: "claude-3.7-sonnet", label: "Claude 3.7 Sonnet", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-3.5-sonnet", label: "Claude 3.5 Sonnet", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-3-opus", label: "Claude 3 Opus", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
     { id: "claude-3-haiku", label: "Claude 3 Haiku", provider: "Anthropic", encoding: "cl100k_base", tokenFactor: 1.05, contextLimit: 200000 },
@@ -59,8 +68,9 @@ export const MODEL_REGISTRY: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────
     // Google Gemini (~4 chars/token - Google official)
     // ─────────────────────────────────────────────────────────────
-    { id: "gemini-3-flash", label: "Gemini 3 Flash Preview", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
-    { id: "gemini-3-pro", label: "Gemini 3 Pro Preview", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-3-flash", label: "Gemini 3 Flash", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
+    { id: "gemini-3-pro", label: "Gemini 3 Pro", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
     { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
     { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "Google", encoding: "char_approx", tokenFactor: 4.0, contextLimit: 1048576 },
@@ -70,35 +80,52 @@ export const MODEL_REGISTRY: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────
     // xAI Grok (assumed similar to modern BPE, ~4 chars/token)
     // ─────────────────────────────────────────────────────────────
+    { id: "grok-4.3", label: "Grok 4.3", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 1000000 },
+    { id: "grok-4.2", label: "Grok 4.2", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 1000000 },
     { id: "grok-4.1-fast", label: "Grok 4.1 Fast", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 2000000 },
     { id: "grok-4-fast", label: "Grok 4 Fast", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 2000000 },
     { id: "grok-code-fast-1", label: "Grok Code Fast 1", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "grok-3", label: "Grok 3", provider: "xAI", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 131072 },
 
     // ─────────────────────────────────────────────────────────────
     // DeepSeek (~3.3 chars/token, 0.3 tokens/char - Official docs)
     // ─────────────────────────────────────────────────────────────
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33, contextLimit: 128000 },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33, contextLimit: 128000 },
     { id: "deepseek-v3.2", label: "DeepSeek V3.2", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33, contextLimit: 128000 },
+    { id: "deepseek-v3.1", label: "DeepSeek V3.1", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33, contextLimit: 128000 },
     { id: "deepseek-v3", label: "DeepSeek V3", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33, contextLimit: 128000 },
+    { id: "deepseek-r1", label: "DeepSeek R1", provider: "DeepSeek", encoding: "char_approx", tokenFactor: 3.33, contextLimit: 128000 },
 
     // ─────────────────────────────────────────────────────────────
     // Meta Llama (tiktoken-based for Llama 3+)
     // ─────────────────────────────────────────────────────────────
+    { id: "llama-4-maverick", label: "Llama 4 Maverick", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 1000000 },
+    { id: "llama-4-scout", label: "Llama 4 Scout", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 10000000 },
+    { id: "llama-3.3", label: "Llama 3.3", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
     { id: "llama-3.2", label: "Llama 3.2", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
     { id: "codellama", label: "CodeLlama", provider: "Meta", encoding: "cl100k_base", tokenFactor: 1.1, contextLimit: 100000 },
 
     // ─────────────────────────────────────────────────────────────
     // Mistral (BPE similar to GPT-4)
     // ─────────────────────────────────────────────────────────────
+    { id: "mistral-large-3", label: "Mistral Large 3", provider: "Mistral", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 256000 },
+    { id: "mistral-small-4", label: "Mistral Small 4", provider: "Mistral", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
     { id: "mistral-large", label: "Mistral Large", provider: "Mistral", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
 
     // ─────────────────────────────────────────────────────────────
     // Alibaba Qwen (BPE, 151K vocab, similar to GPT-4)
     // ─────────────────────────────────────────────────────────────
+    { id: "qwen3.6-plus", label: "Qwen 3.6 Plus", provider: "Alibaba", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "qwen3.5", label: "Qwen 3.5", provider: "Alibaba", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "qwen3", label: "Qwen3", provider: "Alibaba", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
+    { id: "qwq-32b", label: "QwQ 32B", provider: "Alibaba", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
     { id: "qwen-2.5-coder", label: "Qwen 2.5 Coder", provider: "Alibaba", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
 
     // ─────────────────────────────────────────────────────────────
     // Moonshot Kimi
     // ─────────────────────────────────────────────────────────────
+    { id: "kimi-k2.6", label: "Kimi K2.6", provider: "Moonshot", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 262144 },
     { id: "kimi-k2.5", label: "Kimi K2.5", provider: "Moonshot", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 256000 },
 
     // ─────────────────────────────────────────────────────────────
@@ -109,12 +136,15 @@ export const MODEL_REGISTRY: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────
     // MiniMax
     // ─────────────────────────────────────────────────────────────
+    { id: "minimax-m2.7", label: "MiniMax M2.7", provider: "MiniMax", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 204800 },
     { id: "minimax-m2.5", label: "MiniMax M2.5", provider: "MiniMax", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "minimax-m2.1", label: "MiniMax M2.1", provider: "MiniMax", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 196000 },
 
     // ─────────────────────────────────────────────────────────────
     // Zhipu GLM (vocab 151,552 - similar structure to GPT-4)
     // ─────────────────────────────────────────────────────────────
+    { id: "glm-5.1", label: "GLM 5.1", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 200000 },
+    { id: "glm-5", label: "GLM 5", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "glm-4.7", label: "GLM 4.7", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "glm-4.6", label: "GLM 4.6", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 200000 },
     { id: "glm-4.5", label: "GLM 4.5", provider: "Zhipu", encoding: "cl100k_base", tokenFactor: 1.0, contextLimit: 128000 },
