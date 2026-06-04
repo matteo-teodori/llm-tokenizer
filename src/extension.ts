@@ -28,6 +28,8 @@ let debounceTimer: NodeJS.Timeout | undefined;
 let projectUpdateTimer: NodeJS.Timeout | undefined;
 let projectTokenCount: number = 0;
 let projectCountCache: Map<string, TokenCacheEntry> = new Map();
+/** Track project-scan disposables separately so they can be replaced at runtime */
+let projectScanDisposables: vscode.Disposable[] = [];
 
 // ═══════════════════════════════════════════════════════════════
 // Extension Lifecycle
@@ -54,7 +56,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // Initial updates
     statusBarManager.updateFileStatusBar(vscode.window.activeTextEditor);
-    updateProjectTokenCountAsync();
+
+    if (isProjectScanEnabled()) {
+        updateProjectTokenCountAsync();
+    }
+
+    // Ensure display mode respects current configuration from the start
+    statusBarManager.updateDisplayMode();
 }
 
 export function deactivate(): void {
@@ -64,6 +72,12 @@ export function deactivate(): void {
     if (projectUpdateTimer) {
         clearTimeout(projectUpdateTimer);
     }
+    // Dispose project scan listeners (belt-and-suspenders: context.subscriptions handles this too)
+    for (const d of projectScanDisposables) {
+        d.dispose();
+    }
+    projectScanDisposables = [];
+    projectCountCache.clear();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -105,7 +119,12 @@ function registerCommands(context: vscode.ExtensionContext): void {
 // Event Listeners
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * Core event listeners (always active regardless of settings).
+ * These cover file/selection status bar updates and config change reactions.
+ */
 function registerEventListeners(context: vscode.ExtensionContext): void {
+    // ── Core listeners: always active ──
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => {
             debouncedUpdateStatusBar(editor);
@@ -122,25 +141,92 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
             ) {
                 debouncedUpdateStatusBar(vscode.window.activeTextEditor);
             }
-            // Trigger project update when a document becomes clean (saved)
-            if (!e.document.isDirty) {
-                debouncedUpdateProjectCount();
-            }
-        }),
-
-        vscode.workspace.onDidSaveTextDocument(() => {
-            debouncedUpdateProjectCount();
-        }),
-
-        vscode.workspace.onDidCreateFiles(() => {
-            debouncedUpdateProjectCount();
-        }),
-
-        vscode.workspace.onDidDeleteFiles(() => {
-            projectCountCache.clear();
-            debouncedUpdateProjectCount();
         })
     );
+
+    // ── Set up project-scan listeners according to current config ──
+    syncProjectScanListeners(context);
+
+    // ── React to configuration changes at runtime ──
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('llm-tokenizer.enableProjectScan')) {
+                syncProjectScanListeners(context);
+            }
+            if (
+                e.affectsConfiguration('llm-tokenizer.statusBarDisplay') ||
+                e.affectsConfiguration('llm-tokenizer.enableProjectScan')
+            ) {
+                statusBarManager.updateDisplayMode();
+            }
+            // When gitignore filtering changes, re-scan if project scan is on
+            if (
+                e.affectsConfiguration('llm-tokenizer.ignoreGitignoredFiles') &&
+                isProjectScanEnabled()
+            ) {
+                projectCountCache.clear();
+                debouncedUpdateProjectCount();
+            }
+        })
+    );
+}
+
+// ── Helpers ──
+
+function isProjectScanEnabled(): boolean {
+    return vscode.workspace.getConfiguration('llm-tokenizer')
+        .get<boolean>('enableProjectScan', true);
+}
+
+/**
+ * Dynamically attach or detach project-wide file watchers based on `enableProjectScan`.
+ * Inactive → detach watchers, hide project count, reset state.
+ * Active   → attach watchers, clear cache, trigger full scan.
+ */
+function syncProjectScanListeners(context: vscode.ExtensionContext): void {
+    // Detach old project-scan disposables
+    for (const d of projectScanDisposables) {
+        d.dispose();
+    }
+    projectScanDisposables = [];
+
+    const enableProjectScan = isProjectScanEnabled();
+
+    if (enableProjectScan) {
+        // Attach file system watchers for project-level counting
+        projectScanDisposables.push(
+            vscode.workspace.onDidSaveTextDocument(() => {
+                debouncedUpdateProjectCount();
+            }),
+            vscode.workspace.onDidCreateFiles(() => {
+                debouncedUpdateProjectCount();
+            }),
+            vscode.workspace.onDidDeleteFiles(() => {
+                projectCountCache.clear();
+                debouncedUpdateProjectCount();
+            }),
+            // React to text changes that become clean (saved externally)
+            vscode.workspace.onDidChangeTextDocument(e => {
+                if (!e.document.isDirty) {
+                    debouncedUpdateProjectCount();
+                }
+            })
+        );
+
+        // Clear stale cache and kick off immediate scan
+        projectCountCache.clear();
+        debouncedUpdateProjectCount();
+    } else {
+        // Project scan off → reset cached count and hide project status info
+        projectTokenCount = 0;
+        projectCountCache.clear();
+        statusBarManager.updateProjectStatusBar(0);
+    }
+
+    // Push new disposables into context for lifecycle management
+    for (const d of projectScanDisposables) {
+        context.subscriptions.push(d);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════

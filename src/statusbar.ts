@@ -79,6 +79,13 @@ export class StatusBarManager {
                     tooltip += '\n🔴 Exceeds context limit!';
                 }
             }
+
+            // Hint when project-wide scanning is off
+            if (!vscode.workspace.getConfiguration('llm-tokenizer')
+                .get<boolean>('enableProjectScan', true)) {
+                tooltip += `\n\n💡 Set 'enableProjectScan' to true for project-wide counting`;
+            }
+
             this.fileStatusBar.tooltip = tooltip;
 
             this.updateDisplayMode();
@@ -117,20 +124,25 @@ export class StatusBarManager {
     }
 
     /**
-     * Update display based on user configuration
+     * Update display based on user configuration.
+     *
+     * The `enableProjectScan` setting takes precedence: when project
+     * scanning is disabled the project status bar is always hidden,
+     * regardless of `statusBarDisplay`.
      */
     public updateDisplayMode(): void {
         const config = vscode.workspace.getConfiguration('llm-tokenizer');
         const displayMode = config.get<string>('statusBarDisplay', 'file');
+        const enableProjectScan = config.get<boolean>('enableProjectScan', true);
 
         switch (displayMode) {
             case 'project':
                 this.fileStatusBar.hide();
-                this.projectStatusBar.show();
+                this.projectStatusBar[enableProjectScan ? 'show' : 'hide']();
                 break;
             case 'both':
                 this.fileStatusBar.show();
-                this.projectStatusBar.show();
+                this.projectStatusBar[enableProjectScan ? 'show' : 'hide']();
                 break;
             case 'file':
             default:

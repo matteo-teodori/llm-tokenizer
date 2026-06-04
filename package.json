@@ -233,6 +233,11 @@
           "type": "boolean",
           "default": true,
           "description": "Exclude gitignored files from project-wide and directory token counting"
+        },
+        "llm-tokenizer.enableProjectScan": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable/disable project-wide token counting (disable to improve performance on large projects)"
         }
       }
     }
