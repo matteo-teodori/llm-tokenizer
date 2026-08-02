@@ -16,9 +16,17 @@
  */
 
 import * as esbuild from 'esbuild';
+import { rmSync } from 'node:fs';
 
 const watch = process.argv.includes('--watch');
 const production = process.argv.includes('--production');
+
+// esbuild overwrites but never deletes. Without this, a production build after
+// a development one leaves the development source maps behind, and they are
+// then packaged — shipping the full TypeScript source inside the VSIX.
+if (production) {
+    rmSync('out', { recursive: true, force: true });
+}
 
 /**
  * tiktoken encodings we ship. Keep in sync with `TiktokenEncoding`.

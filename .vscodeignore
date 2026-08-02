@@ -4,15 +4,17 @@
 #
 # Deny everything, then allow back only what the extension and the marketplace
 # listing need.
+#
+# The allow-list is deliberately narrow: `!out/**` followed by an `out/**/*.map`
+# exclusion does NOT work — vsce applies negations last, so the broad negation
+# wins and source maps from a development build end up in the VSIX along with
+# the full TypeScript source. Allow only the files we actually ship.
 **
 
-!out/**
+!out/*.js
+!out/encodings/*.js
 !package.json
 !README.md
 !CHANGELOG.md
 !LICENSE
 !icon.png
-
-# Source maps are only emitted by development builds, but exclude them here too
-# so packaging a dev build never leaks them.
-out/**/*.map

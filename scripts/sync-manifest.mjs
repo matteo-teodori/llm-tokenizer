@@ -76,8 +76,17 @@ const manifest = JSON.parse(original);
 const setting = manifest.contributes.configuration.properties['llm-tokenizer.defaultModel'];
 setting.enum = MODELS.map(m => m.id);
 setting.enumItemLabels = MODELS.map(m => m.label);
+/** "1M", "922K" — not "10,485.76K", which is what plain division produced. */
+function formatLimit(tokens) {
+    if (tokens >= 1_000_000) {
+        const millions = tokens / 1_000_000;
+        return `${millions >= 10 ? Math.round(millions) : millions.toFixed(1).replace(/\.0$/, '')}M`;
+    }
+    return `${Math.round(tokens / 1000)}K`;
+}
+
 setting.enumDescriptions = MODELS.map(m => {
-    const limit = m.contextLimit ? `${(m.contextLimit / 1000).toLocaleString('en-US')}K context` : 'no published limit';
+    const limit = m.contextLimit ? `${formatLimit(m.contextLimit)} context` : 'no published limit';
     const accuracy = {
         tiktoken: 'exact',
         hf: 'exact once the tokenizer is downloaded',

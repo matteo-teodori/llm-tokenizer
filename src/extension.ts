@@ -72,6 +72,11 @@ export function activate(context: vscode.ExtensionContext): void {
     void refreshFileStatusBar(vscode.window.activeTextEditor);
     void refreshProjectCount();
 
+    // If the startup model needs a tokenizer and the user has opted into
+    // downloads, fetch it now rather than leaving them on an estimate until
+    // they happen to find the command.
+    void ensureExactTokenizer(currentModel, false);
+
     // An exact tokenizer finishing its download changes every displayed number.
     context.subscriptions.push(
         tokenizer.onDidChangeAccuracy(() => {
@@ -219,10 +224,34 @@ function buildModelPickerItems(): ModelQuickPickItem[] {
  * @param interactive whether to prompt and show progress, or fail silently.
  */
 async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Promise<void> {
-    if (model.encoder.kind !== 'hf' || (await tokenizer.isExact(model))) {
+    // Invoked from the command palette this must always say something. Doing
+    // nothing at all is indistinguishable from the command being broken.
+    if (model.encoder.kind !== 'hf') {
+        if (interactive) {
+            void vscode.window.showInformationMessage(
+                model.encoder.kind === 'tiktoken'
+                    ? `${model.label} is already counted exactly — nothing to download.`
+                    : `${model.provider} does not publish a tokenizer for ${model.label}, so its counts are estimated.`,
+            );
+        }
         return;
     }
+
+    if (await tokenizer.isExact(model)) {
+        if (interactive) {
+            void vscode.window.showInformationMessage(
+                `The ${model.label} tokenizer is already downloaded.`,
+            );
+        }
+        return;
+    }
+
     if (!vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('downloadTokenizers', true)) {
+        if (interactive) {
+            void vscode.window.showWarningMessage(
+                'Tokenizer downloads are turned off. Enable llm-tokenizer.downloadTokenizers to get exact counts.',
+            );
+        }
         return;
     }
 
@@ -305,6 +334,25 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
 
             if (e.affectsConfiguration(`${CONFIG_SECTION}.ignoreGitignoredFiles`)) {
                 countCache.clear();
+            }
+
+            // `defaultModel` is only the fallback for a user who has never
+            // picked a model from the status bar, so an explicit choice still
+            // wins. Without this the setting appeared to do nothing until the
+            // window was reloaded.
+            if (e.affectsConfiguration(`${CONFIG_SECTION}.defaultModel`) &&
+                !context.globalState.get<string>(STORAGE_KEY)) {
+                const configured = vscode.workspace
+                    .getConfiguration(CONFIG_SECTION)
+                    .get<string>('defaultModel');
+                const model = configured ? findModel(configured) : undefined;
+                if (model && model.id !== currentModel.id) {
+                    currentModel = model;
+                    countCache.clear();
+                    log.info(`Default model changed to ${model.id}`);
+                    void refreshFileStatusBar(vscode.window.activeTextEditor);
+                    void ensureExactTokenizer(model, false);
+                }
             }
 
             statusBar.applyDisplayMode(isProjectScanEnabled());
@@ -437,7 +485,17 @@ async function walkDirectory(
     context: FolderContext,
     result: ScanResult,
     token: vscode.CancellationToken,
+    visited: Set<string> = new Set(),
 ): Promise<void> {
+    // A symlink pointing at an ancestor makes the walk recurse forever, or at
+    // best counts the same tree several times over. Following each directory
+    // once is enough for a token total.
+    const identity = uri.toString();
+    if (visited.has(identity)) {
+        return;
+    }
+    visited.add(identity);
+
     let entries: [string, vscode.FileType][];
     try {
         entries = await vscode.workspace.fs.readDirectory(uri);
@@ -454,7 +512,7 @@ async function walkDirectory(
 
         if (isDirectory(type)) {
             if (shouldDescend(name, child, context)) {
-                await walkDirectory(child, context, result, token);
+                await walkDirectory(child, context, result, token, visited);
             } else if (context.isIgnored(child, true)) {
                 result.ignored.push({ path: child.fsPath });
             }
@@ -617,6 +675,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
             }
 
             showMultiFileSummary({
+                cancelled: token.isCancellationRequested,
                 totalTokens: result.total,
                 filesProcessed: result.processed.length,
                 processedFiles: result.processed,

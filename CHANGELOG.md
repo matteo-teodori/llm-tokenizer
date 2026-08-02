@@ -83,11 +83,14 @@ either exact or visibly marked as estimates.
 - Declares `untrustedWorkspaces` support, so it no longer disables itself in
   Restricted Mode.
 - The icon was a JPEG named `.png` at 1024×1024; it is now a real 256×256 PNG.
+- Minimum VS Code version is now 1.105 (was 1.85), for the logging and status
+  bar APIs this release uses.
 
 ### Internal
-- A test suite: 71 tests running in a real VS Code instance, written against
+- A test suite: 83 tests running in a real VS Code instance, written against
   the specific defects fixed above.
-- ESLint and the type checker both run again, and in CI on three platforms.
+- ESLint and the type checker run again, and the suite runs in CI on Linux,
+  Windows and macOS.
 - The settings dropdown is generated from the model registry, so the two can no
   longer drift.
 

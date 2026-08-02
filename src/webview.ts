@@ -16,6 +16,8 @@ export interface MultiFileSummaryConfig {
     modelLabel: string;
     /** False when any file in the run was counted by heuristic. */
     exact: boolean;
+    /** True when the user stopped the run, so the total covers only part of it. */
+    cancelled: boolean;
     contextStatus: ContextStatusResult;
 }
 
@@ -107,6 +109,7 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
         ignoredFiles,
         modelLabel,
         exact,
+        cancelled,
         contextStatus
     } = config;
 
@@ -198,6 +201,11 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
             font-size: 0.9em;
             font-style: italic;
         }
+        .cancelled {
+            color: var(--vscode-editorWarning-foreground);
+            font-weight: 500;
+            margin: 12px 0;
+        }
         .truncation {
             color: var(--vscode-descriptionForeground);
             font-size: 0.9em;
@@ -217,6 +225,7 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
 <body>
     <h1><span class="icon">${icon}</span>Multi-file Summary</h1>
     <p><strong>Total Tokens:</strong> ${exact ? '' : '≈'}${formatNumber(totalTokens)}${exact ? '' : ' <em>(estimated)</em>'}</p>
+    ${cancelled ? '<p class="cancelled">⚠️ Cancelled — this total covers only the files counted before you stopped it.</p>' : ''}
     <p><strong>Files Processed:</strong> ${filesProcessed}</p>
     ${skippedFiles.length > 0 ? `<p><strong>Files Skipped:</strong> ${skippedFiles.length}</p>` : ''}
     ${ignoredFiles.length > 0 ? `<p><strong>Files Ignored:</strong> ${ignoredFiles.length}</p>` : ''}
