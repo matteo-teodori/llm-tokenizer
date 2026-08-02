@@ -36,6 +36,18 @@ export class FolderContext {
         private readonly ig: Ignore | undefined,
     ) {}
 
+    /**
+     * A context for files that belong to no workspace folder — a standalone
+     * file opened on its own, or one outside every root. Nothing to match
+     * `.gitignore` against, so nothing is ignored.
+     *
+     * These used to be skipped outright, so counting such a file reported a
+     * total of zero with no indication why.
+     */
+    static none(root: vscode.Uri): FolderContext {
+        return new FolderContext({ uri: root, name: '', index: 0 }, undefined);
+    }
+
     static async create(
         folder: vscode.WorkspaceFolder,
         respectGitignore: boolean,

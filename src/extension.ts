@@ -506,18 +506,66 @@ async function recordFile(
     result.processed.push({ path: uri.fsPath, tokens: outcome.count });
 }
 
+/** Count one file and report it as a notification. */
+async function countSingleFile(uri: vscode.Uri, size: number): Promise<void> {
+    const name = path.basename(uri.fsPath);
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    const context = folder
+        ? await FolderContext.create(folder, respectGitignore())
+        : FolderContext.none(uri);
+
+    const skip = shouldCount(uri, size, context);
+    if (skip && skip !== 'gitignored') {
+        void vscode.window.showWarningMessage(
+            `LLM Tokenizer: ${name} was not counted — ${describeSkipReason(skip).toLowerCase()}.`,
+        );
+        return;
+    }
+
+    const outcome = await countFile(uri, size);
+    if (!isCounted(outcome)) {
+        void vscode.window.showWarningMessage(
+            `LLM Tokenizer: ${name} was not counted — ${describeSkipReason(outcome.skip).toLowerCase()}.`,
+        );
+        return;
+    }
+
+    void vscode.window.showInformationMessage(
+        `${name}: ${outcome.exact ? '' : '≈'}${formatNumber(outcome.count)} tokens (${currentModel.label})`,
+    );
+}
+
 async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
     const selection = dedupeSelection(uris);
 
-    // A single file with an active selection means "count what I highlighted".
     if (selection.length === 1) {
+        const only = selection[0];
+
+        // A single file with an active selection means "count what I highlighted".
         const editor = vscode.window.activeTextEditor;
         if (
             editor &&
             !editor.selection.isEmpty &&
-            editor.document.uri.toString() === selection[0].toString()
+            editor.document.uri.toString() === only.toString()
         ) {
             await countActiveEditor();
+            return;
+        }
+
+        // One file answers with a notification. Opening a full summary panel
+        // listing a single row is a lot of ceremony for one number.
+        let stat: vscode.FileStat | undefined;
+        try {
+            stat = await vscode.workspace.fs.stat(only);
+        } catch {
+            void vscode.window.showErrorMessage(
+                `LLM Tokenizer: could not read ${path.basename(only.fsPath)}.`,
+            );
+            return;
+        }
+
+        if (!isDirectory(stat.type)) {
+            await countSingleFile(only, stat.size);
             return;
         }
     }
@@ -541,16 +589,16 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                 });
 
                 const folder = vscode.workspace.getWorkspaceFolder(uri);
-                if (!folder) {
-                    continue;
-                }
 
                 // Built once per folder, not once per selected URI: v1.3.0 read
                 // and re-parsed .gitignore for every single file selected.
-                let context = contexts.get(folder.uri.toString());
+                const contextKey = folder?.uri.toString() ?? '';
+                let context = contexts.get(contextKey);
                 if (!context) {
-                    context = await FolderContext.create(folder, useGitignore);
-                    contexts.set(folder.uri.toString(), context);
+                    context = folder
+                        ? await FolderContext.create(folder, useGitignore)
+                        : FolderContext.none(uri);
+                    contexts.set(contextKey, context);
                 }
 
                 let stat: vscode.FileStat;

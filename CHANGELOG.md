@@ -47,7 +47,9 @@ either exact or visibly marked as estimates.
 - Very large files are skipped instead of exhausting memory.
 - Changing a setting now takes effect immediately.
 - Selecting a folder and a file inside it no longer double-counts the file.
-- `.git/info/exclude` and nested `.gitignore` rules are honoured.
+- `.git/info/exclude` is honoured alongside the root `.gitignore`.
+- Counting a file that belongs to no workspace folder reported a total of zero;
+  it was being dropped before it was ever read.
 - Binary files without a known extension — `.dat`, `.pack`, a renamed binary,
   anything extensionless — were tokenized as text. Content is now sniffed too.
 - In a multi-root workspace, files with the same relative path in two roots

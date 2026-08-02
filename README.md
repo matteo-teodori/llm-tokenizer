@@ -69,7 +69,8 @@ is migrated automatically.
 |------------|--------|----------|
 | OpenAI     | GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 (+mini), GPT-5.3 Codex, GPT-5.2, GPT-5.1, GPT-5, GPT-4.1, GPT-4o (+mini), o3, o4-mini, gpt-oss 120b/20b, GPT-4 Turbo, GPT-3.5 Turbo | Exact |
 | Anthropic  | Claude Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
-| Google     | Gemini 3.6 Flash, 3.5 Flash (+Lite), 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
+| Google     | Gemini 3.5 Flash, 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
+| Google     | Gemini 3.6 Flash, 3.5 Flash-Lite | Estimated² |
 | xAI        | Grok 4.5, Grok 4.3, Grok 4.20, Grok Build 0.1 | Estimated |
 | DeepSeek   | DeepSeek V4 Pro, V4 Flash | Exact¹ |
 | Meta       | Llama 4 Scout, Llama 4 Maverick, Llama 3.3 70B, Llama 3.1 8B | Exact¹ |
@@ -82,6 +83,8 @@ is migrated automatically.
 | Tencent    | Hunyuan Hy3 | Exact¹ |
 
 ¹ after a one-time tokenizer download
+² these two releases are too recent for Google's SDK to map them to a published
+vocabulary, so they fall back to a character estimate
 
 ## Usage
 
@@ -121,6 +124,15 @@ There are three tiers, and the status bar tells you which one you are in.
 tokenizer for any current model, and Anthropic explicitly advises against
 approximating Claude with OpenAI's tokenizer. An honest estimate is better than
 a confident wrong number, so those models are marked rather than dressed up.
+
+The per-family ratios are measured against real corpora where a tokenizer
+exists to measure against. Grok is the exception: no Grok tokenizer has ever
+been published, so its ratio is inferred rather than measured, and it is the
+least reliable number here.
+
+**Known limitation:** only the `.gitignore` at the root of each workspace
+folder is read, plus `.git/info/exclude`. Nested `.gitignore` files deeper in
+the tree are not applied.
 
 Earlier versions approximated everything with `cl100k_base` and a fudge factor.
 Measured against the real tokenizers, that undercounted Gemini on JSON by 27%
