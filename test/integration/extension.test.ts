@@ -88,61 +88,77 @@ suite('extension', () => {
         await vscode.commands.executeCommand('llm-tokenizer.countTokens', folder.uri);
     });
 
-    test('a walk of the fixture workspace counts exactly the right files', async () => {
-        // The fixture is built to be awkward on purpose: a node_modules tree, a
-        // directory excluded by the fixture's own .gitignore, a file excluded
-        // by a glob, and a file containing NUL bytes.
+    test('discovery over the fixture workspace finds exactly the right files', async () => {
+        // The fixture is awkward on purpose: a node_modules tree, a directory
+        // excluded by its own .gitignore, a file excluded by a glob, and a file
+        // full of NUL bytes. This drives the extension's real discovery walk —
+        // an earlier version of this test reimplemented the walk and so could
+        // agree with itself while disagreeing with the extension.
         const folder = vscode.workspace.workspaceFolders?.[0];
         assert.ok(folder);
 
-        const { FolderContext, shouldCount, shouldDescend, isDirectory, isFile, looksBinary } =
-            await import('../../src/scan');
+        const { FolderContext, collectFiles, shouldCount, looksBinary } = await import('../../src/scan');
         const context = await FolderContext.create(folder, true);
+        const cancellation = new vscode.CancellationTokenSource();
 
-        const counted: string[] = [];
-        const excluded: string[] = [];
+        try {
+            const discovery = await collectFiles(folder.uri, context, cancellation.token);
+            const relative = (uri: vscode.Uri) =>
+                uri.path.slice(folder.uri.path.length + 1);
 
-        const walk = async (dir: vscode.Uri, prefix: string): Promise<void> => {
-            for (const [name, type] of await vscode.workspace.fs.readDirectory(dir)) {
-                const child = vscode.Uri.joinPath(dir, name);
-                const label = prefix ? `${prefix}/${name}` : name;
-
-                if (isDirectory(type)) {
-                    if (shouldDescend(name, child, context)) {
-                        await walk(child, label);
-                    } else {
-                        excluded.push(`${label}/`);
-                    }
+            const counted: string[] = [];
+            for (const file of discovery.files) {
+                if (shouldCount(file.uri, file.size, context)) {
                     continue;
                 }
-                if (!isFile(type)) {
+                if (looksBinary(await vscode.workspace.fs.readFile(file.uri))) {
                     continue;
                 }
-
-                const size = (await vscode.workspace.fs.stat(child)).size;
-                if (shouldCount(child, size, context)) {
-                    excluded.push(label);
-                } else if (looksBinary(await vscode.workspace.fs.readFile(child))) {
-                    excluded.push(label);
-                } else {
-                    counted.push(label);
-                }
+                counted.push(relative(file.uri));
             }
-        };
 
-        await walk(folder.uri, '');
-
-        assert.deepStrictEqual(
-            counted.sort(),
-            ['.gitignore', 'README.md', 'src/a.txt', 'src/b.ts'],
-            'unexpected set of counted files',
-        );
-
-        for (const expected of ['node_modules/', 'vendor/', 'scratch.tmp', 'src/blob.png']) {
-            assert.ok(
-                excluded.some(e => e === expected),
-                `${expected} should have been excluded, got: ${excluded.sort().join(', ')}`,
+            assert.deepStrictEqual(
+                counted.sort(),
+                ['.gitignore', 'README.md', 'src/a.txt', 'src/b.ts'],
+                'unexpected set of counted files',
             );
+
+            // node_modules is excluded by name and so is never even offered;
+            // vendor/ is excluded by the fixture's own .gitignore, which is the
+            // case worth reporting to the user.
+            assert.deepStrictEqual(discovery.ignoredDirectories.map(relative), ['vendor']);
+            assert.ok(
+                !discovery.files.some(f => relative(f.uri).startsWith('node_modules/')),
+                'node_modules must never be walked',
+            );
+        } finally {
+            cancellation.dispose();
+        }
+    });
+
+    test('discovery reports progress as it finds files', async () => {
+        // The progress notification needs a running total; without one it used
+        // to report per selected item, so one folder of thousands of files
+        // showed "1/1" and then nothing.
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        assert.ok(folder);
+
+        const { FolderContext, collectFiles } = await import('../../src/scan');
+        const context = await FolderContext.create(folder, true);
+        const cancellation = new vscode.CancellationTokenSource();
+
+        try {
+            const seen: number[] = [];
+            const discovery = await collectFiles(folder.uri, context, cancellation.token, n => seen.push(n));
+
+            assert.strictEqual(seen.length, discovery.files.length, 'one report per file found');
+            assert.deepStrictEqual(
+                seen,
+                seen.map((_, i) => i + 1),
+                'the running total must increase by one each time',
+            );
+        } finally {
+            cancellation.dispose();
         }
     });
 });

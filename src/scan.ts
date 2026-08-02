@@ -189,6 +189,92 @@ export function dedupeSelection(uris: readonly vscode.Uri[]): vscode.Uri[] {
     return kept;
 }
 
+/** A file the walk found, with the size already read from its stat. */
+export interface DiscoveredFile {
+    uri: vscode.Uri;
+    size: number;
+}
+
+export interface Discovery {
+    files: DiscoveredFile[];
+    /** Directories skipped because `.gitignore` excludes them. */
+    ignoredDirectories: vscode.Uri[];
+    /** Files whose stat failed — deleted mid-walk, or unreadable. */
+    unreadable: vscode.Uri[];
+}
+
+/**
+ * Walk a directory tree, collecting the files worth counting.
+ *
+ * Discovery is deliberately separate from counting. Interleaving them meant the
+ * progress notification could only report per *selected item*, so right-clicking
+ * one folder of 5,000 files showed "1/1: foldername" and then sat motionless for
+ * the whole scan. Listing directories is cheap next to reading and tokenizing
+ * them, so doing it up front costs little and buys a real denominator.
+ *
+ * `onProgress` is called with the running total; throttling is the caller's job.
+ */
+export async function collectFiles(
+    root: vscode.Uri,
+    context: FolderContext,
+    token: vscode.CancellationToken,
+    onProgress: (found: number) => void = () => undefined,
+): Promise<Discovery> {
+    const discovery: Discovery = { files: [], ignoredDirectories: [], unreadable: [] };
+    // A symlink pointing at an ancestor makes the walk recurse forever, or at
+    // best count the same tree several times over.
+    const visited = new Set<string>();
+
+    const walk = async (dir: vscode.Uri): Promise<void> => {
+        const identity = dir.toString();
+        if (visited.has(identity)) {
+            return;
+        }
+        visited.add(identity);
+
+        let entries: [string, vscode.FileType][];
+        try {
+            entries = await vscode.workspace.fs.readDirectory(dir);
+        } catch {
+            return;
+        }
+
+        for (const [name, type] of entries) {
+            if (token.isCancellationRequested) {
+                return;
+            }
+
+            const child = vscode.Uri.joinPath(dir, name);
+
+            if (isDirectory(type)) {
+                if (shouldDescend(name, child, context)) {
+                    await walk(child);
+                } else if (context.isIgnored(child, true)) {
+                    discovery.ignoredDirectories.push(child);
+                }
+                continue;
+            }
+
+            if (!isFile(type)) {
+                continue;
+            }
+
+            try {
+                const { size } = await vscode.workspace.fs.stat(child);
+                discovery.files.push({ uri: child, size });
+                onProgress(discovery.files.length);
+            } catch {
+                // One deleted file used to abort the whole run and discard
+                // every count already computed.
+                discovery.unreadable.push(child);
+            }
+        }
+    };
+
+    await walk(root);
+    return discovery;
+}
+
 /** `FileType` is a bitmask — a symlinked directory is `Directory | SymbolicLink`. */
 export function isDirectory(type: vscode.FileType): boolean {
     return (type & vscode.FileType.Directory) !== 0;

@@ -58,6 +58,11 @@ either exact or visibly marked as estimates.
 - The summary rendered one row and one click listener per file and held them
   for the lifetime of the window. Listings are capped at 1,000 entries, largest
   first, with the omission stated; totals still cover every file.
+- **Progress during a multi-file count now means something.** It reported per
+  *selected item*, so right-clicking a single folder of 5,000 files showed
+  "1/1: foldername" and then sat motionless for the entire scan. Files are
+  discovered first — a cheap pass — and the count then reports "1,234 of 5,678
+  files" against a real total.
 
 ### Security
 - The summary view escaped nothing. A file named `<img src=x onerror=…>.ts`
@@ -87,7 +92,7 @@ either exact or visibly marked as estimates.
   bar APIs this release uses.
 
 ### Internal
-- A test suite: 83 tests running in a real VS Code instance, written against
+- A test suite: 85 tests running in a real VS Code instance, written against
   the specific defects fixed above.
 - ESLint and the type checker run again, and the suite runs in CI on Linux,
   Windows and macOS.

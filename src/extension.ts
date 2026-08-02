@@ -13,11 +13,10 @@ import {
     buildExcludeGlob,
     dedupeSelection,
     describeSkipReason,
+    collectFiles,
     isDirectory,
-    isFile,
     looksBinary,
     shouldCount,
-    shouldDescend,
     type SkipReason,
 } from './scan';
 import { CountCache } from './countCache';
@@ -506,63 +505,6 @@ async function countFile(
     }
 }
 
-async function walkDirectory(
-    uri: vscode.Uri,
-    context: FolderContext,
-    result: ScanResult,
-    token: vscode.CancellationToken,
-    visited: Set<string> = new Set(),
-): Promise<void> {
-    // A symlink pointing at an ancestor makes the walk recurse forever, or at
-    // best counts the same tree several times over. Following each directory
-    // once is enough for a token total.
-    const identity = uri.toString();
-    if (visited.has(identity)) {
-        return;
-    }
-    visited.add(identity);
-
-    let entries: [string, vscode.FileType][];
-    try {
-        entries = await vscode.workspace.fs.readDirectory(uri);
-    } catch {
-        return;
-    }
-
-    for (const [name, type] of entries) {
-        if (token.isCancellationRequested) {
-            return;
-        }
-
-        const child = vscode.Uri.joinPath(uri, name);
-
-        if (isDirectory(type)) {
-            if (shouldDescend(name, child, context)) {
-                await walkDirectory(child, context, result, token, visited);
-            } else if (context.isIgnored(child, true)) {
-                result.ignored.push({ path: child.fsPath });
-            }
-            continue;
-        }
-
-        if (!isFile(type)) {
-            continue;
-        }
-
-        let size: number;
-        try {
-            size = (await vscode.workspace.fs.stat(child)).size;
-        } catch {
-            // One deleted file used to abort the whole run and discard every
-            // count already computed.
-            result.skipped.push({ path: child.fsPath, reason: describeSkipReason('unreadable') });
-            continue;
-        }
-
-        await recordFile(child, size, context, result);
-    }
-}
-
 async function recordFile(
     uri: vscode.Uri,
     size: number,
@@ -660,17 +602,30 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
             const result: ScanResult = { total: 0, processed: [], skipped: [], ignored: [], exact: true };
             const contexts = new Map<string, FolderContext>();
             const useGitignore = respectGitignore();
+            /** A file to count, with the folder context that governs it. */
+            const candidates: { uri: vscode.Uri; size: number; context: FolderContext }[] = [];
+            // Carried across selected folders so the running total is for the
+            // whole selection, not restarted per folder.
+            let base = 0;
 
-            for (let i = 0; i < selection.length; i++) {
+            // ── Discovery ────────────────────────────────────────────────────
+            // Listing directories is cheap next to reading and tokenizing them,
+            // so this pass finishes quickly and buys an honest denominator for
+            // the pass that does not.
+            let lastReport = 0;
+            const reportFound = (n: number): void => {
+                // Every ~250 files: reporting per file floods the window with
+                // IPC for numbers nobody can read at that rate.
+                if (n - lastReport >= 250) {
+                    lastReport = n;
+                    progress.report({ message: `Finding files… ${n.toLocaleString()} found` });
+                }
+            };
+
+            for (const uri of selection) {
                 if (token.isCancellationRequested) {
                     break;
                 }
-
-                const uri = selection[i];
-                progress.report({
-                    message: `${i + 1}/${selection.length}: ${path.basename(uri.fsPath)}`,
-                    increment: 100 / selection.length,
-                });
 
                 const folder = vscode.workspace.getWorkspaceFolder(uri);
 
@@ -694,10 +649,46 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                 }
 
                 if (isDirectory(stat.type)) {
-                    await walkDirectory(uri, context, result, token);
+                    const found = await collectFiles(uri, context, token, n => reportFound(base + n));
+                    base += found.files.length;
+                    for (const file of found.files) {
+                        candidates.push({ ...file, context });
+                    }
+                    for (const dir of found.ignoredDirectories) {
+                        result.ignored.push({ path: dir.fsPath });
+                    }
+                    for (const bad of found.unreadable) {
+                        result.skipped.push({ path: bad.fsPath, reason: describeSkipReason('unreadable') });
+                    }
                 } else {
-                    await recordFile(uri, stat.size, context, result);
+                    candidates.push({ uri, size: stat.size, context });
                 }
+            }
+
+            // ── Counting ─────────────────────────────────────────────────────
+            const total = candidates.length;
+            // At most ~100 updates over the run, whatever the size, with the
+            // skipped increments carried so the bar still reaches the end.
+            const step = Math.max(1, Math.floor(total / 100));
+            let pending = 0;
+
+            for (let i = 0; i < total; i++) {
+                if (token.isCancellationRequested) {
+                    break;
+                }
+
+                const { uri, size, context } = candidates[i];
+                pending++;
+
+                if (pending >= step || i === total - 1) {
+                    progress.report({
+                        message: `${(i + 1).toLocaleString()} of ${total.toLocaleString()} files`,
+                        increment: (100 / total) * pending,
+                    });
+                    pending = 0;
+                }
+
+                await recordFile(uri, size, context, result);
             }
 
             showMultiFileSummary({
