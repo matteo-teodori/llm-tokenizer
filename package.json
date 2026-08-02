@@ -367,7 +367,7 @@
     "lint": "eslint .",
     "pretest": "npm run compile-tests && npm run build",
     "test": "vscode-test",
-    "release": "npm run package && vsce package",
+    "release": "npm run package && vsce package --no-dependencies",
     "compile-tests": "tsc -p tsconfig.test.json"
   },
   "devDependencies": {

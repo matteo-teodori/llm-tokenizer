@@ -47,7 +47,7 @@ jobs:
           fi
 
       - name: Package
-        run: npx @vscode/vsce package --out llm-tokenizer.vsix
+        run: npx @vscode/vsce package --no-dependencies --out llm-tokenizer.vsix
 
       - uses: actions/upload-artifact@v4
         with:
@@ -58,7 +58,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx @vscode/vsce publish --packagePath llm-tokenizer.vsix
+        run: npx @vscode/vsce publish --no-dependencies --packagePath llm-tokenizer.vsix
 
       - name: Publish to Open VSX
         if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run

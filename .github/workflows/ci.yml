@@ -73,7 +73,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - run: npx @vscode/vsce package --out llm-tokenizer.vsix
+      - run: npx @vscode/vsce package --no-dependencies --out llm-tokenizer.vsix
 
       # A sudden jump here almost always means the bundle broke and the raw
       # dependency tree is being packaged again.
