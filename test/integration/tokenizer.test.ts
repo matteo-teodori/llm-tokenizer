@@ -17,22 +17,52 @@ function model(id: string): ModelInfo {
     return found;
 }
 
+/**
+ * Place the fixture tokenizer in the store as if it had been downloaded.
+ *
+ * Mirrors TokenizerStore's on-disk layout: one directory per repo, with the
+ * slash flattened.
+ */
+async function seedTokenizer(storage: vscode.Uri, repo: string): Promise<void> {
+    const fixture = vscode.Uri.file(path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'tokenizer'));
+    const target = vscode.Uri.joinPath(storage, repo.replace(/[/\\]/g, '--'));
+    await vscode.workspace.fs.createDirectory(target);
+
+    for (const name of ['tokenizer.json', 'tokenizer_config.json']) {
+        await vscode.workspace.fs.copy(
+            vscode.Uri.joinPath(fixture, name),
+            vscode.Uri.joinPath(target, name),
+            { overwrite: true },
+        );
+    }
+}
+
 suite('tokenizer service', () => {
     let log: vscode.LogOutputChannel;
     let store: TokenizerStore;
     let tokenizer: TokenizerService;
+    let storageUri: vscode.Uri;
+    let testIndex = 0;
 
     setup(() => {
         log = vscode.window.createOutputChannel('LLM Tokenizer (test)', { log: true });
-        store = new TokenizerStore(
-            vscode.Uri.file(path.join(os.tmpdir(), `llm-tokenizer-test-${process.pid}`)),
+        // A fresh directory per test: one of these seeds a tokenizer, and the
+        // others assert that nothing has been downloaded.
+        storageUri = vscode.Uri.file(
+            path.join(os.tmpdir(), `llm-tokenizer-test-${process.pid}-${testIndex++}`),
         );
+        store = new TokenizerStore(storageUri);
         tokenizer = new TokenizerService(WORKER, store, log);
     });
 
-    teardown(() => {
+    teardown(async () => {
         tokenizer.dispose();
         log.dispose();
+        try {
+            await vscode.workspace.fs.delete(storageUri, { recursive: true, useTrash: false });
+        } catch {
+            // Never created, which is the common case.
+        }
     });
 
     test('counts OpenAI models exactly, with known values', async () => {
@@ -142,24 +172,44 @@ suite('tokenizer service', () => {
         assert.strictEqual(result.exact, false, 'a fallback count is an estimate');
     });
 
-    test('a downloaded tokenizer survives the worker restarting', async () => {
-        // The worker forgets its loaded tokenizers when it dies. Without
-        // re-hydration every later count for that model quietly degrades to an
-        // estimate — correctly labelled, but permanently.
+    test('an undownloaded model stays an estimate, and never fetches mid-count', async () => {
         const llama = model('llama-3.3-70b');
         assert.strictEqual(llama.encoder.kind, 'hf');
 
-        // Nothing has been downloaded in this test's storage directory, so the
-        // count is an estimate and re-hydration must not start a download.
-        const before = await tokenizer.count('text', llama);
-        assert.strictEqual(before.exact, false);
+        const result = await tokenizer.count('text', llama);
+        assert.strictEqual(result.exact, false);
+        assert.ok(Number.isFinite(result.count) && result.count > 0);
+        assert.strictEqual(
+            await store.isDownloaded(llama.encoder.repo),
+            false,
+            'counting must not trigger a download on its own',
+        );
+    });
 
+    test('a downloaded tokenizer is used, and survives the worker restarting', async () => {
+        // Seeded from a tiny fixture rather than the network: the earlier
+        // version of this test never put a tokenizer in the store at all, so it
+        // asserted that an estimate stayed an estimate and proved nothing about
+        // the path it claimed to cover.
+        const llama = model('llama-3.3-70b');
+        assert.strictEqual(llama.encoder.kind, 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens and no
+        // character heuristic would land on that number.
+        const first = await tokenizer.count('abc', llama);
+        assert.strictEqual(first.exact, true, 'a seeded tokenizer should give an exact count');
+        assert.strictEqual(first.count, 2);
+
+        // The worker forgets its loaded tokenizers when it dies. Without
+        // re-hydration every later count silently degrades to an estimate —
+        // correctly labelled, but permanently.
         tokenizer.dispose();
         tokenizer = new TokenizerService(WORKER, store, log);
 
-        const after = await tokenizer.count('text', llama);
-        assert.strictEqual(after.count, before.count, 'the estimate should be stable across a restart');
-        assert.strictEqual(after.exact, false);
+        const afterRestart = await tokenizer.count('abc', llama);
+        assert.strictEqual(afterRestart.exact, true, 'exactness must survive a worker restart');
+        assert.strictEqual(afterRestart.count, 2);
     });
 
     test('large input is counted without blocking the host', async () => {

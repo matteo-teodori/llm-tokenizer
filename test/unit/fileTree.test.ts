@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as path from 'path';
 
 import {
     buildFileTree,
@@ -12,12 +13,23 @@ function countListItems(html: string): number {
     return (html.match(/<li /g) ?? []).length;
 }
 
+/**
+ * A platform-native absolute path.
+ *
+ * buildFileTree splits on `path.sep`, so hardcoded POSIX paths collapse to a
+ * single node on Windows — the tree assertions would still pass, but for the
+ * wrong reason, and would stop testing anything at all.
+ */
+function p(...segments: string[]): string {
+    return path.resolve(path.sep, ...segments);
+}
+
 suite('file tree', () => {
     test('folder totals are the sum of their descendants', () => {
         const tree = buildFileTree([
-            { path: '/repo/src/a.ts', tokens: 10 },
-            { path: '/repo/src/nested/b.ts', tokens: 5 },
-            { path: '/repo/README.md', tokens: 7 },
+            { path: p('repo', 'src', 'a.ts'), tokens: 10 },
+            { path: p('repo', 'src', 'nested', 'b.ts'), tokens: 5 },
+            { path: p('repo', 'README.md'), tokens: 7 },
         ]);
         assert.strictEqual(tree.tokens, 22);
     });
@@ -30,7 +42,7 @@ suite('file tree', () => {
     test('file names are escaped in the rendered tree', () => {
         // A file may legitimately be named this on macOS and Linux, and the
         // webview runs with scripts enabled.
-        const tree = buildFileTree([{ path: '/repo/<img src=x onerror=alert(1)>.ts', tokens: 1 }]);
+        const tree = buildFileTree([{ path: p('repo', '<img src=x onerror=alert(1)>.ts'), tokens: 1 }]);
         const html = renderTreeAsHtml(tree, true);
 
         assert.ok(!html.includes('<img'), 'raw tag reached the document');
@@ -38,7 +50,7 @@ suite('file tree', () => {
     });
 
     test('a skip reason of undefined does not render the string "undefined"', () => {
-        const tree = buildFileTree([{ path: '/repo/a.bin' }]);
+        const tree = buildFileTree([{ path: p('repo', 'a.bin') }]);
         const html = renderTreeAsHtml(tree, true);
         assert.ok(!html.includes('undefined'), html);
     });
@@ -48,7 +60,7 @@ suite('file tree', () => {
         // multi-megabyte string and one DOM node per file for the lifetime of
         // the window.
         const files = Array.from({ length: 2500 }, (_, i) => ({
-            path: `/repo/src/file-${i}.ts`,
+            path: p('repo', 'src', `file-${i}.ts`),
             tokens: i,
         }));
 
@@ -62,7 +74,7 @@ suite('file tree', () => {
 
     test('the cap keeps the largest files', () => {
         const files = Array.from({ length: 1500 }, (_, i) => ({
-            path: `/repo/f${i}.ts`,
+            path: p('repo', `f${i}.ts`),
             tokens: i,
         }));
         const html = buildProcessedFilesHtml(files);
@@ -72,7 +84,7 @@ suite('file tree', () => {
     });
 
     test('a listing at exactly the cap is not truncated', () => {
-        const files = Array.from({ length: 1000 }, (_, i) => ({ path: `/repo/f${i}.ts`, tokens: 1 }));
+        const files = Array.from({ length: 1000 }, (_, i) => ({ path: p('repo', `f${i}.ts`), tokens: 1 }));
         assert.ok(!buildProcessedFilesHtml(files).includes('more, not listed'));
     });
 });

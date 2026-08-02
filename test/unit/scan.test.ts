@@ -227,6 +227,8 @@ suite('directory traversal', () => {
 
 suite('selection deduplication', () => {
     test('a file inside a selected folder is not counted twice', () => {
+        // Uri.path is always POSIX-shaped, even on Windows, so these are safe
+        // to compare literally.
         const deduped = dedupeSelection([
             vscode.Uri.file('/repo/src'),
             vscode.Uri.file('/repo/src/a.ts'),

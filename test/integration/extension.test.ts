@@ -73,26 +73,76 @@ suite('extension', () => {
         assert.strictEqual(manifest.capabilities?.untrustedWorkspaces?.supported, true);
     });
 
-    test('counting a file in the fixture workspace produces a plausible number', async () => {
+    test('the count commands run against real files without throwing', async () => {
         const folder = vscode.workspace.workspaceFolders?.[0];
         assert.ok(folder, 'the test host should open the fixture workspace');
 
-        const uri = vscode.Uri.joinPath(folder.uri, 'src', 'b.ts');
-        const document = await vscode.workspace.openTextDocument(uri);
-        assert.strictEqual(document.getText().trim(), 'const x = 42;');
+        const file = vscode.Uri.joinPath(folder.uri, 'src', 'b.ts');
+        assert.strictEqual((await vscode.workspace.openTextDocument(file)).getText().trim(), 'const x = 42;');
 
-        // The command shows a notification rather than returning a value, so
-        // this asserts it runs without throwing on a real file.
-        await vscode.commands.executeCommand('llm-tokenizer.countTokens', uri);
+        // These report through notifications and a webview panel, so there is
+        // no return value to assert on — this covers only that a single file
+        // and a full directory walk both complete. What actually gets counted
+        // is asserted in the walk test below.
+        await vscode.commands.executeCommand('llm-tokenizer.countTokens', file);
+        await vscode.commands.executeCommand('llm-tokenizer.countTokens', folder.uri);
     });
 
-    test('counting a folder honours the fixture .gitignore and skips node_modules', async () => {
+    test('a walk of the fixture workspace counts exactly the right files', async () => {
+        // The fixture is built to be awkward on purpose: a node_modules tree, a
+        // directory excluded by the fixture's own .gitignore, a file excluded
+        // by a glob, and a file containing NUL bytes.
         const folder = vscode.workspace.workspaceFolders?.[0];
         assert.ok(folder);
 
-        // Opens the summary webview; the assertion is that a directory walk
-        // over a tree containing node_modules, an ignored directory, an
-        // ignored glob and a binary file completes without throwing.
-        await vscode.commands.executeCommand('llm-tokenizer.countTokens', folder.uri);
+        const { FolderContext, shouldCount, shouldDescend, isDirectory, isFile, looksBinary } =
+            await import('../../src/scan');
+        const context = await FolderContext.create(folder, true);
+
+        const counted: string[] = [];
+        const excluded: string[] = [];
+
+        const walk = async (dir: vscode.Uri, prefix: string): Promise<void> => {
+            for (const [name, type] of await vscode.workspace.fs.readDirectory(dir)) {
+                const child = vscode.Uri.joinPath(dir, name);
+                const label = prefix ? `${prefix}/${name}` : name;
+
+                if (isDirectory(type)) {
+                    if (shouldDescend(name, child, context)) {
+                        await walk(child, label);
+                    } else {
+                        excluded.push(`${label}/`);
+                    }
+                    continue;
+                }
+                if (!isFile(type)) {
+                    continue;
+                }
+
+                const size = (await vscode.workspace.fs.stat(child)).size;
+                if (shouldCount(child, size, context)) {
+                    excluded.push(label);
+                } else if (looksBinary(await vscode.workspace.fs.readFile(child))) {
+                    excluded.push(label);
+                } else {
+                    counted.push(label);
+                }
+            }
+        };
+
+        await walk(folder.uri, '');
+
+        assert.deepStrictEqual(
+            counted.sort(),
+            ['.gitignore', 'README.md', 'src/a.txt', 'src/b.ts'],
+            'unexpected set of counted files',
+        );
+
+        for (const expected of ['node_modules/', 'vendor/', 'scratch.tmp', 'src/blob.png']) {
+            assert.ok(
+                excluded.some(e => e === expected),
+                `${expected} should have been excluded, got: ${excluded.sort().join(', ')}`,
+            );
+        }
     });
 });
