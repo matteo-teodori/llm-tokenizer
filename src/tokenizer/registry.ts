@@ -47,11 +47,3 @@ export function providers(): string[] {
     return [...new Set(MODELS.map(model => model.provider))];
 }
 
-export function modelsByProvider(provider: string): ModelInfo[] {
-    return MODELS.filter(model => model.provider === provider);
-}
-
-/** Whether counts for this model are exact without downloading anything. */
-export function isBundledExact(model: ModelInfo): boolean {
-    return model.encoder.kind === 'tiktoken';
-}

@@ -15,6 +15,7 @@ import {
     describeSkipReason,
     isDirectory,
     isFile,
+    looksBinary,
     shouldCount,
     shouldDescend,
     type SkipReason,
@@ -404,8 +405,14 @@ interface ScanResult {
     exact: boolean;
 }
 
-/** Count one file, returning null when it could not be read. */
-async function countFile(uri: vscode.Uri, size: number): Promise<{ count: number; exact: boolean } | null> {
+/** A successful count, or the reason the file was not counted. */
+type FileOutcome = { count: number; exact: boolean } | { skip: SkipReason };
+
+function isCounted(outcome: FileOutcome): outcome is { count: number; exact: boolean } {
+    return 'count' in outcome;
+}
+
+async function countFile(uri: vscode.Uri, size: number): Promise<FileOutcome> {
     const key = cacheKey(uri);
 
     try {
@@ -420,6 +427,10 @@ async function countFile(uri: vscode.Uri, size: number): Promise<{ count: number
         // to *every* other extension in the window. On a 35k-file repo that is
         // 70k lifecycle events flooding tsserver, ESLint and friends.
         const bytes = await vscode.workspace.fs.readFile(uri);
+        if (looksBinary(bytes)) {
+            return { skip: 'binary' };
+        }
+
         const text = new TextDecoder().decode(bytes);
         const { count, exact } = await tokenizer.count(text, currentModel);
 
@@ -428,7 +439,7 @@ async function countFile(uri: vscode.Uri, size: number): Promise<{ count: number
     } catch (error) {
         log.debug(`Skipping ${uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
         void size;
-        return null;
+        return { skip: 'unreadable' };
     }
 }
 
@@ -495,15 +506,15 @@ async function recordFile(
         return;
     }
 
-    const counted = await countFile(uri, size);
-    if (!counted) {
-        result.skipped.push({ path: uri.fsPath, reason: describeSkipReason('unreadable') });
+    const outcome = await countFile(uri, size);
+    if (!isCounted(outcome)) {
+        result.skipped.push({ path: uri.fsPath, reason: describeSkipReason(outcome.skip) });
         return;
     }
 
-    result.total += counted.count;
-    result.exact &&= counted.exact;
-    result.processed.push({ path: uri.fsPath, tokens: counted.count });
+    result.total += outcome.count;
+    result.exact &&= outcome.exact;
+    result.processed.push({ path: uri.fsPath, tokens: outcome.count });
 }
 
 async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
@@ -631,10 +642,10 @@ async function refreshProjectCount(): Promise<void> {
                     continue;
                 }
 
-                const counted = await countFile(uri, size);
-                if (counted) {
-                    total += counted.count;
-                    exact &&= counted.exact;
+                const outcome = await countFile(uri, size);
+                if (isCounted(outcome)) {
+                    total += outcome.count;
+                    exact &&= outcome.exact;
                 }
             }
         }

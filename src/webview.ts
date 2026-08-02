@@ -198,6 +198,13 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
             font-size: 0.9em;
             font-style: italic;
         }
+        .truncation {
+            color: var(--vscode-descriptionForeground);
+            font-size: 0.9em;
+            font-style: italic;
+            padding: 6px 8px 2px;
+            margin: 0;
+        }
         .folder-total {
             color: var(--vscode-textPreformat-foreground);
             font-size: 0.85em;
@@ -220,12 +227,13 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
     ${ignoredFilesHtml}
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
-        document.querySelectorAll('.file-link').forEach(link => {
-            link.addEventListener('click', (e) => {
-                e.preventDefault();
-                // currentTarget, not target: the click may land on a child node.
-                vscode.postMessage({ command: 'openFile', path: e.currentTarget.dataset.path });
-            });
+        // One delegated listener rather than one per file: a large scan used to
+        // attach thousands, all retained because the panel keeps its context.
+        document.body.addEventListener('click', (e) => {
+            const link = e.target.closest('.file-link');
+            if (!link) { return; }
+            e.preventDefault();
+            vscode.postMessage({ command: 'openFile', path: link.dataset.path });
         });
     </script>
 </body>

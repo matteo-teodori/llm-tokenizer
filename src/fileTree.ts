@@ -19,6 +19,11 @@ export function buildFileTree(
         children: new Map()
     };
 
+    // In a multi-root workspace, `src/index.ts` can exist in two roots. Without
+    // the folder name in the path they collide into one node showing one file's
+    // count while the header reports the sum of both.
+    const multiRoot = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+
     for (const file of files) {
         const fileUri = vscode.Uri.file(file.path);
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
@@ -27,6 +32,9 @@ export function buildFileTree(
         let relativePath = file.path;
         if (workspaceFolder) {
             relativePath = path.relative(workspaceFolder.uri.fsPath, file.path);
+            if (multiRoot) {
+                relativePath = path.join(workspaceFolder.name, relativePath);
+            }
         }
 
         const parts = relativePath.split(path.sep);
@@ -41,9 +49,12 @@ export function buildFileTree(
             }
 
             if (!current.children.has(part)) {
-                // Reconstruct the absolute path for opening files
+                // Reconstruct the absolute path so the node can be opened.
+                // In multi-root mode the first segment is the folder name we
+                // prefixed above, not a real directory, so it is dropped here.
+                const segments = parts.slice(multiRoot && workspaceFolder ? 1 : 0, i + 1);
                 const nodePath = workspaceFolder
-                    ? path.join(workspaceFolder.uri.fsPath, ...parts.slice(0, i + 1))
+                    ? path.join(workspaceFolder.uri.fsPath, ...segments)
                     : parts.slice(0, i + 1).join(path.sep);
 
                 current.children.set(part, {
@@ -146,18 +157,46 @@ export function renderTreeAsHtml(node: FileNode, isRoot = false): string {
  * @param files - Array of processed files
  * @returns HTML string for the processed files tree
  */
+/**
+ * Most files a listing will render.
+ *
+ * The panel is created with `retainContextWhenHidden`, so a scan of a large
+ * monorepo used to build a multi-megabyte HTML string and hold it, plus one DOM
+ * node per file, for the lifetime of the window. Totals are still computed over
+ * every file — only the listing is capped.
+ */
+const MAX_LISTED_FILES = 1000;
+
+function truncate<T extends { path: string }>(files: T[]): { shown: T[]; hidden: number } {
+    if (files.length <= MAX_LISTED_FILES) {
+        return { shown: files, hidden: 0 };
+    }
+    return { shown: files.slice(0, MAX_LISTED_FILES), hidden: files.length - MAX_LISTED_FILES };
+}
+
+function truncationNote(hidden: number): string {
+    return hidden === 0
+        ? ''
+        : `<p class="truncation">…and ${hidden.toLocaleString('en-US')} more, not listed. The total above includes them.</p>`;
+}
+
 export function buildProcessedFilesHtml(files: ProcessedFile[]): string {
     if (files.length === 0) {
         return '';
     }
 
-    const tree = buildFileTree(files);
+    // Largest first, so the cap keeps the files that matter.
+    const sorted = [...files].sort((a, b) => b.tokens - a.tokens);
+    const { shown, hidden } = truncate(sorted);
+    const tree = buildFileTree(shown);
+
     return `
         <details open>
             <summary><strong>Processed Files (${files.length})</strong></summary>
             <ul class="tree-list root-list">
                 ${renderTreeAsHtml(tree, true)}
             </ul>
+            ${truncationNote(hidden)}
         </details>
     `;
 }
@@ -172,13 +211,14 @@ export function buildSkippedFilesHtml(files: SkippedFile[]): string {
         return '';
     }
 
-    const tree = buildFileTree(files);
+    const { shown, hidden } = truncate(files);
     return `
         <details>
             <summary><strong>Skipped Files (${files.length})</strong></summary>
             <ul class="tree-list root-list">
-                ${renderTreeAsHtml(tree, true)}
+                ${renderTreeAsHtml(buildFileTree(shown), true)}
             </ul>
+            ${truncationNote(hidden)}
         </details>
     `;
 }
@@ -193,13 +233,14 @@ export function buildIgnoredFilesHtml(files: IgnoredFile[]): string {
         return '';
     }
 
-    const tree = buildFileTree(files);
+    const { shown, hidden } = truncate(files);
     return `
         <details>
             <summary><strong>Ignored Files (${files.length})</strong></summary>
             <ul class="tree-list root-list">
-                ${renderTreeAsHtml(tree, true)}
+                ${renderTreeAsHtml(buildFileTree(shown), true)}
             </ul>
+            ${truncationNote(hidden)}
         </details>
     `;
 }

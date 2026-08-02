@@ -112,6 +112,28 @@ export function shouldCount(
     return undefined;
 }
 
+/** How much of a file to inspect when deciding whether it is text. */
+const SNIFF_BYTES = 8192;
+
+/**
+ * Whether the bytes look like binary content.
+ *
+ * The extension list is a fast reject, but it can only catch what it knows:
+ * `.dat`, `.pack`, `.bin` under another name, and extensionless files all
+ * reached the tokenizer as text. A NUL byte in the first few KB is the same
+ * heuristic git uses, and it is decisive in practice — well-formed UTF-8 text
+ * does not contain one.
+ */
+export function looksBinary(bytes: Uint8Array): boolean {
+    const limit = Math.min(bytes.length, SNIFF_BYTES);
+    for (let i = 0; i < limit; i++) {
+        if (bytes[i] === 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /** Human-readable form of a skip reason, for the summary webview. */
 export function describeSkipReason(reason: SkipReason): string {
     switch (reason) {

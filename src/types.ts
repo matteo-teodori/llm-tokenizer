@@ -67,14 +67,6 @@ export interface ModelQuickPickItem extends vscode.QuickPickItem {
 }
 
 /**
- * Status indicator with icon and optional color
- */
-export interface StatusIndicator {
-    icon: string;
-    color?: vscode.ThemeColor;
-}
-
-/**
  * Cache entry for project token counting
  */
 export interface TokenCacheEntry {
