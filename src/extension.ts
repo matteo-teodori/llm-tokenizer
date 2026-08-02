@@ -20,6 +20,7 @@ import {
     shouldDescend,
     type SkipReason,
 } from './scan';
+import { CountCache } from './countCache';
 import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 
 const CONFIG_SECTION = 'llm-tokenizer';
@@ -36,14 +37,8 @@ let currentModel: ModelInfo;
 let statusBarTimer: NodeJS.Timeout | undefined;
 let projectScanTimer: NodeJS.Timeout | undefined;
 
-/**
- * Cache of per-file counts, keyed by model **and** path.
- *
- * Keying on path alone meant that switching from GPT to Gemini kept serving the
- * old model's numbers forever: mtimes were unchanged, so every later rescan hit
- * the stale entry and the project total never self-corrected.
- */
-const countCache = new Map<string, { count: number; mtime: number }>();
+/** Per-file counts, keyed by model and file revision. See src/countCache.ts. */
+const countCache = new CountCache();
 
 /**
  * Incremented whenever a scan is superseded or cancelled.
@@ -273,7 +268,7 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
         }),
 
         vscode.workspace.onDidSaveTextDocument(document => {
-            countCache.delete(cacheKey(document.uri));
+            countCache.deleteFile(document.uri);
             debounceProjectScan();
         }),
 
@@ -283,14 +278,14 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
             // The event names exactly which files went, so a branch switch no
             // longer forces a cold re-tokenisation of the entire workspace.
             for (const uri of e.files) {
-                countCache.delete(cacheKey(uri));
+                countCache.deleteFile(uri);
             }
             debounceProjectScan();
         }),
 
         vscode.workspace.onDidRenameFiles(e => {
             for (const { oldUri } of e.files) {
-                countCache.delete(cacheKey(oldUri));
+                countCache.deleteFile(oldUri);
             }
             debounceProjectScan();
         }),
@@ -340,10 +335,6 @@ function debounceProjectScan(): void {
 // ═══════════════════════════════════════════════════════════════
 // Counting
 // ═══════════════════════════════════════════════════════════════
-
-function cacheKey(uri: vscode.Uri): string {
-    return `${currentModel.id} ${uri.toString()}`;
-}
 
 function isProjectScanEnabled(): boolean {
     return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('enableProjectScan', true);
@@ -413,13 +404,11 @@ function isCounted(outcome: FileOutcome): outcome is { count: number; exact: boo
 }
 
 async function countFile(uri: vscode.Uri, size: number): Promise<FileOutcome> {
-    const key = cacheKey(uri);
-
     try {
         const stat = await vscode.workspace.fs.stat(uri);
-        const cached = countCache.get(key);
-        if (cached && cached.mtime === stat.mtime) {
-            return { count: cached.count, exact: true };
+        const cached = countCache.get(currentModel.id, uri, stat.mtime);
+        if (cached) {
+            return cached;
         }
 
         // Reading bytes rather than `openTextDocument`: opening a TextDocument
@@ -434,7 +423,7 @@ async function countFile(uri: vscode.Uri, size: number): Promise<FileOutcome> {
         const text = new TextDecoder().decode(bytes);
         const { count, exact } = await tokenizer.count(text, currentModel);
 
-        countCache.set(key, { count, mtime: stat.mtime });
+        countCache.set(currentModel.id, uri, stat.mtime, { count, exact });
         return { count, exact };
     } catch (error) {
         log.debug(`Skipping ${uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
