@@ -609,9 +609,11 @@ async function refreshProjectCount(): Promise<void> {
         return;
     }
 
+    // A generation counter rather than a CancellationToken: nothing here can
+    // be interrupted mid-await, so cancellation is entirely a matter of the
+    // loop noticing it has been superseded and abandoning its result.
     const generation = ++scanGeneration;
-    const cancellation = new vscode.CancellationTokenSource();
-    const token = cancellation.token;
+    const superseded = () => generation !== scanGeneration;
 
     try {
         const useGitignore = respectGitignore();
@@ -626,8 +628,8 @@ async function refreshProjectCount(): Promise<void> {
             );
 
             for (const uri of files) {
-                if (generation !== scanGeneration || token.isCancellationRequested) {
-                    log.debug('Project scan superseded');
+                if (superseded()) {
+                    log.debug('Project scan superseded; abandoning');
                     return;
                 }
 
@@ -650,7 +652,9 @@ async function refreshProjectCount(): Promise<void> {
             }
         }
 
-        if (generation !== scanGeneration) {
+        // Checked once more: the scan may have been superseded, or the setting
+        // turned off, while the last file was being counted.
+        if (superseded() || !isProjectScanEnabled()) {
             return;
         }
 
@@ -662,8 +666,6 @@ async function refreshProjectCount(): Promise<void> {
         });
     } catch (error) {
         log.error(`Project scan failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-        cancellation.dispose();
     }
 }
 
