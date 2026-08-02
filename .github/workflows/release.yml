@@ -1,0 +1,73 @@
+name: Release
+
+# Publishes on a version tag. Package once and publish that exact artifact to
+# both registries — building twice risks shipping two different bundles under
+# one version number.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and validate without publishing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: marketplace
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      - name: Verify
+        run: |
+          npm run check-types
+          npm run lint
+          npm run sync-manifest -- --check
+      - name: Test
+        run: xvfb-run -a npm test
+
+      - name: Check the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          manifest=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$manifest" != "$tag" ]; then
+            echo "::error::tag $tag does not match package.json version $manifest"
+            exit 1
+          fi
+
+      - name: Package
+        run: npx @vscode/vsce package --out llm-tokenizer.vsix
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: llm-tokenizer.vsix
+
+      - name: Publish to the VS Code Marketplace
+        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx @vscode/vsce publish --packagePath llm-tokenizer.vsix
+
+      - name: Publish to Open VSX
+        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: npx ovsx publish llm-tokenizer.vsix
+
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" llm-tokenizer.vsix --generate-notes

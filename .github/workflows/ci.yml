@@ -9,6 +9,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  NODE_VERSION: '22'
+
 jobs:
   check:
     name: Lint, types, manifest
@@ -17,15 +20,23 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - run: npm run compile
-      # The settings dropdown is generated from the model registry; this fails
-      # the build if someone edits one without the other.
-      - run: npm run sync-manifest -- --check
-      - run: npm run lint
-      - run: npm audit --audit-level=high --omit=dev
+
+      - name: Type-check
+        run: npm run check-types
+
+      - name: Lint
+        run: npm run lint
+
+      # The settings dropdown is generated from the model registry. This fails
+      # the build if someone edits one without regenerating the other.
+      - name: Model registry is in sync with the manifest
+        run: npm run sync-manifest -- --check
+
+      - name: Audit production dependencies
+        run: npm audit --audit-level=high --omit=dev
 
   test:
     name: Test (${{ matrix.os }})
@@ -38,10 +49,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - run: npm run build
 
       # Extension tests drive a real VS Code instance, which needs a display
       # server on Linux.
@@ -60,16 +70,24 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
       - run: npx @vscode/vsce package --out llm-tokenizer.vsix
-      # Regressions here are usually an accidental un-bundling: the VSIX should
-      # contain out/ and nothing from node_modules.
-      - name: Report VSIX size
+
+      # A sudden jump here almost always means the bundle broke and the raw
+      # dependency tree is being packaged again.
+      - name: Report VSIX contents and size
         run: |
           ls -lh llm-tokenizer.vsix
-          unzip -l llm-tokenizer.vsix | tail -20
+          unzip -l llm-tokenizer.vsix
+          size=$(stat -c%s llm-tokenizer.vsix)
+          echo "VSIX is $((size / 1024)) KB"
+          if [ "$size" -gt 6000000 ]; then
+            echo "::error::VSIX exceeded 6 MB — check that esbuild bundling still works"
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: vsix

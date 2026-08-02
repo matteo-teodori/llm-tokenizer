@@ -13,6 +13,6 @@
 !LICENSE
 !icon.png
 
-# Source maps are only emitted for local development builds; keep them out in
-# case a dev build ever gets packaged.
+# Source maps are only emitted by development builds, but exclude them here too
+# so packaging a dev build never leaks them.
 out/**/*.map

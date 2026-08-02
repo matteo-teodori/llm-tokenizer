@@ -21,7 +21,7 @@ const check = process.argv.includes('--check');
 let MODELS;
 let MODEL_ALIASES;
 try {
-    ({ MODELS, MODEL_ALIASES } = require('../out/models-meta.cjs'));
+    ({ MODELS, MODEL_ALIASES } = require('../.build/models-meta.cjs'));
 } catch (error) {
     console.error('Could not load the compiled registry. Run `npm run compile` first.');
     console.error(error.message);
