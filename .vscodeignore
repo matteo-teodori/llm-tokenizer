@@ -1,22 +1,18 @@
-# Source files (compiled version is in out/)
-src/**
-tsconfig.json
+# Everything the extension needs at runtime is bundled into out/ by build.mjs,
+# so the VSIX ships no node_modules at all. Previously the whole dependency tree
+# was packaged, which meant shipping ~21 MB of js-tiktoken.
+#
+# Deny everything, then allow back only what the extension and the marketplace
+# listing need.
+**
 
-# Development files
-.vscode-test/**
-.vscode/**
-.gitignore
+!out/**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!icon.png
 
-# Build artifacts
-*.vsix
-
-# System files
-.DS_Store
-Thumbs.db
-
-# Git
-.git/**
-.github/**
-
-# Documentation for development
-*.md.backup
+# Source maps are only emitted for local development builds; keep them out in
+# case a dev build ever gets packaged.
+out/**/*.map

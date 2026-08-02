@@ -1,18 +1,27 @@
 {
     "compilerOptions": {
         "module": "commonjs",
-        "target": "es2020",
+        "moduleResolution": "node",
+        // VS Code 1.104+ ships Electron 34 / Node 22.
+        "target": "es2023",
+        "lib": ["es2023"],
         "outDir": "out",
-        "lib": [
-            "es2020",
-            "dom"
-        ],
-        "sourceMap": true,
         "rootDir": "src",
-        "strict": true
+        "sourceMap": true,
+
+        "strict": true,
+        "noImplicitOverride": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "noFallthroughCasesInSwitch": true,
+
+        // `ignore` is a CommonJS default export; without this it needed a bare
+        // require() and lost its types entirely.
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "skipLibCheck": true,
+        "resolveJsonModule": true
     },
-    "exclude": [
-        "node_modules",
-        ".vscode-test"
-    ]
+    "include": ["src/**/*.ts"],
+    "exclude": ["node_modules", ".vscode-test", "out"]
 }

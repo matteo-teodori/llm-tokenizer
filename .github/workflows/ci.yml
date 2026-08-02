@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, types, manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run compile
+      # The settings dropdown is generated from the model registry; this fails
+      # the build if someone edits one without the other.
+      - run: npm run sync-manifest -- --check
+      - run: npm run lint
+      - run: npm audit --audit-level=high --omit=dev
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # Extension tests drive a real VS Code instance, which needs a display
+      # server on Linux.
+      - name: Test (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm test
+      - name: Test
+        if: runner.os != 'Linux'
+        run: npm test
+
+  package:
+    name: Package VSIX
+    runs-on: ubuntu-latest
+    needs: [check, test]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx @vscode/vsce package --out llm-tokenizer.vsix
+      # Regressions here are usually an accidental un-bundling: the VSIX should
+      # contain out/ and nothing from node_modules.
+      - name: Report VSIX size
+        run: |
+          ls -lh llm-tokenizer.vsix
+          unzip -l llm-tokenizer.vsix | tail -20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: llm-tokenizer.vsix

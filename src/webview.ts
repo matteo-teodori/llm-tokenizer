@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
-import { TokenizerService } from './tokenizer';
 import { ContextStatusResult, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 import { formatNumber, getStatusColor } from './utils';
 import { buildProcessedFilesHtml, buildSkippedFilesHtml, buildIgnoredFilesHtml } from './fileTree';
+import { contentSecurityPolicy, createNonce, escapeHtml } from './html';
 
 /**
  * Configuration for multi-file summary webview
@@ -14,6 +14,8 @@ export interface MultiFileSummaryConfig {
     skippedFiles: SkippedFile[];
     ignoredFiles: IgnoredFile[];
     modelLabel: string;
+    /** False when any file in the run was counted by heuristic. */
+    exact: boolean;
     contextStatus: ContextStatusResult;
 }
 
@@ -27,16 +29,36 @@ export function showMultiFileSummary(config: MultiFileSummaryConfig): vscode.Web
         vscode.ViewColumn.Active,
         {
             enableScripts: true,
-            retainContextWhenHidden: true  // Preserve tree state when switching tabs
+            retainContextWhenHidden: true,  // Preserve tree state when switching tabs
+            // The page is fully self-contained, so it needs access to nothing
+            // on disk.
+            localResourceRoots: []
         }
     );
 
-    // Handle file clicks from webview
-    panel.webview.onDidReceiveMessage(async message => {
-        if (message.command === 'openFile') {
-            const uri = vscode.Uri.file(message.path);
-            await vscode.window.showTextDocument(uri);
+    // The webview may only ask to open a file that this summary actually
+    // listed. Without that check, anything able to post a message could make
+    // the extension open an arbitrary path.
+    const openable = new Set([
+        ...config.processedFiles.map(f => f.path),
+        ...config.skippedFiles.map(f => f.path),
+        ...config.ignoredFiles.map(f => f.path)
+    ]);
+
+    panel.webview.onDidReceiveMessage(async (message: unknown) => {
+        if (
+            typeof message !== 'object' || message === null ||
+            (message as { command?: unknown }).command !== 'openFile'
+        ) {
+            return;
         }
+
+        const requested = (message as { path?: unknown }).path;
+        if (typeof requested !== 'string' || !openable.has(requested)) {
+            return;
+        }
+
+        await vscode.window.showTextDocument(vscode.Uri.file(requested));
     });
 
     panel.webview.html = generateSummaryHtml(config);
@@ -84,6 +106,7 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
         skippedFiles,
         ignoredFiles,
         modelLabel,
+        exact,
         contextStatus
     } = config;
 
@@ -93,12 +116,14 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
     const processedFilesHtml = buildProcessedFilesHtml(processedFiles);
     const skippedFilesHtml = buildSkippedFilesHtml(skippedFiles);
     const ignoredFilesHtml = buildIgnoredFilesHtml(ignoredFiles);
+    const nonce = createNonce();
 
     return `
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
     <style>
         body {
             font-family: var(--vscode-font-family);
@@ -184,22 +209,22 @@ function generateSummaryHtml(config: MultiFileSummaryConfig): string {
 </head>
 <body>
     <h1><span class="icon">${icon}</span>Multi-file Summary</h1>
-    <p><strong>Total Tokens:</strong> ${formatNumber(totalTokens)}</p>
+    <p><strong>Total Tokens:</strong> ${exact ? '' : '≈'}${formatNumber(totalTokens)}${exact ? '' : ' <em>(estimated)</em>'}</p>
     <p><strong>Files Processed:</strong> ${filesProcessed}</p>
     ${skippedFiles.length > 0 ? `<p><strong>Files Skipped:</strong> ${skippedFiles.length}</p>` : ''}
     ${ignoredFiles.length > 0 ? `<p><strong>Files Ignored:</strong> ${ignoredFiles.length}</p>` : ''}
-    <p><strong>Model:</strong> ${modelLabel}</p>
+    <p><strong>Model:</strong> ${escapeHtml(modelLabel)}</p>
     ${contextInfo}
     ${processedFilesHtml}
     ${skippedFilesHtml}
     ${ignoredFilesHtml}
-    <script>
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         document.querySelectorAll('.file-link').forEach(link => {
             link.addEventListener('click', (e) => {
                 e.preventDefault();
-                const path = e.target.dataset.path;
-                vscode.postMessage({ command: 'openFile', path: path });
+                // currentTarget, not target: the click may land on a child node.
+                vscode.postMessage({ command: 'openFile', path: e.currentTarget.dataset.path });
             });
         });
     </script>

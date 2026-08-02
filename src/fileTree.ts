@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { FileNode, ProcessedFile, SkippedFile, IgnoredFile } from './types';
-import { escapePathForHtml, formatNumber } from './utils';
+import { formatNumber } from './utils';
+import { escapeHtml } from './html';
 
 /**
  * Build a hierarchical file tree from a flat list of files
@@ -99,14 +100,16 @@ export function renderTreeAsHtml(node: FileNode, isRoot = false): string {
             .join('');
     }
 
+    // Node names, paths and skip reasons all come from the workspace, so every
+    // one of them is escaped before it reaches the document.
     if (node.isFile) {
         const extra = node.tokens !== undefined
             ? `<span class="token-count">${formatNumber(node.tokens)} tokens</span>`
-            : `<span class="reason">${node.reason}</span>`;
+            : `<span class="reason">${escapeHtml(node.reason ?? '')}</span>`;
 
         return `
             <li class="file-item">
-                <a href="#" class="file-link" data-path="${escapePathForHtml(node.path)}">${node.name}</a>
+                <a href="#" class="file-link" data-path="${escapeHtml(node.path)}">${escapeHtml(node.name)}</a>
                 ${extra}
             </li>
         `;
@@ -126,7 +129,7 @@ export function renderTreeAsHtml(node: FileNode, isRoot = false): string {
             <li class="folder-item">
                 <details>
                     <summary>
-                        <span class="folder-icon">📁</span>${node.name}
+                        <span class="folder-icon">📁</span>${escapeHtml(node.name)}
                         ${folderTotal}
                     </summary>
                     <ul class="tree-list">

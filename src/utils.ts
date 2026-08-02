@@ -73,15 +73,6 @@ export function getStatusColor(status: ContextStatus): string {
 }
 
 /**
- * Escape backslashes for safe use in HTML data attributes
- * @param filePath - File path to escape
- * @returns Escaped path string
- */
-export function escapePathForHtml(filePath: string): string {
-    return filePath.replace(/\\/g, '\\\\');
-}
-
-/**
  * Build a relative path from workspace folder
  * @param filePath - Absolute file path
  * @returns Relative path from workspace, or original if no workspace
