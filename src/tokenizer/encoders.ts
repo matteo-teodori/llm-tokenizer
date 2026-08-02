@@ -109,27 +109,46 @@ function tiktokenEncoder(encoding: TiktokenEncoding): Encoder {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Only the tokenizer half of `@huggingface/transformers` is bundled; the ONNX
- * runtime it would otherwise drag in (215 MB of native binaries) is stubbed out
- * at build time. See `build.mjs`.
+ * `@huggingface/tokenizers` — the tokenizer implementation on its own, with no
+ * dependencies.
+ *
+ * The obvious alternative, `@huggingface/transformers`, contains the same
+ * tokenizer code but depends on onnxruntime-node: 215 MB of native binaries
+ * that a token counter never runs. Keeping it out of the bundle required an
+ * esbuild plugin stubbing the inference stack, which worked but was
+ * load-bearing — one upstream import-path change and the VSIX would silently
+ * grow by two orders of magnitude. Verified equivalent: identical counts on
+ * Llama 3, Qwen 3, DeepSeek, Mistral and Gemma, including CJK and emoji.
  */
-type PreTrainedTokenizerCtor = new (
+/**
+ * `encode` returns an encoding object, not an array — reading `.length` on it
+ * yields `undefined`, which is exactly the kind of silently-wrong number this
+ * release exists to remove. The count is `ids.length`.
+ *
+ * Special tokens are not added: this library ignores `add_special_tokens`, and
+ * that is the behaviour we want. Special tokens belong to chat templating, not
+ * to the contents of a file.
+ */
+interface HfEncoding {
+    ids: number[];
+    tokens: string[];
+}
+
+type TokenizerCtor = new (
     tokenizerJSON: unknown,
     tokenizerConfig: unknown,
-) => { encode(text: string, opts: { add_special_tokens: boolean }): unknown[] };
+) => { encode(text: string): HfEncoding };
 
-let PreTrainedTokenizer: PreTrainedTokenizerCtor | undefined;
+let Tokenizer: TokenizerCtor | undefined;
 
-function loadTransformers(): PreTrainedTokenizerCtor {
-    if (!PreTrainedTokenizer) {
+function loadTokenizerLibrary(): TokenizerCtor {
+    if (!Tokenizer) {
         // Deferred so a workspace using only OpenAI models never loads it.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const mod = require('@huggingface/transformers') as {
-            PreTrainedTokenizer: PreTrainedTokenizerCtor;
-        };
-        PreTrainedTokenizer = mod.PreTrainedTokenizer;
+        const mod = require('@huggingface/tokenizers') as { Tokenizer: TokenizerCtor };
+        Tokenizer = mod.Tokenizer;
     }
-    return PreTrainedTokenizer;
+    return Tokenizer;
 }
 
 /** Raw `tokenizer.json` + `tokenizer_config.json`, as fetched from the Hub. */
@@ -146,14 +165,12 @@ export function hfEncoder(repo: string, files: HfTokenizerFiles): Encoder {
         return cached;
     }
 
-    const Ctor = loadTransformers();
+    const Ctor = loadTokenizerLibrary();
     const tokenizer = new Ctor(files.tokenizerJSON, files.tokenizerConfig);
     const encoder: Encoder = {
         kind: 'hf',
         exact: true,
-        // Special tokens belong to chat templating, not to counting file
-        // contents, so they are excluded.
-        count: text => tokenizer.encode(text, { add_special_tokens: false }).length,
+        count: text => tokenizer.encode(text).ids.length,
     };
 
     hfCache.set(repo, encoder);

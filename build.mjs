@@ -28,31 +28,6 @@ const production = process.argv.includes('--production');
  */
 const ENCODINGS = ['o200k_harmony', 'o200k_base', 'cl100k_base'];
 
-/**
- * `@huggingface/transformers` depends on onnxruntime-node, which is 215 MB of
- * native binaries we never touch: only its tokenizer classes are used, and they
- * are pure JavaScript. Stubbing the inference stack keeps the bundle at ~500 KB
- * and keeps native binaries out of the VSIX entirely.
- *
- * The stub throws rather than returning undefined, so that if a future change
- * ever does reach for the runtime it fails loudly at the call site instead of
- * silently producing wrong numbers.
- */
-const stubInferenceRuntime = {
-    name: 'stub-inference-runtime',
-    setup(build) {
-        const heavy = /^(onnxruntime-node|onnxruntime-web|onnxruntime-common|sharp)$/;
-        build.onResolve({ filter: heavy }, args => ({ path: args.path, namespace: 'stub' }));
-        build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
-            loader: 'js',
-            contents:
-                'module.exports = new Proxy({}, { get(_, prop) {' +
-                ' throw new Error("llm-tokenizer bundles tokenizers only; the inference runtime ' +
-                'is not available (tried to access " + String(prop) + ")"); } });',
-        }));
-    },
-};
-
 /** Reports build results in watch mode, where esbuild otherwise stays silent. */
 const reportProblems = {
     name: 'report-problems',
@@ -94,7 +69,6 @@ const targets = [
         entryPoints: ['src/worker.ts'],
         outfile: 'out/worker.js',
         external: ['vscode'],
-        plugins: [stubInferenceRuntime, reportProblems],
     },
     {
         ...shared,
@@ -109,10 +83,12 @@ const targets = [
     },
     {
         // Plain-CommonJS view of the registry so scripts/sync-manifest.mjs can
-        // read it without a TypeScript loader.
+        // read it without a TypeScript loader. Deliberately *not* under out/:
+        // that directory holds exactly what ships, and nothing at runtime
+        // imports this.
         ...shared,
         entryPoints: ['src/tokenizer/models.ts'],
-        outfile: 'out/models-meta.cjs',
+        outfile: '.build/models-meta.cjs',
         minify: false,
         sourcemap: false,
     },
