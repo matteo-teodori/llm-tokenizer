@@ -4,7 +4,7 @@
   <h1>LLM Tokenizer</h1>
 
   <p><b>The ultimate AI token counter for your IDE.</b><br>
-  Real-time token counting for 60+ models — GPT, Claude, Gemini, Grok, DeepSeek, Llama, and more.</p>
+  Token counting for 71 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
 
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
@@ -36,38 +36,52 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 ## Features
 
 ### 🎯 Core Features
-- **Real-time Token Count**: View the token count of the active file in the Status Bar
-- **Uncompromised Performance**: Uses background Node.js `worker_threads` for heavy asynchronous processing, ensuring VS Code never freezes even on massive 100MB+ files or entire workspaces
-- **Context Limit Warnings**: Visual indicators (⚠️ 80%, 🔴 100%) when approaching model limits
-- **Project-wide Counting**: Track total tokens across your entire workspace with smart caching
-- **Multi-file Selection**: Select multiple files/folders in explorer for batch token counting
-- **60+ AI Models**: OpenAI, Anthropic, Google, xAI, DeepSeek, Meta, Mistral, Alibaba, and more
-- **Selection Counting**: Count tokens in selected text within the editor
-- **Folder Analysis**: Right-click a folder to count tokens recursively
-- **Grouped Model Selection**: Models organized by provider for easy switching
-- **Persistent Preferences**: Selected model is remembered across sessions
+- **Exact counts, not guesses**: ~50 of the 71 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
+- **Real-time Token Count**: The active file's token count in the Status Bar
+- **Context Limit Warnings**: Indicators at 80% and 100% of the model's *usable input* limit
+- **Project-wide Counting**: Workspace totals with caching, cancellation, and multi-root support
+- **Multi-file Selection**: Select multiple files or folders in the explorer for a batch count
+- **Folder Analysis**: Right-click a folder to count recursively
+- **Selection Counting**: Count only the text you highlighted
+- **Runs off the UI thread**: Tokenizing happens in a worker thread, so the editor never blocks
+- **Persistent Preferences**: Your model choice is remembered
+
+### 🔒 Privacy
+**Your code never leaves your machine.** There is no telemetry and no network
+request that contains file contents. The only network access is a one-time
+download of a model's *vocabulary file* from huggingface.co, which you can turn
+off with `llm-tokenizer.downloadTokenizers`.
 
 ### ⚙️ Configuration
-- `llm-tokenizer.defaultModel`: Choose your preferred AI model
-- `llm-tokenizer.statusBarDisplay`: Display mode - "file", "project", or "both"
-- `llm-tokenizer.ignoreGitignoredFiles`: Exclude gitignored files from project-wide and directory token counting
+- `llm-tokenizer.defaultModel`: Model used until you pick one
+- `llm-tokenizer.statusBarDisplay`: `"file"`, `"project"`, or `"both"`
+- `llm-tokenizer.ignoreGitignoredFiles`: Exclude gitignored files from folder and workspace totals
+- `llm-tokenizer.enableProjectScan`: Turn off workspace-wide counting on very large repositories
+- `llm-tokenizer.downloadTokenizers`: Allow the one-time tokenizer download that makes counts exact
 
 ## Supported Models
 
-| Provider   | Models                                                                                              |
-|------------|-----------------------------------------------------------------------------------------------------|
-| OpenAI     | GPT-5.5, GPT-5.4, GPT-5.3 Codex, GPT-5.2, GPT-5, GPT-OSS 120B, GPT-4o, GPT-4o Mini, o4-mini, o3-pro, o3, o1, o3-mini, GPT-4, GPT-3.5 Turbo |
-| Anthropic  | Claude Opus 4.7, Claude Sonnet/Opus 4.6, Claude Sonnet/Opus/Haiku 4.5, Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3 Opus/Haiku |
-| Google     | Gemini 3.1 Pro, Gemini 3 Flash/Pro, Gemini 2.5 Flash/Pro/Lite, Gemini 2.0 Flash, Gemini 1.5 Pro   |
-| xAI        | Grok 4.3, Grok 4.2, Grok 4.1 Fast, Grok 4 Fast, Grok Code Fast 1, Grok 3                          |
-| DeepSeek   | DeepSeek V4 Pro/Flash, DeepSeek V3.2, V3.1, V3, DeepSeek R1                                        |
-| Meta       | Llama 4 Maverick, Llama 4 Scout, Llama 3.3, Llama 3.2, CodeLlama                                  |
-| Mistral    | Mistral Large 3, Mistral Small 4, Mistral Large                                                     |
-| Alibaba    | Qwen 3.6 Plus, Qwen 3.5, Qwen3, QwQ 32B, Qwen 2.5 Coder                                           |
-| Moonshot   | Kimi K2.6, Kimi K2.5                                                                                |
-| MiniMax    | MiniMax M2.7, M2.5, M2.1                                                                            |
-| Zhipu      | GLM 5.1, GLM 5, GLM 4.7, GLM 4.6, GLM 4.5                                                         |
-| Xiaomi     | MiMo-V2-Flash                                                                                       |
+71 models across 13 providers. Every id is checked against the provider's own
+documentation; models that a provider has retired are removed, and your setting
+is migrated automatically.
+
+| Provider   | Models | Accuracy |
+|------------|--------|----------|
+| OpenAI     | GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 (+mini), GPT-5.3 Codex, GPT-5.2, GPT-5.1, GPT-5, GPT-4.1, GPT-4o (+mini), o3, o4-mini, gpt-oss 120b/20b, GPT-4 Turbo, GPT-3.5 Turbo | Exact |
+| Anthropic  | Claude Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
+| Google     | Gemini 3.6 Flash, 3.5 Flash (+Lite), 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
+| xAI        | Grok 4.5, Grok 4.3, Grok 4.20, Grok Build 0.1 | Estimated |
+| DeepSeek   | DeepSeek V4 Pro, V4 Flash | Exact¹ |
+| Meta       | Llama 4 Scout, Llama 4 Maverick, Llama 3.3 70B, Llama 3.1 8B | Exact¹ |
+| Mistral    | Mistral Large 3, Medium 3.5, Small 4 | Exact¹ |
+| Alibaba    | Qwen3.7 Max/Plus, Qwen3.6 Plus, Qwen3.6 27B, Qwen3.6 35B-A3B | Exact¹ / estimated |
+| Zhipu      | GLM-5.2, GLM-5.1, GLM-5, GLM-5-Turbo | Exact¹ |
+| MiniMax    | MiniMax M3, M2.7, M2.5, M2.1 | Exact¹ |
+| Moonshot   | Kimi K3, K2.7 Code, K2.6 | Estimated |
+| Xiaomi     | MiMo V2.5 Pro, MiMo V2 Flash | Exact¹ |
+| Tencent    | Hunyuan Hy3 | Exact¹ |
+
+¹ after a one-time tokenizer download
 
 ## Usage
 
@@ -80,28 +94,42 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 
 ### Configuration
 Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
-- **Status Bar Display**: Choose between "file", "project", or "both" (default is "both")
-- **Default Model**: Set your preferred model for token counting
-- **Ignore Gitignored Files**: Exclude `.gitignore` matched files from counts (checked by default)
+- **Default Model**: the model used until you pick one from the status bar
+- **Status Bar Display**: `"file"`, `"project"`, or `"both"` (default `"both"`)
+- **Ignore Gitignored Files**: exclude `.gitignore` matches from counts (on by default)
+- **Enable Project Scan**: turn off workspace-wide counting on very large repositories
+- **Download Tokenizers**: allow the one-time download that makes counts exact
 
 ### Context Warnings
-- **Green** 🤖: Normal usage (< 80% of context limit)
-- **Yellow** ⚠️: Approaching limit (80-99%)
-- **Red** 🔴: Exceeds context limit (≥ 100%)
+- **Normal**: under 80% of the model's usable input limit
+- **Warning**: 80–99%
+- **Error**: at or over 100%
 
-## Accuracy Notes
+A leading `≈` means the count is an estimate rather than an exact tokenization.
 
-| Provider | Method | Accuracy |
-|----------|--------|----------|
-| OpenAI | tiktoken (exact) | ~100% |
-| Claude | cl100k_base + 1.05x | ~95% |
-| Gemini | 4 chars/token | ~90% |
-| DeepSeek | 3.33 chars/token | ~90% |
-| Others | cl100k_base proxy | ~85-95% |
+## Accuracy
+
+There are three tiers, and the status bar tells you which one you are in.
+
+| Tier | Shown as | Method | Models |
+|------|----------|--------|--------|
+| **Exact, offline** | `12,340` | OpenAI's own BPE, bundled | All OpenAI models |
+| **Exact after one download** | `≈` → `12,340` | The model's real `tokenizer.json` (~2–19 MB, cached) | Llama, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hunyuan |
+| **Estimated** | `≈12,340` | Calibrated characters per token | Claude, Grok, Kimi, closed Qwen |
+
+**Why some models are only estimated.** Anthropic and xAI do not publish a
+tokenizer for any current model, and Anthropic explicitly advises against
+approximating Claude with OpenAI's tokenizer. An honest estimate is better than
+a confident wrong number, so those models are marked rather than dressed up.
+
+Earlier versions approximated everything with `cl100k_base` and a fudge factor.
+Measured against the real tokenizers, that undercounted Gemini on JSON by 27%
+and Mistral on source code by 24% — errors in the direction that tells you your
+prompt fits when it does not.
 
 ## Requirements
 
-VS Code 1.85.0+
+VS Code 1.105.0+
 
 ## Changelog
 
