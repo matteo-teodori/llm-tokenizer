@@ -142,6 +142,26 @@ suite('tokenizer service', () => {
         assert.strictEqual(result.exact, false, 'a fallback count is an estimate');
     });
 
+    test('a downloaded tokenizer survives the worker restarting', async () => {
+        // The worker forgets its loaded tokenizers when it dies. Without
+        // re-hydration every later count for that model quietly degrades to an
+        // estimate — correctly labelled, but permanently.
+        const llama = model('llama-3.3-70b');
+        assert.strictEqual(llama.encoder.kind, 'hf');
+
+        // Nothing has been downloaded in this test's storage directory, so the
+        // count is an estimate and re-hydration must not start a download.
+        const before = await tokenizer.count('text', llama);
+        assert.strictEqual(before.exact, false);
+
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(WORKER, store, log);
+
+        const after = await tokenizer.count('text', llama);
+        assert.strictEqual(after.count, before.count, 'the estimate should be stable across a restart');
+        assert.strictEqual(after.exact, false);
+    });
+
     test('large input is counted without blocking the host', async () => {
         const big = 'lorem ipsum dolor sit amet '.repeat(20_000); // ~540 KB
         const started = Date.now();

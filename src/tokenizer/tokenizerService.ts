@@ -75,6 +75,12 @@ export class TokenizerService implements vscode.Disposable {
             return { count: 0, exact: true };
         }
 
+        // A restarted worker has forgotten its downloaded tokenizers. Without
+        // this, every subsequent count for that model quietly degrades to an
+        // estimate — correctly labelled, but permanently, until the user
+        // happens to re-run the download command.
+        await this.rehydrateIfNeeded(model);
+
         try {
             const response = await this.send({
                 type: 'count',
@@ -94,6 +100,23 @@ export class TokenizerService implements vscode.Disposable {
         }
 
         return { count: estimate(text, model), exact: false };
+    }
+
+    /**
+     * Re-send an already-downloaded tokenizer that the worker no longer holds.
+     *
+     * Only touches the cache on disk — it never starts a download, so a model
+     * the user has not opted into stays an estimate.
+     */
+    private async rehydrateIfNeeded(model: ModelInfo): Promise<void> {
+        if (model.encoder.kind !== 'hf' || this.loadedRepos.has(model.encoder.repo)) {
+            return;
+        }
+        if (!(await this.store.isDownloaded(model.encoder.repo))) {
+            return;
+        }
+
+        await this.ensureExact(model);
     }
 
     /**
