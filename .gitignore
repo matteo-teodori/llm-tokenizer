@@ -1,28 +1,37 @@
 # Dependencies
 node_modules/
 
-# Build Output
+# Build output
 out/
 dist/
 build/
+.test-out/
+.build/
 
-# Extension Packages
+# Extension packages
 *.vsix
 
-# VS Code - Ignore local settings but keep build/debug configs
+# VS Code — ignore local settings but keep the shared build/debug configs
 .vscode/*
 !.vscode/launch.json
 !.vscode/tasks.json
 !.vscode/extensions.json
 
-# VS Code Test Storage
+# VS Code test storage
 .vscode-test/
 
-# Logs & Debug
+# Logs & debug
 *.log
 npm-debug.log*
 yarn-debug.log*
 
-# System Files
+# System files
 .DS_Store
 Thumbs.db
+
+# The integration tests run against a fixture workspace that deliberately
+# contains a node_modules directory, because the tests assert it is excluded
+# from token counts. It has to be committed for the test to mean anything.
+# (The fixture's own .gitignore uses *.tmp and vendor/ so its rules cannot
+# collide with the ones above.)
+!test/fixtures/**

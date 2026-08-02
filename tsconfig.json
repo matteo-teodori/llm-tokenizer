@@ -5,8 +5,10 @@
         // VS Code 1.104+ ships Electron 34 / Node 22.
         "target": "es2023",
         "lib": ["es2023"],
-        "outDir": "out",
-        "rootDir": "src",
+        // Type checking only — esbuild does the emitting for the extension and
+        // tsconfig.test.json does it for the tests.
+        "noEmit": true,
+        "rootDir": ".",
         "sourceMap": true,
 
         "strict": true,
@@ -22,6 +24,6 @@
         "skipLibCheck": true,
         "resolveJsonModule": true
     },
-    "include": ["src/**/*.ts"],
-    "exclude": ["node_modules", ".vscode-test", "out"]
+    "include": ["src/**/*.ts", "test/**/*.ts"],
+    "exclude": ["node_modules", ".vscode-test", "out", ".test-out", "test/fixtures"]
 }

@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { contentSecurityPolicy, createNonce, escapeHtml } from '../html';
+import { contentSecurityPolicy, createNonce, escapeHtml } from '../../src/html';
 
 suite('escapeHtml', () => {
     test('neutralises the script-injection payloads a file name can carry', () => {

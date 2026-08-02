@@ -4,7 +4,16 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-    { ignores: ['out/**', 'dist/**', 'node_modules/**', '.vscode-test/**'] },
+    {
+        ignores: [
+            'out/**',
+            'dist/**',
+            '.test-out/**',
+            'node_modules/**',
+            '.vscode-test/**',
+            'test/fixtures/**',
+        ],
+    },
 
     js.configs.recommended,
 
@@ -12,7 +21,7 @@ export default tseslint.config(
         // Type-aware rules are scoped to the TypeScript sources. Applying them
         // globally makes ESLint try to type-check build.mjs, which is not in
         // the tsconfig, and every run dies on the first rule that needs types.
-        files: ['src/**/*.ts'],
+        files: ['src/**/*.ts', 'test/**/*.ts'],
         extends: [tseslint.configs.recommendedTypeChecked],
         languageOptions: {
             parserOptions: {
@@ -37,6 +46,15 @@ export default tseslint.config(
             eqeqeq: ['error', 'always', { null: 'ignore' }],
             curly: 'error',
             'no-console': 'error', // use the LogOutputChannel
+        },
+    },
+
+    {
+        // Tests legitimately reach into internals and stub host APIs.
+        files: ['test/**/*.ts'],
+        rules: {
+            '@typescript-eslint/no-unsafe-assignment': 'off',
+            '@typescript-eslint/no-unsafe-member-access': 'off',
         },
     },
 

@@ -1,0 +1,15 @@
+{
+    // Tests are compiled by tsc, not bundled by esbuild: the runner loads them
+    // as individual CommonJS modules. Output goes to .test-out/ so it can never
+    // be mistaken for, or shipped alongside, the bundled extension in out/.
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "rootDir": ".",
+        "outDir": ".test-out",
+        "noEmit": false,
+        "sourceMap": true,
+        // Test doubles legitimately leave arguments unused.
+        "noUnusedParameters": false
+    },
+    "include": ["src/**/*.ts", "test/**/*.ts"]
+}
