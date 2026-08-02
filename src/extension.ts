@@ -50,6 +50,18 @@ const countCache = new CountCache();
  */
 let scanGeneration = 0;
 
+/**
+ * Drop every cached count and invalidate any scan in flight.
+ *
+ * The two have to happen together. Clearing the cache alone left a running
+ * scan writing results computed under the previous model or gitignore setting
+ * into the cache that was just emptied.
+ */
+function invalidateCounts(): void {
+    countCache.clear();
+    scanGeneration++;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Lifecycle
 // ═══════════════════════════════════════════════════════════════
@@ -80,7 +92,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // An exact tokenizer finishing its download changes every displayed number.
     context.subscriptions.push(
         tokenizer.onDidChangeAccuracy(() => {
-            countCache.clear();
+            invalidateCounts();
             void refreshFileStatusBar(vscode.window.activeTextEditor);
             void refreshProjectCount();
         }),
@@ -169,7 +181,7 @@ function registerCommands(context: vscode.ExtensionContext, store: TokenizerStor
 
         vscode.commands.registerCommand('llm-tokenizer.clearTokenizerCache', async () => {
             await store.clear();
-            countCache.clear();
+            invalidateCounts();
             void vscode.window.showInformationMessage('LLM Tokenizer: downloaded tokenizers cleared.');
             void refreshFileStatusBar(vscode.window.activeTextEditor);
         }),
@@ -187,7 +199,7 @@ async function setModel(context: vscode.ExtensionContext, modelId: string): Prom
 
     // Counts are model-specific; keeping them would show the previous model's
     // numbers under the new model's name.
-    countCache.clear();
+    invalidateCounts();
     log.info(`Model set to ${model.id}`);
 
     void refreshFileStatusBar(vscode.window.activeTextEditor);
@@ -320,7 +332,7 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
         }),
 
         vscode.workspace.onDidChangeWorkspaceFolders(() => {
-            countCache.clear();
+            invalidateCounts();
             void refreshProjectCount();
         }),
 
@@ -333,7 +345,7 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
             }
 
             if (e.affectsConfiguration(`${CONFIG_SECTION}.ignoreGitignoredFiles`)) {
-                countCache.clear();
+                invalidateCounts();
             }
 
             // `defaultModel` is only the fallback for a user who has never
@@ -348,7 +360,7 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
                 const model = configured ? findModel(configured) : undefined;
                 if (model && model.id !== currentModel.id) {
                     currentModel = model;
-                    countCache.clear();
+                    invalidateCounts();
                     log.info(`Default model changed to ${model.id}`);
                     void refreshFileStatusBar(vscode.window.activeTextEditor);
                     void ensureExactTokenizer(model, false);
@@ -451,7 +463,19 @@ function isCounted(outcome: FileOutcome): outcome is { count: number; exact: boo
     return 'count' in outcome;
 }
 
-async function countFile(uri: vscode.Uri, size: number): Promise<FileOutcome> {
+/**
+ * Count one file, caching the result.
+ *
+ * `stillValid` guards the cache write. A scan that has been superseded — by a
+ * model change, or by the gitignore setting flipping — would otherwise keep
+ * writing results computed under the old settings into the cache the new scan
+ * had just cleared, poisoning it.
+ */
+async function countFile(
+    uri: vscode.Uri,
+    size: number,
+    stillValid: () => boolean = () => true,
+): Promise<FileOutcome> {
     try {
         const stat = await vscode.workspace.fs.stat(uri);
         const cached = countCache.get(currentModel.id, uri, stat.mtime);
@@ -471,7 +495,9 @@ async function countFile(uri: vscode.Uri, size: number): Promise<FileOutcome> {
         const text = new TextDecoder().decode(bytes);
         const { count, exact } = await tokenizer.count(text, currentModel);
 
-        countCache.set(currentModel.id, uri, stat.mtime, { count, exact });
+        if (stillValid()) {
+            countCache.set(currentModel.id, uri, stat.mtime, { count, exact });
+        }
         return { count, exact };
     } catch (error) {
         log.debug(`Skipping ${uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
@@ -740,7 +766,7 @@ async function refreshProjectCount(): Promise<void> {
                     continue;
                 }
 
-                const outcome = await countFile(uri, size);
+                const outcome = await countFile(uri, size, () => !superseded());
                 if (isCounted(outcome)) {
                     total += outcome.count;
                     exact &&= outcome.exact;

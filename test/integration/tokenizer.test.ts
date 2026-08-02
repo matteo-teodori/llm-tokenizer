@@ -212,6 +212,24 @@ suite('tokenizer service', () => {
         assert.strictEqual(afterRestart.count, 2);
     });
 
+    test('an explicit download overrides an earlier "not on disk" result', async () => {
+        // Counting remembers which tokenizers are absent so it stops asking the
+        // file system once per file. That memo must not outlive an actual
+        // download, or the command would appear to succeed and change nothing.
+        const llama = model('llama-3.3-70b');
+        assert.strictEqual(llama.encoder.kind, 'hf');
+
+        const before = await tokenizer.count('abc', llama);
+        assert.strictEqual(before.exact, false);
+
+        await seedTokenizer(storageUri, llama.encoder.repo);
+        assert.strictEqual(await tokenizer.ensureExact(llama), true);
+
+        const after = await tokenizer.count('abc', llama);
+        assert.strictEqual(after.exact, true);
+        assert.strictEqual(after.count, 2);
+    });
+
     test('large input is counted without blocking the host', async () => {
         const big = 'lorem ipsum dolor sit amet '.repeat(20_000); // ~540 KB
         const started = Date.now();

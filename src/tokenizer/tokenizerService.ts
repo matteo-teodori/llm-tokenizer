@@ -45,6 +45,16 @@ export class TokenizerService implements vscode.Disposable {
     private readonly loadedRepos = new Set<string>();
     private readonly loading = new Map<string, Promise<boolean>>();
 
+    /**
+     * Repos known not to be on disk, or whose load failed.
+     *
+     * Without this, every count for a model with no downloaded tokenizer hit
+     * the file system to ask again — once per file, so a scan of a 35k-file
+     * workspace made 35k pointless stat calls — and a tokenizer.json that
+     * fails to build was retried on every one of them.
+     */
+    private readonly unavailable = new Set<string>();
+
     private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
     /** Fires when a tokenizer finishes downloading, so counts can be refreshed. */
     public readonly onDidChangeAccuracy = this.onDidChangeEmitter.event;
@@ -109,14 +119,23 @@ export class TokenizerService implements vscode.Disposable {
      * the user has not opted into stays an estimate.
      */
     private async rehydrateIfNeeded(model: ModelInfo): Promise<void> {
-        if (model.encoder.kind !== 'hf' || this.loadedRepos.has(model.encoder.repo)) {
-            return;
-        }
-        if (!(await this.store.isDownloaded(model.encoder.repo))) {
+        if (model.encoder.kind !== 'hf') {
             return;
         }
 
-        await this.ensureExact(model);
+        const { repo } = model.encoder;
+        if (this.loadedRepos.has(repo) || this.unavailable.has(repo)) {
+            return;
+        }
+
+        if (!(await this.store.isDownloaded(repo))) {
+            this.unavailable.add(repo);
+            return;
+        }
+
+        if (!(await this.ensureExact(model))) {
+            this.unavailable.add(repo);
+        }
     }
 
     /**
@@ -152,6 +171,9 @@ export class TokenizerService implements vscode.Disposable {
         if (this.loadedRepos.has(repo)) {
             return true;
         }
+
+        // An explicit request retries even a repo that failed before.
+        this.unavailable.delete(repo);
 
         const existing = this.loading.get(repo);
         if (existing) {
@@ -226,6 +248,8 @@ export class TokenizerService implements vscode.Disposable {
     private handleWorkerExit(error: Error): void {
         this.worker = undefined;
         this.loadedRepos.clear();
+        // Still on disk — let the next count re-send them.
+        this.unavailable.clear();
         this.failAllPending(error);
     }
 

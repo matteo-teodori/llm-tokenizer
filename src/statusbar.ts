@@ -26,6 +26,7 @@ export interface CountDisplay {
 export class StatusBarManager {
     private readonly fileItem: vscode.StatusBarItem;
     private readonly projectItem: vscode.StatusBarItem;
+    private hasFileCount = false;
     private hasProjectCount = false;
 
     constructor(context: vscode.ExtensionContext) {
@@ -47,11 +48,13 @@ export class StatusBarManager {
         this.fileItem.text = `${icon(status)} ${prefix(display.exact)}${formatNumber(display.count)} tokens${display.isSelection ? ' (selection)' : ''}`;
         this.fileItem.color = colour(status);
         this.fileItem.tooltip = tooltip(`Tokens in the current ${scope}`, display, status);
+        this.hasFileCount = true;
 
         this.applyDisplayMode(display.projectScanEnabled);
     }
 
     public clearFileCount(): void {
+        this.hasFileCount = false;
         this.fileItem.hide();
     }
 
@@ -85,7 +88,10 @@ export class StatusBarManager {
         const mode = configured === 'project' && !projectScanEnabled ? 'file' : configured;
         const showProject = projectScanEnabled && this.hasProjectCount && mode !== 'file';
 
-        if (mode === 'project' && showProject) {
+        // `hasFileCount` matters: with no editor open there is no count to
+        // show, and re-showing the item would resurrect whatever number was
+        // last written to it — belonging to a file the user has since closed.
+        if (!this.hasFileCount || (mode === 'project' && showProject)) {
             this.fileItem.hide();
         } else {
             this.fileItem.show();
