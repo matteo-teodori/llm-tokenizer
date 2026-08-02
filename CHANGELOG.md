@@ -18,7 +18,7 @@ either exact or visibly marked as estimates.
   and a few closed-weight models — show `≈` and explain why in the tooltip.
 - `llm-tokenizer.enableProjectScan` turns workspace-wide counting off on very
   large repositories. Per-file and per-folder counting keeps working.
-  *(Thanks to the contributor who proposed this in #1.)*
+  Proposed by [@tivnantu](https://github.com/tivnantu) in #1.
 - `llm-tokenizer.downloadTokenizers` controls the one-time tokenizer download.
 - Commands to download the exact tokenizer for the current model and to clear
   the download cache.
@@ -48,6 +48,14 @@ either exact or visibly marked as estimates.
 - Changing a setting now takes effect immediately.
 - Selecting a folder and a file inside it no longer double-counts the file.
 - `.git/info/exclude` and nested `.gitignore` rules are honoured.
+- Binary files without a known extension — `.dat`, `.pack`, a renamed binary,
+  anything extensionless — were tokenized as text. Content is now sniffed too.
+- In a multi-root workspace, files with the same relative path in two roots
+  collided into one row in the summary, showing one file's count under a total
+  that included both.
+- The summary rendered one row and one click listener per file and held them
+  for the lifetime of the window. Listings are capped at 1,000 entries, largest
+  first, with the omission stated; totals still cover every file.
 
 ### Security
 - The summary view escaped nothing. A file named `<img src=x onerror=…>.ts`
@@ -67,10 +75,19 @@ either exact or visibly marked as estimates.
   window, so the 80% warning fires at a number that means something.
 - Token counting is **~50× faster** and the extension no longer opens every
   file in the workspace as a text document during a scan.
-- The packaged extension is bundled: **10.2 MB → 2.7 MB**.
+- The packaged extension is bundled and ships no dependency tree: **~10 MB →
+  2.6 MB**.
 - Status bar uses themed icons instead of emoji.
 - Declares `untrustedWorkspaces` support, so it no longer disables itself in
   Restricted Mode.
+- The icon was a JPEG named `.png` at 1024×1024; it is now a real 256×256 PNG.
+
+### Internal
+- A test suite: 71 tests running in a real VS Code instance, written against
+  the specific defects fixed above.
+- ESLint and the type checker both run again, and in CI on three platforms.
+- The settings dropdown is generated from the model registry, so the two can no
+  longer drift.
 
 ### Removed
 - Models that were retired by their providers or that never existed. Each has a
