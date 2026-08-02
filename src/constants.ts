@@ -17,6 +17,15 @@ export const CONTEXT_WARNING_THRESHOLD = 80;
 /** Context limit error threshold (percentage) */
 export const CONTEXT_ERROR_THRESHOLD = 100;
 
+/**
+ * Largest file we will tokenize.
+ *
+ * Tokenizing costs roughly 4.5 bytes of heap per input byte, so a 40 MB CSV is
+ * ~450 MB of RSS and several seconds of blocked worker. Files above this are
+ * reported as skipped rather than counted.
+ */
+export const MAX_TOKENIZED_FILE_BYTES = 10 * 1024 * 1024;
+
 /** 
  * Binary file extensions to skip during token counting
  * These files cannot be meaningfully tokenized
