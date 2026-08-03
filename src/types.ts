@@ -35,6 +35,8 @@ export interface SkippedFile {
  */
 export interface IgnoredFile {
     path: string;
+    /** Ignored directories are rendered as folders — clicking one opened nothing. */
+    isDirectory?: boolean;
 }
 
 /**

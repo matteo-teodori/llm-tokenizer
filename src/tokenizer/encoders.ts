@@ -167,10 +167,23 @@ export function hfEncoder(repo: string, files: HfTokenizerFiles): Encoder {
 
     const Ctor = loadTokenizerLibrary();
     const tokenizer = new Ctor(files.tokenizerJSON, files.tokenizerConfig);
+
+    /**
+     * Tokens this tokenizer adds regardless of input.
+     *
+     * Some tokenizers carry a `TemplateProcessing` post-processor that prepends
+     * a beginning-of-sequence token — Mistral's does, so every file came back
+     * one token heavy, and it was labelled exact. Those tokens belong to chat
+     * templating, not to the contents of a file, so the constant is measured
+     * once here and subtracted. Llama, Qwen and DeepSeek use a plain ByteLevel
+     * post-processor and measure zero, so they are unaffected.
+     */
+    const specialTokenBaseline = tokenizer.encode('').ids.length;
+
     const encoder: Encoder = {
         kind: 'hf',
         exact: true,
-        count: text => tokenizer.encode(text).ids.length,
+        count: text => Math.max(0, tokenizer.encode(text).ids.length - specialTokenBaseline),
     };
 
     hfCache.set(repo, encoder);

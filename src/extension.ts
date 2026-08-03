@@ -266,21 +266,42 @@ async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Pro
         return;
     }
 
-    const run = (token?: vscode.CancellationToken) => tokenizer.ensureExact(model, token);
-
     if (!interactive) {
-        void run();
+        void tokenizer.ensureExact(model);
         return;
     }
 
-    await vscode.window.withProgress(
+    const succeeded = await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
             title: `Downloading the ${model.label} tokenizer…`,
             cancellable: true,
         },
-        (_progress, token) => run(token),
+        (_progress, token) => tokenizer.ensureExact(model, token),
     );
+
+    // ensureExact never rejects — a failed download is logged and reported as
+    // false. Discarding that left the command showing a progress notification
+    // that vanished with no result: offline, behind a proxy, on a gated
+    // repository or after the timeout, it was indistinguishable from broken.
+    if (succeeded) {
+        void vscode.window.showInformationMessage(
+            `${model.label} is now counted exactly.`,
+        );
+        return;
+    }
+
+    const openLog = 'Show Log';
+    void vscode.window
+        .showErrorMessage(
+            `Could not download the ${model.label} tokenizer. Counts stay estimated.`,
+            openLog,
+        )
+        .then(choice => {
+            if (choice === openLog) {
+                log.show();
+            }
+        });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -473,11 +494,12 @@ function isCounted(outcome: FileOutcome): outcome is { count: number; exact: boo
 async function countFile(
     uri: vscode.Uri,
     size: number,
+    model: ModelInfo,
     stillValid: () => boolean = () => true,
 ): Promise<FileOutcome> {
     try {
         const stat = await vscode.workspace.fs.stat(uri);
-        const cached = countCache.get(currentModel.id, uri, stat.mtime);
+        const cached = countCache.get(model.id, uri, stat.mtime);
         if (cached) {
             return cached;
         }
@@ -492,10 +514,10 @@ async function countFile(
         }
 
         const text = new TextDecoder().decode(bytes);
-        const { count, exact } = await tokenizer.count(text, currentModel);
+        const { count, exact } = await tokenizer.count(text, model);
 
         if (stillValid()) {
-            countCache.set(currentModel.id, uri, stat.mtime, { count, exact });
+            countCache.set(model.id, uri, stat.mtime, { count, exact });
         }
         return { count, exact };
     } catch (error) {
@@ -510,6 +532,7 @@ async function recordFile(
     size: number,
     context: FolderContext,
     result: ScanResult,
+    model: ModelInfo,
 ): Promise<void> {
     const skip: SkipReason | undefined = shouldCount(uri, size, context);
     if (skip === 'gitignored') {
@@ -521,7 +544,7 @@ async function recordFile(
         return;
     }
 
-    const outcome = await countFile(uri, size);
+    const outcome = await countFile(uri, size, model);
     if (!isCounted(outcome)) {
         result.skipped.push({ path: uri.fsPath, reason: describeSkipReason(outcome.skip) });
         return;
@@ -532,9 +555,23 @@ async function recordFile(
     result.processed.push({ path: uri.fsPath, tokens: outcome.count });
 }
 
+/** Count an open document's current text, saved or not. */
+async function countOpenDocument(document: vscode.TextDocument): Promise<void> {
+    const model = currentModel;
+    const { count, exact } = await tokenizer.count(document.getText(), model);
+    const name = document.isUntitled
+        ? 'Untitled'
+        : path.basename(document.uri.fsPath);
+
+    void vscode.window.showInformationMessage(
+        `${name}: ${exact ? '' : '≈'}${formatNumber(count)} tokens (${model.label})`,
+    );
+}
+
 /** Count one file and report it as a notification. */
 async function countSingleFile(uri: vscode.Uri, size: number): Promise<void> {
     const name = path.basename(uri.fsPath);
+    const model = currentModel;
     const folder = vscode.workspace.getWorkspaceFolder(uri);
     const context = folder
         ? await FolderContext.create(folder, respectGitignore())
@@ -548,7 +585,7 @@ async function countSingleFile(uri: vscode.Uri, size: number): Promise<void> {
         return;
     }
 
-    const outcome = await countFile(uri, size);
+    const outcome = await countFile(uri, size, model);
     if (!isCounted(outcome)) {
         void vscode.window.showWarningMessage(
             `LLM Tokenizer: ${name} was not counted — ${describeSkipReason(outcome.skip).toLowerCase()}.`,
@@ -557,7 +594,7 @@ async function countSingleFile(uri: vscode.Uri, size: number): Promise<void> {
     }
 
     void vscode.window.showInformationMessage(
-        `${name}: ${outcome.exact ? '' : '≈'}${formatNumber(outcome.count)} tokens (${currentModel.label})`,
+        `${name}: ${outcome.exact ? '' : '≈'}${formatNumber(outcome.count)} tokens (${model.label})`,
     );
 }
 
@@ -575,6 +612,18 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
             editor.document.uri.toString() === only.toString()
         ) {
             await countActiveEditor();
+            return;
+        }
+
+        // An open editor is the authority on its own contents. Going straight
+        // to disk reported the last saved version for a file with unsaved
+        // edits, and failed outright on an untitled document — which has no
+        // file to stat — so asking for a count produced an error instead.
+        const open = vscode.workspace.textDocuments.find(
+            doc => doc.uri.toString() === only.toString(),
+        );
+        if (open && (open.isDirty || open.isUntitled)) {
+            await countOpenDocument(open);
             return;
         }
 
@@ -599,6 +648,11 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
     await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: 'Counting tokens…', cancellable: true },
         async (progress, token) => {
+            // Snapshot the model for the whole operation. Reading the global
+            // per file meant switching model mid-count produced a total that
+            // was part one model and part another, and cached both under
+            // whichever id happened to be current at the time.
+            const model = currentModel;
             const result: ScanResult = { total: 0, processed: [], skipped: [], ignored: [], exact: true };
             const contexts = new Map<string, FolderContext>();
             const useGitignore = respectGitignore();
@@ -655,7 +709,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                         candidates.push({ ...file, context });
                     }
                     for (const dir of found.ignoredDirectories) {
-                        result.ignored.push({ path: dir.fsPath });
+                        result.ignored.push({ path: dir.fsPath, isDirectory: true });
                     }
                     for (const bad of found.unreadable) {
                         result.skipped.push({ path: bad.fsPath, reason: describeSkipReason('unreadable') });
@@ -688,7 +742,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                     pending = 0;
                 }
 
-                await recordFile(uri, size, context, result);
+                await recordFile(uri, size, context, result, model);
             }
 
             showMultiFileSummary({
@@ -698,7 +752,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                 processedFiles: result.processed,
                 skippedFiles: result.skipped,
                 ignoredFiles: result.ignored,
-                modelLabel: currentModel.label,
+                modelLabel: model.label,
                 exact: result.exact,
                 contextStatus: contextStatus(result.total),
             });
@@ -725,6 +779,7 @@ async function refreshProjectCount(): Promise<void> {
     // A generation counter rather than a CancellationToken: nothing here can
     // be interrupted mid-await, so cancellation is entirely a matter of the
     // loop noticing it has been superseded and abandoning its result.
+    const model = currentModel;
     const generation = ++scanGeneration;
     const superseded = () => generation !== scanGeneration;
 
@@ -757,7 +812,7 @@ async function refreshProjectCount(): Promise<void> {
                     continue;
                 }
 
-                const outcome = await countFile(uri, size, () => !superseded());
+                const outcome = await countFile(uri, size, model, () => !superseded());
                 if (isCounted(outcome)) {
                     total += outcome.count;
                     exact &&= outcome.exact;
@@ -774,7 +829,7 @@ async function refreshProjectCount(): Promise<void> {
         statusBar.showProjectCount({
             count: total,
             exact,
-            model: currentModel,
+            model,
             projectScanEnabled: true,
         });
     } catch (error) {

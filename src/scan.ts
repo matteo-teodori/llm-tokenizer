@@ -9,6 +9,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { promises as fs } from 'fs';
 import ignore, { type Ignore } from 'ignore';
 
 import { BINARY_EXTENSIONS, IGNORED_DIRECTORIES, MAX_TOKENIZED_FILE_BYTES } from './constants';
@@ -189,6 +190,21 @@ export function dedupeSelection(uris: readonly vscode.Uri[]): vscode.Uri[] {
     return kept;
 }
 
+/**
+ * A directory's canonical identity, for detecting one reached twice.
+ *
+ * Falls back to the URI when the path cannot be resolved — a deleted directory,
+ * or a file system where realpath does not apply. Being conservative there only
+ * risks walking something twice, never skipping it.
+ */
+async function realPath(uri: vscode.Uri): Promise<string> {
+    try {
+        return await fs.realpath(uri.fsPath);
+    } catch {
+        return uri.toString();
+    }
+}
+
 /** A file the walk found, with the size already read from its stat. */
 export interface DiscoveredFile {
     uri: vscode.Uri;
@@ -221,12 +237,21 @@ export async function collectFiles(
     onProgress: (found: number) => void = () => undefined,
 ): Promise<Discovery> {
     const discovery: Discovery = { files: [], ignoredDirectories: [], unreadable: [] };
-    // A symlink pointing at an ancestor makes the walk recurse forever, or at
-    // best count the same tree several times over.
+
+    /**
+     * Directories already walked, keyed by their **resolved** path.
+     *
+     * Resolving is the whole point. A top-down walk reaches every directory by
+     * exactly one path string, so a set keyed on the URI never matches and the
+     * guard is dead code — which is what it was. Symlinks are what make the
+     * same directory reachable twice: `docs/latest -> ../v2` counts that tree
+     * twice with no loop involved at all, and `sub/up -> ..` counts it once per
+     * level until the OS gives up with ELOOP.
+     */
     const visited = new Set<string>();
 
     const walk = async (dir: vscode.Uri): Promise<void> => {
-        const identity = dir.toString();
+        const identity = await realPath(dir);
         if (visited.has(identity)) {
             return;
         }

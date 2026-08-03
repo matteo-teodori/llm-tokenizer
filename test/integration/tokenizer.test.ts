@@ -23,8 +23,12 @@ function model(id: string): ModelInfo {
  * Mirrors TokenizerStore's on-disk layout: one directory per repo, with the
  * slash flattened.
  */
-async function seedTokenizer(storage: vscode.Uri, repo: string): Promise<void> {
-    const fixture = vscode.Uri.file(path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'tokenizer'));
+async function seedTokenizer(
+    storage: vscode.Uri,
+    repo: string,
+    fixtureName = 'tokenizer',
+): Promise<void> {
+    const fixture = vscode.Uri.file(path.join(__dirname, '..', '..', '..', 'test', 'fixtures', fixtureName));
     const target = vscode.Uri.joinPath(storage, repo.replace(/[/\\]/g, '--'));
     await vscode.workspace.fs.createDirectory(target);
 
@@ -228,6 +232,23 @@ suite('tokenizer service', () => {
         const after = await tokenizer.count('abc', llama);
         assert.strictEqual(after.exact, true);
         assert.strictEqual(after.count, 2);
+    });
+
+    test('special tokens are not counted as file content', async () => {
+        // Some tokenizers prepend a beginning-of-sequence token — Mistral's
+        // does. Counting it made every file one token heavy, and the result was
+        // still labelled exact. The fixture's vocabulary is identical to the
+        // plain one, so the corrected count must match it exactly.
+        const llama = model('llama-3.3-70b');
+        assert.strictEqual(llama.encoder.kind, 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo, 'tokenizer-bos');
+
+        const result = await tokenizer.count('abc', llama);
+        assert.strictEqual(result.exact, true);
+        assert.strictEqual(result.count, 2, 'the BOS token must not be counted');
+
+        // And an empty file is still zero, not one.
+        assert.deepStrictEqual(await tokenizer.count('', llama), { count: 0, exact: true });
     });
 
     test('large input is counted without blocking the host', async () => {

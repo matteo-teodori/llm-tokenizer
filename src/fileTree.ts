@@ -10,7 +10,7 @@ import { escapeHtml } from './html';
  * @returns Root FileNode of the tree with calculated folder totals
  */
 export function buildFileTree(
-    files: { path: string; tokens?: number; reason?: string }[]
+    files: { path: string; tokens?: number; reason?: string; isDirectory?: boolean }[]
 ): FileNode {
     const root: FileNode = {
         name: 'root',
@@ -60,7 +60,10 @@ export function buildFileTree(
                 current.children.set(part, {
                     name: part,
                     path: nodePath,
-                    isFile: isLastPart,
+                    // An ignored *directory* is a leaf of this tree but is not
+                    // a file: rendering it as a link produced a row that looked
+                    // clickable and did nothing.
+                    isFile: isLastPart && !file.isDirectory,
                     tokens: isLastPart ? file.tokens : 0, // Initialize folder tokens to 0
                     reason: isLastPart ? file.reason : undefined,
                     children: isLastPart ? undefined : new Map()

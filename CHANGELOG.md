@@ -10,7 +10,9 @@ A correctness and accuracy release. Counts that were silently wrong are now
 either exact or visibly marked as estimates.
 
 ### Added
-- **Exact tokenization for ~50 models.** OpenAI models use OpenAI's own BPE,
+- **Exact tokenization for ~50 models.** Special tokens are excluded, so a
+  tokenizer that prepends a beginning-of-sequence marker (Mistral's does) no
+  longer adds one token to every file. OpenAI models use OpenAI's own BPE,
   bundled and offline. Llama, Gemma, DeepSeek, Qwen, Mistral, GLM, MiniMax,
   MiMo and Hunyuan use the model's real `tokenizer.json`, downloaded once from
   Hugging Face and cached on disk. No file contents ever leave your machine.
@@ -42,7 +44,9 @@ either exact or visibly marked as estimates.
   newer result.
 - Directory patterns in `.gitignore` (`build/`) no longer match, so ignored
   trees were walked in full.
-- Symlinked files and directories were silently dropped from every total.
+- Symlinked files and directories were silently dropped from every total. A
+  directory reached through a symlink is now counted once, not once per path
+  that reaches it — `docs/latest -> ../v2` used to count that tree twice.
 - A deleted file mid-scan discarded all work completed so far.
 - Very large files are skipped instead of exhausting memory.
 - Changing a setting now takes effect immediately.
@@ -50,6 +54,13 @@ either exact or visibly marked as estimates.
 - `.git/info/exclude` is honoured alongside the root `.gitignore`.
 - Counting a file that belongs to no workspace folder reported a total of zero;
   it was being dropped before it was ever read.
+- Counting an unsaved or untitled editor reported an error; it now counts what
+  is on screen rather than what is on disk.
+- Switching model during a multi-file count mixed two models' numbers into one
+  total. The model is fixed for the duration of an operation.
+- "Download Exact Tokenizer" said nothing at all when the download failed —
+  offline, behind a proxy, or on a gated repository it was indistinguishable
+  from a broken command.
 - Binary files without a known extension — `.dat`, `.pack`, a renamed binary,
   anything extensionless — were tokenized as text. Content is now sniffed too.
 - In a multi-root workspace, files with the same relative path in two roots
@@ -92,7 +103,7 @@ either exact or visibly marked as estimates.
   bar APIs this release uses.
 
 ### Internal
-- A test suite: 85 tests running in a real VS Code instance, written against
+- A test suite: 89 tests running in a real VS Code instance, written against
   the specific defects fixed above.
 - ESLint and the type checker run again, and the suite runs in CI on Linux,
   Windows and macOS.

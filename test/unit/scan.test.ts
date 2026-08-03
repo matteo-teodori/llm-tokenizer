@@ -1,10 +1,12 @@
 import * as assert from 'assert';
 import * as os from 'os';
 import * as path from 'path';
+import { promises as fs } from 'fs';
 import * as vscode from 'vscode';
 
 import {
     FolderContext,
+    collectFiles,
     buildExcludeGlob,
     dedupeSelection,
     describeSkipReason,
@@ -222,6 +224,75 @@ suite('directory traversal', () => {
         assert.strictEqual(isFile(vscode.FileType.File), true);
         assert.strictEqual(isDirectory(vscode.FileType.File), false);
         assert.strictEqual(isFile(vscode.FileType.Directory), false);
+    });
+});
+
+suite('symlinked directories', () => {
+    /** Build a tree under a fresh temp root and return it. */
+    async function tree(build: (root: string) => Promise<void>): Promise<vscode.Uri> {
+        const root = vscode.Uri.file(
+            path.join(os.tmpdir(), `llm-tokenizer-link-${process.pid}-${roots.length}`),
+        );
+        await vscode.workspace.fs.createDirectory(root);
+        roots.push(root);
+        await build(root.fsPath);
+        return root;
+    }
+
+    const write = async (p: string, text: string): Promise<void> => {
+        await fs.mkdir(path.dirname(p), { recursive: true });
+        await fs.writeFile(p, text);
+    };
+
+    async function count(root: vscode.Uri): Promise<string[]> {
+        const context = await FolderContext.create({ uri: root, name: 'fixture', index: 0 }, false);
+        const cancellation = new vscode.CancellationTokenSource();
+        try {
+            const found = await collectFiles(root, context, cancellation.token);
+            return found.files.map(f => f.uri.fsPath).sort();
+        } finally {
+            cancellation.dispose();
+        }
+    }
+
+    test('a sibling symlink does not count the same tree twice', async function () {
+        // No loop is needed for this: `docs/latest -> ../v2` is enough. The
+        // guard used to be keyed on the unresolved URI, which is unique at
+        // every level of a top-down walk, so it never once fired.
+        const root = await tree(async dir => {
+            await write(path.join(dir, 'real', 'one.txt'), 'a');
+            await write(path.join(dir, 'real', 'two.txt'), 'b');
+            await fs.mkdir(path.join(dir, 'docs'), { recursive: true });
+            await fs.symlink(path.join(dir, 'real'), path.join(dir, 'docs', 'link'), 'dir');
+        });
+
+        const files = await count(root);
+        assert.strictEqual(files.length, 2, `expected 2 distinct files, got ${files.join(', ')}`);
+    });
+
+    test('a symlink to an ancestor terminates instead of multiplying the tree', async function () {
+        // `sub/up -> ..` used to walk the tree once per level until the OS
+        // returned ELOOP, reporting each file about thirty times over.
+        const root = await tree(async dir => {
+            await write(path.join(dir, 'a.txt'), 'a');
+            await fs.mkdir(path.join(dir, 'sub'), { recursive: true });
+            await fs.symlink(dir, path.join(dir, 'sub', 'up'), 'dir');
+        });
+
+        const files = await count(root);
+        assert.strictEqual(files.length, 1, `expected 1 file, got ${files.length}`);
+    });
+
+    test('a symlinked file is still counted', async function () {
+        // Following links was the point of the original change; only the
+        // duplication was wrong.
+        const root = await tree(async dir => {
+            await write(path.join(dir, 'real.txt'), 'a');
+            await fs.symlink(path.join(dir, 'real.txt'), path.join(dir, 'alias.txt'));
+        });
+
+        const files = await count(root);
+        assert.strictEqual(files.length, 2, 'a symlinked file is a separate entry');
     });
 });
 
