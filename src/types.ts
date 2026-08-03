@@ -35,6 +35,8 @@ export interface SkippedFile {
  */
 export interface IgnoredFile {
     path: string;
+    /** Ignored directories are rendered as folders — clicking one opened nothing. */
+    isDirectory?: boolean;
 }
 
 /**
@@ -64,14 +66,6 @@ export interface FileNode {
  */
 export interface ModelQuickPickItem extends vscode.QuickPickItem {
     modelId?: string;
-}
-
-/**
- * Status indicator with icon and optional color
- */
-export interface StatusIndicator {
-    icon: string;
-    color?: vscode.ThemeColor;
 }
 
 /**

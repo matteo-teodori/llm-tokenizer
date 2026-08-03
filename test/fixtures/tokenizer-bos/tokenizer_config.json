@@ -1,0 +1,5 @@
+{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "unk_token": "<unk>",
+  "bos_token": "<s>"
+}

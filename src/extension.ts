@@ -1,503 +1,853 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-const ignore = require('ignore');
 
-import { TokenizerService, MODEL_REGISTRY } from './tokenizer';
+import { TokenizerService } from './tokenizer/tokenizerService';
+import { TokenizerStore } from './tokenizer/tokenizerStore';
+import { findModel, defaultModel, MODELS, MODEL_ALIASES, type ModelInfo } from './tokenizer/registry';
 import { StatusBarManager } from './statusbar';
 import { showMultiFileSummary } from './webview';
-import { isBinaryFile, formatNumber } from './utils';
+import { formatNumber } from './utils';
+import { STORAGE_KEY, DEBOUNCE_DELAY_MS, PROJECT_UPDATE_DELAY_MS } from './constants';
 import {
-    STORAGE_KEY,
-    DEBOUNCE_DELAY_MS,
-    PROJECT_UPDATE_DELAY_MS,
-    IGNORED_DIRECTORIES
-} from './constants';
-import {
-    ModelQuickPickItem,
-    DirectoryCountResult,
-    TokenCacheEntry
-} from './types';
+    FolderContext,
+    buildExcludeGlob,
+    dedupeSelection,
+    describeSkipReason,
+    collectFiles,
+    isDirectory,
+    looksBinary,
+    shouldCount,
+    type SkipReason,
+} from './scan';
+import { CountCache } from './countCache';
+import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
+
+const CONFIG_SECTION = 'llm-tokenizer';
 
 // ═══════════════════════════════════════════════════════════════
-// Extension State
+// Extension state
 // ═══════════════════════════════════════════════════════════════
 
-let tokenizerService: TokenizerService;
-let statusBarManager: StatusBarManager;
-let debounceTimer: NodeJS.Timeout | undefined;
-let projectUpdateTimer: NodeJS.Timeout | undefined;
-let projectTokenCount: number = 0;
-let projectCountCache: Map<string, TokenCacheEntry> = new Map();
+let log: vscode.LogOutputChannel;
+let tokenizer: TokenizerService;
+let statusBar: StatusBarManager;
+let currentModel: ModelInfo;
+
+let statusBarTimer: NodeJS.Timeout | undefined;
+let projectScanTimer: NodeJS.Timeout | undefined;
+
+/** Per-file counts, keyed by model and file revision. See src/countCache.ts. */
+const countCache = new CountCache();
+
+/**
+ * Incremented whenever a scan is superseded or cancelled.
+ *
+ * The 2-second debounce only delayed *starting* a scan; two scans could still
+ * overlap on a large repo, and whichever finished last won — often the older
+ * one. Each scan captures the generation at its start and abandons its work if
+ * it no longer matches.
+ */
+let scanGeneration = 0;
+
+/**
+ * Drop every cached count and invalidate any scan in flight.
+ *
+ * The two have to happen together. Clearing the cache alone left a running
+ * scan writing results computed under the previous model or gitignore setting
+ * into the cache that was just emptied.
+ */
+function invalidateCounts(): void {
+    countCache.clear();
+    scanGeneration++;
+}
 
 // ═══════════════════════════════════════════════════════════════
-// Extension Lifecycle
+// Lifecycle
 // ═══════════════════════════════════════════════════════════════
 
 export function activate(context: vscode.ExtensionContext): void {
-    console.log('LLM Tokenizer extension is now active!');
+    log = vscode.window.createOutputChannel('LLM Tokenizer', { log: true });
+    context.subscriptions.push(log);
 
-    // Initialize services
-    tokenizerService = new TokenizerService();
-    statusBarManager = new StatusBarManager(tokenizerService, context);
+    const store = new TokenizerStore(context.globalStorageUri);
+    tokenizer = new TokenizerService(path.join(context.extensionPath, 'out', 'worker.js'), store, log);
+    // v1.3.0 never disposed this, so every window reload leaked a worker thread.
+    context.subscriptions.push(tokenizer);
 
-    // Load saved model preference
-    const savedModel = context.globalState.get<string>(STORAGE_KEY);
-    if (savedModel && MODEL_REGISTRY.find(m => m.id === savedModel)) {
-        tokenizerService.setModel(savedModel);
-    }
+    statusBar = new StatusBarManager(context);
+    currentModel = resolveInitialModel(context);
 
-    // Register commands
-    registerCommands(context);
-
-    // Register event listeners
+    registerCommands(context, store);
     registerEventListeners(context);
 
-    // Initial updates
-    statusBarManager.updateFileStatusBar(vscode.window.activeTextEditor);
-    updateProjectTokenCountAsync();
+    void refreshFileStatusBar(vscode.window.activeTextEditor);
+    void refreshProjectCount();
+
+    // If the startup model needs a tokenizer and the user has opted into
+    // downloads, fetch it now rather than leaving them on an estimate until
+    // they happen to find the command.
+    void ensureExactTokenizer(currentModel, false);
+
+    // An exact tokenizer finishing its download changes every displayed number.
+    context.subscriptions.push(
+        tokenizer.onDidChangeAccuracy(() => {
+            invalidateCounts();
+            void refreshFileStatusBar(vscode.window.activeTextEditor);
+            void refreshProjectCount();
+        }),
+    );
+
+    log.info(`Activated with ${MODELS.length} models; current model ${currentModel.id}`);
 }
 
 export function deactivate(): void {
-    if (debounceTimer) {
-        clearTimeout(debounceTimer);
+    clearTimeout(statusBarTimer);
+    clearTimeout(projectScanTimer);
+    scanGeneration++;
+    countCache.clear();
+}
+
+/**
+ * Pick the startup model: the saved choice, else the `defaultModel` setting.
+ *
+ * The setting was documented in the README and offered 69 values in the
+ * settings UI, but nothing ever read it — the model came from global state with
+ * a hardcoded fallback. Removed and renamed ids are migrated through
+ * MODEL_ALIASES so nobody is silently reset.
+ */
+function resolveInitialModel(context: vscode.ExtensionContext): ModelInfo {
+    const saved = context.globalState.get<string>(STORAGE_KEY);
+    const configured = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('defaultModel');
+
+    for (const candidate of [saved, configured]) {
+        if (!candidate) {
+            continue;
+        }
+
+        const model = findModel(candidate);
+        if (model && model.id !== candidate) {
+            log.info(`Model "${candidate}" no longer exists; migrated to "${model.id}"`);
+            void context.globalState.update(STORAGE_KEY, model.id);
+            void vscode.window.showInformationMessage(
+                `LLM Tokenizer: "${candidate}" is no longer available. Switched to ${model.label}.`,
+            );
+        }
+        if (model) {
+            return model;
+        }
+        if (MODEL_ALIASES[candidate] === undefined) {
+            log.warn(`Unknown model "${candidate}" in settings; falling back to the default`);
+        }
     }
-    if (projectUpdateTimer) {
-        clearTimeout(projectUpdateTimer);
-    }
+
+    return defaultModel();
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Command Registration
+// Commands
 // ═══════════════════════════════════════════════════════════════
 
-function registerCommands(context: vscode.ExtensionContext): void {
-    // Count tokens command
+function registerCommands(context: vscode.ExtensionContext, store: TokenizerStore): void {
     context.subscriptions.push(
         vscode.commands.registerCommand(
             'llm-tokenizer.countTokens',
-            async (uri: vscode.Uri, allUris?: vscode.Uri[]) => {
-                if (allUris && allUris.length > 1) {
-                    await handleMultipleUris(allUris);
-                } else if (uri) {
-                    await handleSingleUri(uri);
+            async (uri?: vscode.Uri, allUris?: vscode.Uri[]) => {
+                const selection = allUris?.length ? allUris : uri ? [uri] : [];
+                if (selection.length > 0) {
+                    await countSelection(selection);
                 } else {
-                    await handleCommandPalette();
+                    await countActiveEditor();
                 }
-            }
-        )
-    );
+            },
+        ),
 
-    // Select model command
-    context.subscriptions.push(
         vscode.commands.registerCommand('llm-tokenizer.selectModel', async () => {
-            const selected = await showModelPicker();
-            if (selected?.modelId) {
-                tokenizerService.setModel(selected.modelId);
-                context.globalState.update(STORAGE_KEY, selected.modelId);
-                vscode.window.showInformationMessage(`Switched to: ${selected.label}`);
-                statusBarManager.updateFileStatusBar(vscode.window.activeTextEditor);
-            }
-        })
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Event Listeners
-// ═══════════════════════════════════════════════════════════════
-
-function registerEventListeners(context: vscode.ExtensionContext): void {
-    context.subscriptions.push(
-        vscode.window.onDidChangeActiveTextEditor(editor => {
-            debouncedUpdateStatusBar(editor);
-        }),
-
-        vscode.window.onDidChangeTextEditorSelection(e => {
-            debouncedUpdateStatusBar(e.textEditor);
-        }),
-
-        vscode.workspace.onDidChangeTextDocument(e => {
-            if (
-                vscode.window.activeTextEditor &&
-                e.document === vscode.window.activeTextEditor.document
-            ) {
-                debouncedUpdateStatusBar(vscode.window.activeTextEditor);
-            }
-            // Trigger project update when a document becomes clean (saved)
-            if (!e.document.isDirty) {
-                debouncedUpdateProjectCount();
-            }
-        }),
-
-        vscode.workspace.onDidSaveTextDocument(() => {
-            debouncedUpdateProjectCount();
-        }),
-
-        vscode.workspace.onDidCreateFiles(() => {
-            debouncedUpdateProjectCount();
-        }),
-
-        vscode.workspace.onDidDeleteFiles(() => {
-            projectCountCache.clear();
-            debouncedUpdateProjectCount();
-        })
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Model Picker
-// ═══════════════════════════════════════════════════════════════
-
-async function showModelPicker(): Promise<ModelQuickPickItem | undefined> {
-    const items = buildQuickPickItems();
-    return vscode.window.showQuickPick(items, {
-        placeHolder: 'Select AI Model for Token Counting',
-        matchOnDescription: true
-    });
-}
-
-function buildQuickPickItems(): ModelQuickPickItem[] {
-    const items: ModelQuickPickItem[] = [];
-    const providers = [...new Set(MODEL_REGISTRY.map(m => m.provider))];
-
-    for (const provider of providers) {
-        // Add separator
-        items.push({
-            label: provider,
-            kind: vscode.QuickPickItemKind.Separator
-        });
-
-        // Add models for this provider
-        const models = MODEL_REGISTRY.filter(m => m.provider === provider);
-        for (const model of models) {
-            const isSelected = model.id === tokenizerService.getModel();
-            items.push({
-                label: `${isSelected ? '$(check) ' : ''}${model.label}`,
-                description: model.id,
-                modelId: model.id
+            const picked = await vscode.window.showQuickPick(buildModelPickerItems(), {
+                placeHolder: 'Select a model for token counting',
+                matchOnDescription: true,
+                matchOnDetail: true,
             });
+            if (!picked?.modelId) {
+                return;
+            }
+
+            await setModel(context, picked.modelId);
+        }),
+
+        vscode.commands.registerCommand('llm-tokenizer.downloadTokenizer', async () => {
+            await ensureExactTokenizer(currentModel, true);
+        }),
+
+        vscode.commands.registerCommand('llm-tokenizer.clearTokenizerCache', async () => {
+            await store.clear();
+            invalidateCounts();
+            void vscode.window.showInformationMessage('LLM Tokenizer: downloaded tokenizers cleared.');
+            void refreshFileStatusBar(vscode.window.activeTextEditor);
+        }),
+    );
+}
+
+async function setModel(context: vscode.ExtensionContext, modelId: string): Promise<void> {
+    const model = findModel(modelId);
+    if (!model) {
+        return;
+    }
+
+    currentModel = model;
+    await context.globalState.update(STORAGE_KEY, model.id);
+
+    // Counts are model-specific; keeping them would show the previous model's
+    // numbers under the new model's name.
+    invalidateCounts();
+    log.info(`Model set to ${model.id}`);
+
+    void refreshFileStatusBar(vscode.window.activeTextEditor);
+    void refreshProjectCount();
+    void ensureExactTokenizer(model, false);
+}
+
+function buildModelPickerItems(): ModelQuickPickItem[] {
+    const items: ModelQuickPickItem[] = [];
+    let lastProvider: string | undefined;
+
+    for (const model of MODELS) {
+        if (model.provider !== lastProvider) {
+            items.push({ label: model.provider, kind: vscode.QuickPickItemKind.Separator });
+            lastProvider = model.provider;
         }
+
+        const selected = model.id === currentModel.id;
+        const accuracy = model.encoder.kind === 'heuristic' ? 'estimated' : 'exact';
+        items.push({
+            label: `${selected ? '$(check) ' : ''}${model.label}`,
+            description: model.id,
+            detail: `${formatNumber(model.contextLimit ?? 0)} token context · ${accuracy}`,
+            modelId: model.id,
+        });
     }
 
     return items;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// URI Handlers
-// ═══════════════════════════════════════════════════════════════
-
-async function handleSingleUri(uri: vscode.Uri): Promise<void> {
-    const stat = await vscode.workspace.fs.stat(uri);
-    if (stat.type === vscode.FileType.Directory) {
-        await handleMultipleUris([uri]);
-    } else {
-        // Check if the clicked file is the currently active editor and has a selection
-        const activeEditor = vscode.window.activeTextEditor;
-        if (activeEditor && activeEditor.document.uri.toString() === uri.toString() && !activeEditor.selection.isEmpty) {
-            await countSelectionTokens(activeEditor);
-        } else {
-            await countFileTokens(uri, true);
+/**
+ * Download the model's real tokenizer so counts become exact.
+ *
+ * @param interactive whether to prompt and show progress, or fail silently.
+ */
+async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Promise<void> {
+    // Invoked from the command palette this must always say something. Doing
+    // nothing at all is indistinguishable from the command being broken.
+    if (model.encoder.kind !== 'hf') {
+        if (interactive) {
+            void vscode.window.showInformationMessage(
+                model.encoder.kind === 'tiktoken'
+                    ? `${model.label} is already counted exactly — nothing to download.`
+                    : `${model.provider} does not publish a tokenizer for ${model.label}, so its counts are estimated.`,
+            );
         }
-    }
-}
-
-async function handleCommandPalette(): Promise<void> {
-    const activeEditor = vscode.window.activeTextEditor;
-    if (!activeEditor) {
-        vscode.window.showInformationMessage('No file is currently open.');
         return;
     }
 
-    if (!activeEditor.selection.isEmpty) {
-        await countSelectionTokens(activeEditor);
-    } else {
-        await countFileTokens(activeEditor.document.uri, true);
+    if (await tokenizer.isExact(model)) {
+        if (interactive) {
+            void vscode.window.showInformationMessage(
+                `The ${model.label} tokenizer is already downloaded.`,
+            );
+        }
+        return;
+    }
+
+    if (!vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('downloadTokenizers', true)) {
+        if (interactive) {
+            void vscode.window.showWarningMessage(
+                'Tokenizer downloads are turned off. Enable llm-tokenizer.downloadTokenizers to get exact counts.',
+            );
+        }
+        return;
+    }
+
+    if (!interactive) {
+        void tokenizer.ensureExact(model);
+        return;
+    }
+
+    const succeeded = await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: `Downloading the ${model.label} tokenizer…`,
+            cancellable: true,
+        },
+        (_progress, token) => tokenizer.ensureExact(model, token),
+    );
+
+    // ensureExact never rejects — a failed download is logged and reported as
+    // false. Discarding that left the command showing a progress notification
+    // that vanished with no result: offline, behind a proxy, on a gated
+    // repository or after the timeout, it was indistinguishable from broken.
+    if (succeeded) {
+        void vscode.window.showInformationMessage(
+            `${model.label} is now counted exactly.`,
+        );
+        return;
+    }
+
+    const openLog = 'Show Log';
+    void vscode.window
+        .showErrorMessage(
+            `Could not download the ${model.label} tokenizer. Counts stay estimated.`,
+            openLog,
+        )
+        .then(choice => {
+            if (choice === openLog) {
+                log.show();
+            }
+        });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Event listeners
+// ═══════════════════════════════════════════════════════════════
+
+function registerEventListeners(context: vscode.ExtensionContext): void {
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor(editor => debounceStatusBar(editor)),
+
+        vscode.window.onDidChangeTextEditorSelection(e => debounceStatusBar(e.textEditor)),
+
+        vscode.workspace.onDidChangeTextDocument(e => {
+            // Only real files, and only the one on screen. v1.3.0 also rescanned
+            // the whole workspace whenever any non-dirty document changed, which
+            // fired on undo-to-baseline, on `git checkout`, and on every write to
+            // an `output:` channel — so any extension that logs steadily kept the
+            // project scan re-arming forever.
+            if (e.document.uri.scheme !== 'file') {
+                return;
+            }
+            if (e.document === vscode.window.activeTextEditor?.document) {
+                debounceStatusBar(vscode.window.activeTextEditor);
+            }
+        }),
+
+        vscode.workspace.onDidSaveTextDocument(document => {
+            countCache.deleteFile(document.uri);
+            debounceProjectScan();
+        }),
+
+        vscode.workspace.onDidCreateFiles(() => debounceProjectScan()),
+
+        vscode.workspace.onDidDeleteFiles(e => {
+            // The event names exactly which files went, so a branch switch no
+            // longer forces a cold re-tokenisation of the entire workspace.
+            for (const uri of e.files) {
+                countCache.deleteFile(uri);
+            }
+            debounceProjectScan();
+        }),
+
+        vscode.workspace.onDidRenameFiles(e => {
+            for (const { oldUri } of e.files) {
+                countCache.deleteFile(oldUri);
+            }
+            debounceProjectScan();
+        }),
+
+        vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            invalidateCounts();
+            void refreshProjectCount();
+        }),
+
+        // v1.3.0 had no configuration listener at all, so changing the display
+        // mode or the gitignore setting did nothing until some unrelated event
+        // happened to fire.
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (!e.affectsConfiguration(CONFIG_SECTION)) {
+                return;
+            }
+
+            if (e.affectsConfiguration(`${CONFIG_SECTION}.ignoreGitignoredFiles`)) {
+                invalidateCounts();
+            }
+
+            // `defaultModel` is only the fallback for a user who has never
+            // picked a model from the status bar, so an explicit choice still
+            // wins. Without this the setting appeared to do nothing until the
+            // window was reloaded.
+            if (e.affectsConfiguration(`${CONFIG_SECTION}.defaultModel`) &&
+                !context.globalState.get<string>(STORAGE_KEY)) {
+                const configured = vscode.workspace
+                    .getConfiguration(CONFIG_SECTION)
+                    .get<string>('defaultModel');
+                const model = configured ? findModel(configured) : undefined;
+                if (model && model.id !== currentModel.id) {
+                    currentModel = model;
+                    invalidateCounts();
+                    log.info(`Default model changed to ${model.id}`);
+                    void refreshFileStatusBar(vscode.window.activeTextEditor);
+                    void ensureExactTokenizer(model, false);
+                }
+            }
+
+            statusBar.applyDisplayMode(isProjectScanEnabled());
+
+            if (isProjectScanEnabled()) {
+                void refreshProjectCount();
+            } else {
+                // Stop the in-flight scan; otherwise it completes minutes later
+                // and writes a total into a bar the user just turned off.
+                scanGeneration++;
+                clearTimeout(projectScanTimer);
+                statusBar.clearProjectCount();
+            }
+        }),
+    );
+}
+
+function debounceStatusBar(editor: vscode.TextEditor | undefined): void {
+    clearTimeout(statusBarTimer);
+    statusBarTimer = setTimeout(() => void refreshFileStatusBar(editor), DEBOUNCE_DELAY_MS);
+}
+
+function debounceProjectScan(): void {
+    clearTimeout(projectScanTimer);
+    projectScanTimer = setTimeout(() => void refreshProjectCount(), PROJECT_UPDATE_DELAY_MS);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Counting
+// ═══════════════════════════════════════════════════════════════
+
+function isProjectScanEnabled(): boolean {
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('enableProjectScan', true);
+}
+
+function respectGitignore(): boolean {
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('ignoreGitignoredFiles', true);
+}
+
+async function refreshFileStatusBar(editor: vscode.TextEditor | undefined): Promise<void> {
+    if (!editor || editor.document.isClosed) {
+        statusBar.clearFileCount();
+        return;
+    }
+
+    const document = editor.document;
+    const hasSelection = !editor.selection.isEmpty;
+    const text = hasSelection ? document.getText(editor.selection) : document.getText();
+
+    const { count, exact } = await tokenizer.count(text, currentModel);
+
+    // The editor may have changed while we were counting; writing the result
+    // now would show file A's count while file B is on screen.
+    if (vscode.window.activeTextEditor !== editor || document.isClosed) {
+        return;
+    }
+
+    statusBar.showFileCount({
+        count,
+        exact,
+        model: currentModel,
+        isSelection: hasSelection,
+        projectScanEnabled: isProjectScanEnabled(),
+    });
+}
+
+async function countActiveEditor(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        void vscode.window.showInformationMessage('LLM Tokenizer: no file is open.');
+        return;
+    }
+
+    const hasSelection = !editor.selection.isEmpty;
+    const text = hasSelection ? editor.document.getText(editor.selection) : editor.document.getText();
+    const { count, exact } = await tokenizer.count(text, currentModel);
+
+    const what = hasSelection ? 'Selection' : path.basename(editor.document.uri.fsPath);
+    void vscode.window.showInformationMessage(
+        `${what}: ${exact ? '' : '≈'}${formatNumber(count)} tokens (${currentModel.label})`,
+    );
+}
+
+interface ScanResult {
+    total: number;
+    processed: ProcessedFile[];
+    skipped: SkippedFile[];
+    ignored: IgnoredFile[];
+    exact: boolean;
+}
+
+/** A successful count, or the reason the file was not counted. */
+type FileOutcome = { count: number; exact: boolean } | { skip: SkipReason };
+
+function isCounted(outcome: FileOutcome): outcome is { count: number; exact: boolean } {
+    return 'count' in outcome;
+}
+
+/**
+ * Count one file, caching the result.
+ *
+ * `stillValid` guards the cache write. A scan that has been superseded — by a
+ * model change, or by the gitignore setting flipping — would otherwise keep
+ * writing results computed under the old settings into the cache the new scan
+ * had just cleared, poisoning it.
+ */
+async function countFile(
+    uri: vscode.Uri,
+    size: number,
+    model: ModelInfo,
+    stillValid: () => boolean = () => true,
+): Promise<FileOutcome> {
+    try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        const cached = countCache.get(model.id, uri, stat.mtime);
+        if (cached) {
+            return cached;
+        }
+
+        // Reading bytes rather than `openTextDocument`: opening a TextDocument
+        // creates a text model in the extension host and fires open/close events
+        // to *every* other extension in the window. On a 35k-file repo that is
+        // 70k lifecycle events flooding tsserver, ESLint and friends.
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        if (looksBinary(bytes)) {
+            return { skip: 'binary' };
+        }
+
+        const text = new TextDecoder().decode(bytes);
+        const { count, exact } = await tokenizer.count(text, model);
+
+        if (stillValid()) {
+            countCache.set(model.id, uri, stat.mtime, { count, exact });
+        }
+        return { count, exact };
+    } catch (error) {
+        log.debug(`Skipping ${uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
+        void size;
+        return { skip: 'unreadable' };
     }
 }
 
-async function handleMultipleUris(uris: vscode.Uri[]): Promise<void> {
-    await vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'Counting tokens in selected files...',
-            cancellable: true
-        },
-        async (progress, token) => {
-            let totalTokens = 0;
-            let filesProcessed = 0;
-            const processedFiles: { path: string; tokens: number }[] = [];
-            const skippedFiles: { path: string; reason: string }[] = [];
-            const ignoredFiles: { path: string }[] = [];
+async function recordFile(
+    uri: vscode.Uri,
+    size: number,
+    context: FolderContext,
+    result: ScanResult,
+    model: ModelInfo,
+): Promise<void> {
+    const skip: SkipReason | undefined = shouldCount(uri, size, context);
+    if (skip === 'gitignored') {
+        result.ignored.push({ path: uri.fsPath });
+        return;
+    }
+    if (skip) {
+        result.skipped.push({ path: uri.fsPath, reason: describeSkipReason(skip) });
+        return;
+    }
 
-            for (let i = 0; i < uris.length; i++) {
+    const outcome = await countFile(uri, size, model);
+    if (!isCounted(outcome)) {
+        result.skipped.push({ path: uri.fsPath, reason: describeSkipReason(outcome.skip) });
+        return;
+    }
+
+    result.total += outcome.count;
+    result.exact &&= outcome.exact;
+    result.processed.push({ path: uri.fsPath, tokens: outcome.count });
+}
+
+/** Count an open document's current text, saved or not. */
+async function countOpenDocument(document: vscode.TextDocument): Promise<void> {
+    const model = currentModel;
+    const { count, exact } = await tokenizer.count(document.getText(), model);
+    const name = document.isUntitled
+        ? 'Untitled'
+        : path.basename(document.uri.fsPath);
+
+    void vscode.window.showInformationMessage(
+        `${name}: ${exact ? '' : '≈'}${formatNumber(count)} tokens (${model.label})`,
+    );
+}
+
+/** Count one file and report it as a notification. */
+async function countSingleFile(uri: vscode.Uri, size: number): Promise<void> {
+    const name = path.basename(uri.fsPath);
+    const model = currentModel;
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    const context = folder
+        ? await FolderContext.create(folder, respectGitignore())
+        : FolderContext.none(uri);
+
+    const skip = shouldCount(uri, size, context);
+    if (skip && skip !== 'gitignored') {
+        void vscode.window.showWarningMessage(
+            `LLM Tokenizer: ${name} was not counted — ${describeSkipReason(skip).toLowerCase()}.`,
+        );
+        return;
+    }
+
+    const outcome = await countFile(uri, size, model);
+    if (!isCounted(outcome)) {
+        void vscode.window.showWarningMessage(
+            `LLM Tokenizer: ${name} was not counted — ${describeSkipReason(outcome.skip).toLowerCase()}.`,
+        );
+        return;
+    }
+
+    void vscode.window.showInformationMessage(
+        `${name}: ${outcome.exact ? '' : '≈'}${formatNumber(outcome.count)} tokens (${model.label})`,
+    );
+}
+
+async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
+    const selection = dedupeSelection(uris);
+
+    if (selection.length === 1) {
+        const only = selection[0];
+
+        // A single file with an active selection means "count what I highlighted".
+        const editor = vscode.window.activeTextEditor;
+        if (
+            editor &&
+            !editor.selection.isEmpty &&
+            editor.document.uri.toString() === only.toString()
+        ) {
+            await countActiveEditor();
+            return;
+        }
+
+        // An open editor is the authority on its own contents. Going straight
+        // to disk reported the last saved version for a file with unsaved
+        // edits, and failed outright on an untitled document — which has no
+        // file to stat — so asking for a count produced an error instead.
+        const open = vscode.workspace.textDocuments.find(
+            doc => doc.uri.toString() === only.toString(),
+        );
+        if (open && (open.isDirty || open.isUntitled)) {
+            await countOpenDocument(open);
+            return;
+        }
+
+        // One file answers with a notification. Opening a full summary panel
+        // listing a single row is a lot of ceremony for one number.
+        let stat: vscode.FileStat | undefined;
+        try {
+            stat = await vscode.workspace.fs.stat(only);
+        } catch {
+            void vscode.window.showErrorMessage(
+                `LLM Tokenizer: could not read ${path.basename(only.fsPath)}.`,
+            );
+            return;
+        }
+
+        if (!isDirectory(stat.type)) {
+            await countSingleFile(only, stat.size);
+            return;
+        }
+    }
+
+    await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Counting tokens…', cancellable: true },
+        async (progress, token) => {
+            // Snapshot the model for the whole operation. Reading the global
+            // per file meant switching model mid-count produced a total that
+            // was part one model and part another, and cached both under
+            // whichever id happened to be current at the time.
+            const model = currentModel;
+            const result: ScanResult = { total: 0, processed: [], skipped: [], ignored: [], exact: true };
+            const contexts = new Map<string, FolderContext>();
+            const useGitignore = respectGitignore();
+            /** A file to count, with the folder context that governs it. */
+            const candidates: { uri: vscode.Uri; size: number; context: FolderContext }[] = [];
+            // Carried across selected folders so the running total is for the
+            // whole selection, not restarted per folder.
+            let base = 0;
+
+            // ── Discovery ────────────────────────────────────────────────────
+            // Listing directories is cheap next to reading and tokenizing them,
+            // so this pass finishes quickly and buys an honest denominator for
+            // the pass that does not.
+            let lastReport = 0;
+            const reportFound = (n: number): void => {
+                // Every ~250 files: reporting per file floods the window with
+                // IPC for numbers nobody can read at that rate.
+                if (n - lastReport >= 250) {
+                    lastReport = n;
+                    progress.report({ message: `Finding files… ${n.toLocaleString()} found` });
+                }
+            };
+
+            for (const uri of selection) {
                 if (token.isCancellationRequested) {
-                    vscode.window.showWarningMessage(
-                        `Token counting cancelled. Processed ${filesProcessed}/${uris.length} files.`
-                    );
+                    break;
+                }
+
+                const folder = vscode.workspace.getWorkspaceFolder(uri);
+
+                // Built once per folder, not once per selected URI: v1.3.0 read
+                // and re-parsed .gitignore for every single file selected.
+                const contextKey = folder?.uri.toString() ?? '';
+                let context = contexts.get(contextKey);
+                if (!context) {
+                    context = folder
+                        ? await FolderContext.create(folder, useGitignore)
+                        : FolderContext.none(uri);
+                    contexts.set(contextKey, context);
+                }
+
+                let stat: vscode.FileStat;
+                try {
+                    stat = await vscode.workspace.fs.stat(uri);
+                } catch {
+                    result.skipped.push({ path: uri.fsPath, reason: describeSkipReason('unreadable') });
+                    continue;
+                }
+
+                if (isDirectory(stat.type)) {
+                    const found = await collectFiles(uri, context, token, n => reportFound(base + n));
+                    base += found.files.length;
+                    for (const file of found.files) {
+                        candidates.push({ ...file, context });
+                    }
+                    for (const dir of found.ignoredDirectories) {
+                        result.ignored.push({ path: dir.fsPath, isDirectory: true });
+                    }
+                    for (const bad of found.unreadable) {
+                        result.skipped.push({ path: bad.fsPath, reason: describeSkipReason('unreadable') });
+                    }
+                } else {
+                    candidates.push({ uri, size: stat.size, context });
+                }
+            }
+
+            // ── Counting ─────────────────────────────────────────────────────
+            const total = candidates.length;
+            // At most ~100 updates over the run, whatever the size, with the
+            // skipped increments carried so the bar still reaches the end.
+            const step = Math.max(1, Math.floor(total / 100));
+            let pending = 0;
+
+            for (let i = 0; i < total; i++) {
+                if (token.isCancellationRequested) {
+                    break;
+                }
+
+                const { uri, size, context } = candidates[i];
+                pending++;
+
+                if (pending >= step || i === total - 1) {
+                    progress.report({
+                        message: `${(i + 1).toLocaleString()} of ${total.toLocaleString()} files`,
+                        increment: (100 / total) * pending,
+                    });
+                    pending = 0;
+                }
+
+                await recordFile(uri, size, context, result, model);
+            }
+
+            showMultiFileSummary({
+                cancelled: token.isCancellationRequested,
+                totalTokens: result.total,
+                filesProcessed: result.processed.length,
+                processedFiles: result.processed,
+                skippedFiles: result.skipped,
+                ignoredFiles: result.ignored,
+                modelLabel: model.label,
+                exact: result.exact,
+                contextStatus: contextStatus(result.total),
+            });
+        },
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Project-wide count
+// ═══════════════════════════════════════════════════════════════
+
+async function refreshProjectCount(): Promise<void> {
+    if (!isProjectScanEnabled()) {
+        statusBar.clearProjectCount();
+        return;
+    }
+
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders?.length) {
+        statusBar.clearProjectCount();
+        return;
+    }
+
+    // A generation counter rather than a CancellationToken: nothing here can
+    // be interrupted mid-await, so cancellation is entirely a matter of the
+    // loop noticing it has been superseded and abandoning its result.
+    const model = currentModel;
+    const generation = ++scanGeneration;
+    const superseded = () => generation !== scanGeneration;
+
+    try {
+        const useGitignore = respectGitignore();
+        let total = 0;
+        let exact = true;
+
+        for (const folder of folders) {
+            const context = await FolderContext.create(folder, useGitignore);
+            const files = await vscode.workspace.findFiles(
+                new vscode.RelativePattern(folder, '**/*'),
+                buildExcludeGlob(),
+            );
+
+            for (const uri of files) {
+                if (superseded()) {
+                    log.debug('Project scan superseded; abandoning');
                     return;
                 }
 
-                const uri = uris[i];
-                const fileName = path.basename(uri.fsPath);
-
-                progress.report({
-                    message: `${i + 1}/${uris.length}: ${fileName}`,
-                    increment: 100 / uris.length
-                });
-
-                const stat = await vscode.workspace.fs.stat(uri);
-
-                // Get gitignore instance for the workspace (if setting is enabled)
-                const shouldIgnore = vscode.workspace.getConfiguration('llm-tokenizer').get<boolean>('ignoreGitignoredFiles', true);
-                const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-                let ig = undefined;
-
-                if (shouldIgnore && workspaceFolder) {
-                    ig = ignore();
-                    try {
-                        const gitignorePath = vscode.Uri.joinPath(workspaceFolder.uri, '.gitignore');
-                        const gitignoreContent = await vscode.workspace.fs.readFile(gitignorePath);
-                        ig.add(new TextDecoder().decode(gitignoreContent));
-                    } catch (e) {
-                        // No .gitignore found or cannot read it
-                    }
-                }
-
-                if (stat.type === vscode.FileType.Directory) {
-                    // We pass down the ignore instance
-                    const result = await countTokensInDirectory(uri, token, ig, workspaceFolder?.uri);
-                    totalTokens += result.count;
-                    filesProcessed += result.files.length;
-                    processedFiles.push(...result.files);
-                    skippedFiles.push(...result.skipped);
-                    ignoredFiles.push(...result.ignored);
-                } else {
-                    // Check if binary BEFORE counting to distinguish from empty files
-                    if (isBinaryFile(uri.fsPath)) {
-                        skippedFiles.push({
-                            path: uri.fsPath,
-                            reason: 'Binary or unsupported file'
-                        });
-                    } else {
-                        const count = await countFileTokens(uri, false);
-                        if (count >= 0) {
-                            totalTokens += count;
-                            filesProcessed++;
-                            processedFiles.push({ path: uri.fsPath, tokens: count });
-                        }
-                    }
-                }
-            }
-
-            // Show summary in webview
-            const modelInfo = tokenizerService.getModelInfo();
-            showMultiFileSummary({
-                totalTokens,
-                filesProcessed,
-                processedFiles,
-                skippedFiles,
-                ignoredFiles,
-                modelLabel: modelInfo?.label || tokenizerService.getModel(),
-                contextStatus: tokenizerService.getContextStatus(totalTokens)
-            });
-        }
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Token Counting
-// ═══════════════════════════════════════════════════════════════
-
-async function countSelectionTokens(editor: vscode.TextEditor): Promise<void> {
-    const selectedText = editor.document.getText(editor.selection);
-    const count = await tokenizerService.countTokens(selectedText);
-    const modelInfo = tokenizerService.getModelInfo();
-
-    vscode.window.showInformationMessage(
-        `📝 Selection: ${formatNumber(count)} tokens (${modelInfo?.label || tokenizerService.getModel()})`
-    );
-}
-
-async function countFileTokens(
-    uri: vscode.Uri,
-    showNotification: boolean = false
-): Promise<number> {
-    if (isBinaryFile(uri.fsPath)) {
-        if (showNotification) {
-            vscode.window.showWarningMessage(
-                `Cannot count tokens: '${path.basename(uri.fsPath)}' appears to be a binary or unsupported file type.`
-            );
-        }
-        return 0;
-    }
-
-    try {
-        const document = await vscode.workspace.openTextDocument(uri);
-        const text = document.getText();
-        const count = await tokenizerService.countTokens(text);
-
-        if (showNotification) {
-            const modelInfo = tokenizerService.getModelInfo();
-            vscode.window.showInformationMessage(
-                `📄 ${path.basename(uri.fsPath)}: ${formatNumber(count)} tokens (${modelInfo?.label || tokenizerService.getModel()})`
-            );
-        }
-        return count;
-    } catch (error) {
-        console.error(error);
-        if (showNotification) {
-            vscode.window.showErrorMessage(`Error reading file: ${error}`);
-        }
-        return 0;
-    }
-}
-
-async function countTokensInDirectory(
-    uri: vscode.Uri,
-    token: vscode.CancellationToken,
-    ig?: ReturnType<typeof ignore>,
-    workspaceUri?: vscode.Uri
-): Promise<DirectoryCountResult> {
-    let total = 0;
-    const files: { path: string; tokens: number }[] = [];
-    const skipped: { path: string; reason: string }[] = [];
-    const ignored: { path: string }[] = [];
-
-    const entries = await vscode.workspace.fs.readDirectory(uri);
-
-    for (const [name, type] of entries) {
-        if (token.isCancellationRequested) break;
-
-        // Skip hidden files and common non-source directories
-        if (name.startsWith('.') || IGNORED_DIRECTORIES.has(name)) {
-            continue;
-        }
-
-        const entryUri = vscode.Uri.joinPath(uri, name);
-
-        // Check against gitignore
-        if (ig && workspaceUri) {
-            const relativePath = path.posix.relative(workspaceUri.path, entryUri.path);
-            if (relativePath && ig.ignores(relativePath)) {
-                ignored.push({ path: entryUri.fsPath });
-                continue;
-            }
-        }
-
-        if (type === vscode.FileType.Directory) {
-            const result = await countTokensInDirectory(entryUri, token, ig, workspaceUri);
-            total += result.count;
-            files.push(...result.files);
-            skipped.push(...result.skipped);
-            ignored.push(...result.ignored);
-        } else if (type === vscode.FileType.File) {
-            if (isBinaryFile(entryUri.fsPath)) {
-                skipped.push({
-                    path: entryUri.fsPath,
-                    reason: 'Binary or unsupported file'
-                });
-                continue;
-            }
-
-            try {
-                const arr = await vscode.workspace.fs.readFile(entryUri);
-                const text = new TextDecoder().decode(arr);
-                const count = await tokenizerService.countTokens(text);
-                total += count;
-                files.push({ path: entryUri.fsPath, tokens: count });
-            } catch (e) {
-                console.warn(`Skipping file ${name}: ${e}`);
-                skipped.push({ path: entryUri.fsPath, reason: 'Error reading file' });
-            }
-        }
-    }
-
-    return { count: total, files, skipped, ignored };
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Debounced Updates
-// ═══════════════════════════════════════════════════════════════
-
-function debouncedUpdateStatusBar(editor: vscode.TextEditor | undefined): void {
-    if (debounceTimer) {
-        clearTimeout(debounceTimer);
-    }
-    debounceTimer = setTimeout(() => {
-        statusBarManager.updateFileStatusBar(editor);
-    }, DEBOUNCE_DELAY_MS);
-}
-
-function debouncedUpdateProjectCount(): void {
-    if (projectUpdateTimer) {
-        clearTimeout(projectUpdateTimer);
-    }
-    projectUpdateTimer = setTimeout(() => {
-        updateProjectTokenCountAsync();
-    }, PROJECT_UPDATE_DELAY_MS);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Project-wide Token Counting
-// ═══════════════════════════════════════════════════════════════
-
-async function updateProjectTokenCountAsync(): Promise<void> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
-        return;
-    }
-
-    try {
-        const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**');
-        let total = 0;
-
-        const shouldIgnore = vscode.workspace.getConfiguration('llm-tokenizer').get<boolean>('ignoreGitignoredFiles', true);
-        let ig = undefined;
-        if (shouldIgnore) {
-            ig = ignore();
-            try {
-                const gitignorePath = vscode.Uri.joinPath(workspaceFolder.uri, '.gitignore');
-                const gitignoreContent = await vscode.workspace.fs.readFile(gitignorePath);
-                ig.add(new TextDecoder().decode(gitignoreContent));
-            } catch (e) {
-                // No .gitignore found or cannot read it
-            }
-        }
-
-        for (const file of files) {
-            if (isBinaryFile(file.fsPath)) {
-                continue;
-            }
-
-            // Filter out files that match .gitignore
-            if (ig) {
-                const relativePath = path.posix.relative(workspaceFolder.uri.path, file.path);
-                if (relativePath && ig.ignores(relativePath)) {
+                let size: number;
+                try {
+                    size = (await vscode.workspace.fs.stat(uri)).size;
+                } catch {
                     continue;
                 }
-            }
 
-            try {
-                const stat = await vscode.workspace.fs.stat(file);
-                const cacheKey = file.fsPath;
-                const cached = projectCountCache.get(cacheKey);
-
-                // Use cache if file hasn't been modified
-                if (cached && cached.mtime === stat.mtime) {
-                    total += cached.count;
-                } else {
-                    const count = await countFileTokens(file, false);
-                    projectCountCache.set(cacheKey, { count, mtime: stat.mtime });
-                    total += count;
+                if (shouldCount(uri, size, context)) {
+                    continue;
                 }
-            } catch {
-                // Skip files that can't be read
-                continue;
+
+                const outcome = await countFile(uri, size, model, () => !superseded());
+                if (isCounted(outcome)) {
+                    total += outcome.count;
+                    exact &&= outcome.exact;
+                }
             }
         }
 
-        projectTokenCount = total;
-        statusBarManager.updateProjectStatusBar(total);
+        // Checked once more: the scan may have been superseded, or the setting
+        // turned off, while the last file was being counted.
+        if (superseded() || !isProjectScanEnabled()) {
+            return;
+        }
+
+        statusBar.showProjectCount({
+            count: total,
+            exact,
+            model,
+            projectScanEnabled: true,
+        });
     } catch (error) {
-        console.error('Error calculating project tokens:', error);
+        log.error(`Project scan failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+
+function contextStatus(count: number): { percentage: number; status: 'ok' | 'warning' | 'error'; limit: number | undefined } {
+    const limit = currentModel.contextLimit;
+    if (!limit) {
+        return { percentage: 0, status: 'ok', limit: undefined };
+    }
+
+    const percentage = (count / limit) * 100;
+    const status = percentage >= 100 ? 'error' : percentage >= 80 ? 'warning' : 'ok';
+    return { percentage, status, limit };
+}
+
+export { contextStatus };

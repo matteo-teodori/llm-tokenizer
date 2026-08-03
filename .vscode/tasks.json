@@ -4,29 +4,51 @@
         {
             "type": "npm",
             "script": "compile",
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
+            "group": { "kind": "build", "isDefault": true },
             "problemMatcher": "$tsc",
-            "presentation": {
-                "reveal": "never"
-            },
+            "presentation": { "reveal": "never" },
             "label": "npm: compile"
         },
         {
+            // esbuild, not tsc — the extension is bundled. esbuild reports
+            // nothing on a clean build, so build.mjs prints its own lines and
+            // this matcher reads them.
             "type": "npm",
             "script": "watch",
             "isBackground": true,
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": "$tsc-watch",
+            "group": "build",
             "label": "npm: watch",
-            "presentation": {
-                "reveal": "never"
+            "presentation": { "reveal": "never" },
+            "problemMatcher": {
+                "owner": "esbuild",
+                "fileLocation": ["relative", "${workspaceFolder}"],
+                "pattern": {
+                    "regexp": "^✘ (.*):(\\d+) (.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "message": 3
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^watching…$",
+                    "endsPattern": "^(✓ built|✘) .*$"
+                }
             }
+        },
+        {
+            "type": "npm",
+            "script": "pretest",
+            "group": "build",
+            "problemMatcher": "$tsc",
+            "presentation": { "reveal": "never" },
+            "label": "npm: pretest"
+        },
+        {
+            "type": "npm",
+            "script": "lint",
+            "problemMatcher": "$eslint-stylish",
+            "presentation": { "reveal": "silent" },
+            "label": "npm: lint"
         }
     ]
 }

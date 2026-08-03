@@ -1,150 +1,169 @@
 import * as vscode from 'vscode';
-import { TokenizerService } from './tokenizer';
-import { formatNumber, getStatusIndicator } from './utils';
+
+import { formatNumber } from './utils';
+import { CONTEXT_ERROR_THRESHOLD, CONTEXT_WARNING_THRESHOLD } from './constants';
+import type { ModelInfo } from './tokenizer/registry';
+
+/** The manifest's default; the code used to disagree with it and fall back to 'file'. */
+const DEFAULT_DISPLAY_MODE = 'both';
+
+export interface CountDisplay {
+    count: number;
+    /** False when the number came from a heuristic rather than a real tokenizer. */
+    exact: boolean;
+    model: ModelInfo;
+    isSelection?: boolean;
+    projectScanEnabled: boolean;
+}
 
 /**
- * StatusBarManager handles all status bar related functionality
+ * The two status bar items.
+ *
+ * Estimated counts are prefixed with `≈`. v1.3.0 rendered a ±25% guess in the
+ * same typeface and with the same authority as an exact tiktoken count, which
+ * is the part users could not see and could not correct for.
  */
 export class StatusBarManager {
-    private fileStatusBar: vscode.StatusBarItem;
-    private projectStatusBar: vscode.StatusBarItem;
-    private projectTokenCount: number = 0;
+    private readonly fileItem: vscode.StatusBarItem;
+    private readonly projectItem: vscode.StatusBarItem;
+    private hasFileCount = false;
+    private hasProjectCount = false;
 
-    constructor(
-        private tokenizerService: TokenizerService,
-        context: vscode.ExtensionContext
-    ) {
-        // File token count status bar (right side, higher priority)
-        this.fileStatusBar = vscode.window.createStatusBarItem(
-            vscode.StatusBarAlignment.Right,
-            100
+    constructor(context: vscode.ExtensionContext) {
+        this.fileItem = vscode.window.createStatusBarItem('llm-tokenizer.file', vscode.StatusBarAlignment.Right, 100);
+        this.fileItem.name = 'LLM Tokenizer: file';
+        this.fileItem.command = 'llm-tokenizer.selectModel';
+
+        this.projectItem = vscode.window.createStatusBarItem('llm-tokenizer.project', vscode.StatusBarAlignment.Right, 99);
+        this.projectItem.name = 'LLM Tokenizer: project';
+        this.projectItem.command = 'llm-tokenizer.selectModel';
+
+        context.subscriptions.push(this.fileItem, this.projectItem);
+    }
+
+    public showFileCount(display: CountDisplay): void {
+        const status = contextStatus(display.count, display.model);
+        const scope = display.isSelection ? 'selection' : 'file';
+
+        this.fileItem.text = `${icon(status)} ${prefix(display.exact)}${formatNumber(display.count)} tokens${display.isSelection ? ' (selection)' : ''}`;
+        this.fileItem.color = colour(status);
+        this.fileItem.tooltip = tooltip(`Tokens in the current ${scope}`, display, status);
+        this.hasFileCount = true;
+
+        this.applyDisplayMode(display.projectScanEnabled);
+    }
+
+    public clearFileCount(): void {
+        this.hasFileCount = false;
+        this.fileItem.hide();
+    }
+
+    public showProjectCount(display: CountDisplay): void {
+        const status = contextStatus(display.count, display.model);
+
+        this.projectItem.text = `$(folder) ${prefix(display.exact)}${formatNumber(display.count)} tokens`;
+        this.projectItem.color = colour(status);
+        this.projectItem.tooltip = tooltip('Tokens across the whole workspace', display, status);
+        this.hasProjectCount = true;
+
+        this.applyDisplayMode(display.projectScanEnabled);
+    }
+
+    public clearProjectCount(): void {
+        this.hasProjectCount = false;
+        this.projectItem.hide();
+    }
+
+    /**
+     * Show or hide each item according to `statusBarDisplay`.
+     *
+     * When project scanning is off, `project` mode is treated as `file` — the
+     * naive reading hides both items and makes the extension look uninstalled.
+     */
+    public applyDisplayMode(projectScanEnabled: boolean): void {
+        const configured = vscode.workspace
+            .getConfiguration('llm-tokenizer')
+            .get<string>('statusBarDisplay', DEFAULT_DISPLAY_MODE);
+
+        const mode = configured === 'project' && !projectScanEnabled ? 'file' : configured;
+        const showProject = projectScanEnabled && this.hasProjectCount && mode !== 'file';
+
+        // `hasFileCount` matters: with no editor open there is no count to
+        // show, and re-showing the item would resurrect whatever number was
+        // last written to it — belonging to a file the user has since closed.
+        if (!this.hasFileCount || (mode === 'project' && showProject)) {
+            this.fileItem.hide();
+        } else {
+            this.fileItem.show();
+        }
+
+        if (showProject) {
+            this.projectItem.show();
+        } else {
+            this.projectItem.hide();
+        }
+    }
+}
+
+type Status = 'ok' | 'warning' | 'error';
+
+function contextStatus(count: number, model: ModelInfo): Status {
+    if (!model.contextLimit) {
+        return 'ok';
+    }
+    const percentage = (count / model.contextLimit) * 100;
+    if (percentage >= CONTEXT_ERROR_THRESHOLD) {
+        return 'error';
+    }
+    return percentage >= CONTEXT_WARNING_THRESHOLD ? 'warning' : 'ok';
+}
+
+/** Codicons rather than emoji: emoji render inconsistently across platforms. */
+function icon(status: Status): string {
+    switch (status) {
+        case 'error': return '$(error)';
+        case 'warning': return '$(warning)';
+        default: return '$(symbol-numeric)';
+    }
+}
+
+function colour(status: Status): vscode.ThemeColor | undefined {
+    switch (status) {
+        case 'error': return new vscode.ThemeColor('statusBarItem.errorForeground');
+        case 'warning': return new vscode.ThemeColor('statusBarItem.warningForeground');
+        default: return undefined;
+    }
+}
+
+function prefix(exact: boolean): string {
+    return exact ? '' : '≈';
+}
+
+function tooltip(title: string, display: CountDisplay, status: Status): vscode.MarkdownString {
+    const lines = [`**${title}**`, '', `Model: ${display.model.label}`];
+
+    if (display.model.contextLimit) {
+        const percentage = (display.count / display.model.contextLimit) * 100;
+        lines.push(`Context: ${percentage.toFixed(1)}% of ${formatNumber(display.model.contextLimit)}`);
+        if (status === 'warning') {
+            lines.push('', '⚠️ Approaching the context limit.');
+        } else if (status === 'error') {
+            lines.push('', '🔴 Over the context limit.');
+        }
+    }
+
+    if (!display.exact) {
+        lines.push(
+            '',
+            display.model.encoder.kind === 'hf'
+                ? '_Estimated._ Run **LLM Tokenizer: Download Exact Tokenizer** for an exact count.'
+                : `_Estimated._ ${display.model.provider} does not publish a tokenizer for this model.`,
         );
-        this.fileStatusBar.command = 'llm-tokenizer.selectModel';
-        context.subscriptions.push(this.fileStatusBar);
-
-        // Project token count status bar (right side, lower priority)
-        this.projectStatusBar = vscode.window.createStatusBarItem(
-            vscode.StatusBarAlignment.Right,
-            99
-        );
-        this.projectStatusBar.command = 'llm-tokenizer.selectModel';
-        this.projectStatusBar.tooltip = 'Project-wide token count\nClick to change model';
-        context.subscriptions.push(this.projectStatusBar);
     }
 
-    /**
-     * Update file status bar based on active editor
-     */
-    public async updateFileStatusBar(editor: vscode.TextEditor | undefined): Promise<void> {
-        if (!editor || !editor.document) {
-            this.fileStatusBar.hide();
-            return;
-        }
+    lines.push('', 'Click to change model.');
 
-        try {
-            const document = editor.document;
-            if (document.isClosed) {
-                return;
-            }
-
-            // Determine text to count (selection or entire document)
-            const isSelection = !editor.selection.isEmpty;
-            const text = isSelection
-                ? document.getText(editor.selection)
-                : document.getText();
-
-            const count = await this.tokenizerService.countTokens(text);
-
-            // Check if document was closed or selection changed while counting
-            if (document.isClosed || (!isSelection && !editor.selection.isEmpty)) {
-                return;
-            }
-
-            const modelInfo = this.tokenizerService.getModelInfo();
-            const contextStatus = this.tokenizerService.getContextStatus(count);
-            const indicator = getStatusIndicator(contextStatus.status);
-
-            // Update status bar text
-            const suffix = isSelection ? ' (selection)' : '';
-            this.fileStatusBar.text = `${indicator.icon} ${formatNumber(count)} token${count !== 1 ? 's' : ''}${suffix}`;
-            this.fileStatusBar.color = indicator.color;
-
-            // Build tooltip
-            let tooltip = `Token count for ${isSelection ? 'selection' : 'file'}\nModel: ${modelInfo?.label || this.tokenizerService.getModel()}\nClick to change model`;
-            if (contextStatus.limit) {
-                tooltip += `\n\nContext: ${contextStatus.percentage.toFixed(1)}% of ${formatNumber(contextStatus.limit)} limit`;
-                if (contextStatus.status === 'warning') {
-                    tooltip += '\n⚠️ Approaching context limit (80%+)';
-                } else if (contextStatus.status === 'error') {
-                    tooltip += '\n🔴 Exceeds context limit!';
-                }
-            }
-            this.fileStatusBar.tooltip = tooltip;
-
-            this.updateDisplayMode();
-        } catch (error) {
-            // Silently handle errors during rapid file switching
-            console.debug('Token count update skipped:', error);
-        }
-    }
-
-    /**
-     * Update project status bar with total token count
-     */
-    public updateProjectStatusBar(count: number): void {
-        this.projectTokenCount = count;
-
-        const modelInfo = this.tokenizerService.getModelInfo();
-        const contextStatus = this.tokenizerService.getContextStatus(count);
-        const indicator = getStatusIndicator(contextStatus.status, '📂');
-
-        this.projectStatusBar.text = `${indicator.icon} ${formatNumber(count)} tokens`;
-        this.projectStatusBar.color = indicator.color;
-
-        // Build tooltip
-        let tooltip = `Project-wide token count\nModel: ${modelInfo?.label || this.tokenizerService.getModel()}\nClick to change model`;
-        if (contextStatus.limit) {
-            tooltip += `\n\nContext: ${contextStatus.percentage.toFixed(1)}% of ${formatNumber(contextStatus.limit)} limit`;
-            if (contextStatus.status === 'warning') {
-                tooltip += '\n⚠️ Approaching context limit (80%+)';
-            } else if (contextStatus.status === 'error') {
-                tooltip += '\n🔴 Exceeds context limit!';
-            }
-        }
-        this.projectStatusBar.tooltip = tooltip;
-
-        this.updateDisplayMode();
-    }
-
-    /**
-     * Update display based on user configuration
-     */
-    public updateDisplayMode(): void {
-        const config = vscode.workspace.getConfiguration('llm-tokenizer');
-        const displayMode = config.get<string>('statusBarDisplay', 'file');
-
-        switch (displayMode) {
-            case 'project':
-                this.fileStatusBar.hide();
-                this.projectStatusBar.show();
-                break;
-            case 'both':
-                this.fileStatusBar.show();
-                this.projectStatusBar.show();
-                break;
-            case 'file':
-            default:
-                this.fileStatusBar.show();
-                this.projectStatusBar.hide();
-                break;
-        }
-    }
-
-    /**
-     * Hide all status bars
-     */
-    public hideAll(): void {
-        this.fileStatusBar.hide();
-        this.projectStatusBar.hide();
-    }
+    const markdown = new vscode.MarkdownString(lines.join('\n'));
+    markdown.supportThemeIcons = true;
+    return markdown;
 }

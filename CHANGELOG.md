@@ -4,6 +4,117 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.0.0] - 2026-08-02
+
+A correctness and accuracy release. Counts that were silently wrong are now
+either exact or visibly marked as estimates.
+
+### Added
+- **Exact tokenization for ~50 models.** Special tokens are excluded, so a
+  tokenizer that prepends a beginning-of-sequence marker (Mistral's does) no
+  longer adds one token to every file. OpenAI models use OpenAI's own BPE,
+  bundled and offline. Llama, Gemma, DeepSeek, Qwen, Mistral, GLM, MiniMax,
+  MiMo and Hunyuan use the model's real `tokenizer.json`, downloaded once from
+  Hugging Face and cached on disk. No file contents ever leave your machine.
+- **Estimates are labelled.** Models with no public tokenizer — Claude, Grok,
+  and a few closed-weight models — show `≈` and explain why in the tooltip.
+- `llm-tokenizer.enableProjectScan` turns workspace-wide counting off on very
+  large repositories. Per-file and per-folder counting keeps working.
+  Proposed by [@tivnantu](https://github.com/tivnantu) in #1.
+- `llm-tokenizer.downloadTokenizers` controls the one-time tokenizer download.
+- Commands to download the exact tokenizer for the current model and to clear
+  the download cache.
+- An **LLM Tokenizer** output channel, replacing `console.log`.
+
+### Fixed
+- **Multi-root workspaces never produced a project count.** The `.gitignore`
+  was anchored to the first folder while the search covered all of them, so any
+  file in a second root threw and aborted the scan for the rest of the session.
+- **The whole `.git` directory was being counted.** Supplying an explicit
+  exclude to `findFiles` replaces VS Code's defaults, so `.git` was traversed
+  and loose git objects were tokenized as text.
+- **Switching models kept showing the previous model's numbers.** The cache was
+  keyed on path and mtime only, so it never invalidated on a model change.
+- **`llm-tokenizer.defaultModel` did nothing.** It was documented and offered
+  69 values in the settings UI, but no code read it.
+- **A crashed tokenizer worker hung every count forever.** Pending requests are
+  now rejected, the worker restarts, and requests time out.
+- The worker thread and its rank tables leaked on every window reload.
+- Concurrent workspace scans could overlap, with the older one overwriting the
+  newer result.
+- Directory patterns in `.gitignore` (`build/`) no longer match, so ignored
+  trees were walked in full.
+- Symlinked files and directories were silently dropped from every total. A
+  directory reached through a symlink is now counted once, not once per path
+  that reaches it — `docs/latest -> ../v2` used to count that tree twice.
+- A deleted file mid-scan discarded all work completed so far.
+- Very large files are skipped instead of exhausting memory.
+- Changing a setting now takes effect immediately.
+- Selecting a folder and a file inside it no longer double-counts the file.
+- `.git/info/exclude` is honoured alongside the root `.gitignore`.
+- Counting a file that belongs to no workspace folder reported a total of zero;
+  it was being dropped before it was ever read.
+- Counting an unsaved or untitled editor reported an error; it now counts what
+  is on screen rather than what is on disk.
+- Switching model during a multi-file count mixed two models' numbers into one
+  total. The model is fixed for the duration of an operation.
+- "Download Exact Tokenizer" said nothing at all when the download failed —
+  offline, behind a proxy, or on a gated repository it was indistinguishable
+  from a broken command.
+- Binary files without a known extension — `.dat`, `.pack`, a renamed binary,
+  anything extensionless — were tokenized as text. Content is now sniffed too.
+- In a multi-root workspace, files with the same relative path in two roots
+  collided into one row in the summary, showing one file's count under a total
+  that included both.
+- The summary rendered one row and one click listener per file and held them
+  for the lifetime of the window. Listings are capped at 1,000 entries, largest
+  first, with the omission stated; totals still cover every file.
+- **Progress during a multi-file count now means something.** It reported per
+  *selected item*, so right-clicking a single folder of 5,000 files showed
+  "1/1: foldername" and then sat motionless for the entire scan. Files are
+  discovered first — a cheap pass — and the count then reports "1,234 of 5,678
+  files" against a real total.
+
+### Security
+- The summary view escaped nothing. A file named `<img src=x onerror=…>.ts`
+  — a legal name on macOS and Linux — executed script in the webview. All
+  workspace-controlled values are escaped, a strict Content-Security-Policy
+  with a per-render nonce is applied, and the webview may now only ask to open
+  files it actually listed.
+
+### Changed
+- **The model list was rebuilt against live provider documentation.** Several
+  models that shipped in 1.3.0 never existed (`grok-4.2`, `grok-4.1-fast`,
+  `grok-4-fast`), several ids were in a format their provider does not use
+  (every Anthropic entry), and many context limits were wrong — `gpt-5.5` was
+  listed at 200K against an actual 922K. Removed and renamed ids are migrated
+  automatically on first run.
+- Context limits are now the **usable input** limit rather than the advertised
+  window, so the 80% warning fires at a number that means something.
+- Token counting is **~50× faster** and the extension no longer opens every
+  file in the workspace as a text document during a scan.
+- The packaged extension is bundled and ships no dependency tree: **~10 MB →
+  2.6 MB**.
+- Status bar uses themed icons instead of emoji.
+- Declares `untrustedWorkspaces` support, so it no longer disables itself in
+  Restricted Mode.
+- The icon was a JPEG named `.png` at 1024×1024; it is now a real 256×256 PNG.
+- Minimum VS Code version is now 1.105 (was 1.85), for the logging and status
+  bar APIs this release uses.
+
+### Internal
+- A test suite: 89 tests running in a real VS Code instance, written against
+  the specific defects fixed above.
+- ESLint and the type checker run again, and the suite runs in CI on Linux,
+  Windows and macOS.
+- The settings dropdown is generated from the model registry, so the two can no
+  longer drift.
+
+### Removed
+- Models that were retired by their providers or that never existed. Each has a
+  migration entry, so an affected setting is moved to the nearest live model
+  with a one-time notice.
+
 ## [1.3.0] - 2026-05-02
 
 ### Added
