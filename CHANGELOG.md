@@ -4,6 +4,17 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.0.1] - 2026-08-03
+
+### Fixed
+- **The context-limit warning was unreadable on light themes.** Over the limit,
+  the status bar showed white text on the ordinary background — VS Code
+  registers `statusBarItem.errorForeground` as plain white for every theme,
+  because it is meant to sit on the matching red background, and only the
+  foreground was being set. The status bar now sets the background instead and
+  lets VS Code pick a foreground that stays readable, so an over-limit count
+  reads as a red badge and an approaching one as amber, on any theme.
+
 ## [2.0.0] - 2026-08-02
 
 A correctness and accuracy release. Counts that were silently wrong are now

@@ -46,7 +46,7 @@ export class StatusBarManager {
         const scope = display.isSelection ? 'selection' : 'file';
 
         this.fileItem.text = `${icon(status)} ${prefix(display.exact)}${formatNumber(display.count)} tokens${display.isSelection ? ' (selection)' : ''}`;
-        this.fileItem.color = colour(status);
+        applyStatusColour(this.fileItem, status);
         this.fileItem.tooltip = tooltip(`Tokens in the current ${scope}`, display, status);
         this.hasFileCount = true;
 
@@ -62,7 +62,7 @@ export class StatusBarManager {
         const status = contextStatus(display.count, display.model);
 
         this.projectItem.text = `$(folder) ${prefix(display.exact)}${formatNumber(display.count)} tokens`;
-        this.projectItem.color = colour(status);
+        applyStatusColour(this.projectItem, status);
         this.projectItem.tooltip = tooltip('Tokens across the whole workspace', display, status);
         this.hasProjectCount = true;
 
@@ -127,11 +127,34 @@ function icon(status: Status): string {
     }
 }
 
-function colour(status: Status): vscode.ThemeColor | undefined {
+/**
+ * Colour a status bar item for its context-limit status.
+ *
+ * Sets `backgroundColor`, not `color`. VS Code registers
+ * `statusBarItem.errorForeground` and `statusBarItem.warningForeground` as
+ * plain white for *every* theme, because they are meant to sit on the matching
+ * red or amber background. Setting the foreground alone therefore painted white
+ * text onto the ordinary status bar — legible on a dark theme, invisible on a
+ * light one, which is precisely when a user most needs to see that they are
+ * over the context limit.
+ *
+ * `backgroundColor` accepts only these two colours, and the API guarantees the
+ * status bar will pick a readable foreground to go with them.
+ */
+function applyStatusColour(item: vscode.StatusBarItem, status: Status): void {
+    // Cleared explicitly: a badge left over from a previous file would
+    // otherwise stay behind on a count that is now well within limits.
+    item.color = undefined;
+
     switch (status) {
-        case 'error': return new vscode.ThemeColor('statusBarItem.errorForeground');
-        case 'warning': return new vscode.ThemeColor('statusBarItem.warningForeground');
-        default: return undefined;
+        case 'error':
+            item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+            break;
+        case 'warning':
+            item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            break;
+        default:
+            item.backgroundColor = undefined;
     }
 }
 
