@@ -798,7 +798,18 @@ async function refreshProjectCount(): Promise<void> {
         let total = 0;
         let exact = true;
 
-        for (const folder of folders) {
+        // Workspace folders are allowed to nest: `/repo` and `/repo/packages/web`
+        // can both be roots. `findFiles` walks a root's entire subtree, so a
+        // nested root's files would be counted once under each — inflating the
+        // total and pushing the badge to an amber or red the project has not
+        // actually reached. Keeping only the outermost roots covers every file
+        // exactly once.
+        // `delete` rather than `has`: it returns true only the first time, so
+        // two folders sharing one URI still contribute a single root.
+        const outermost = new Set(dedupeSelection(folders.map(f => f.uri)).map(uri => uri.toString()));
+        const roots = folders.filter(folder => outermost.delete(folder.uri.toString()));
+
+        for (const folder of roots) {
             const context = await FolderContext.create(folder, useGitignore);
             const files = await vscode.workspace.findFiles(
                 new vscode.RelativePattern(folder, '**/*'),

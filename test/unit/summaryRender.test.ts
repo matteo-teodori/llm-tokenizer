@@ -61,6 +61,29 @@ suite('summary page', () => {
             .includes('data-severity="error"'));
     });
 
+    test('the meter figure never claims a threshold the caption has not crossed', () => {
+        // Rounding used to print "100% — Approaching the … limit" at 99.7%, and
+        // "80%" with the unwarned styling at 79.99%: the number and the words
+        // beside it said different things.
+        const caption = (html: string): string => {
+            const inner = /<div class="meter-caption">([\s\S]*?)<\/div>/.exec(html)?.[1];
+            assert.ok(inner, 'no meter caption was rendered');
+            return inner.replace(/<[^>]*>/g, '').trim();
+        };
+
+        const nearLimit = render({ totalTokens: 9_970, contextLimit: 10_000 });
+        assert.ok(nearLimit.includes('data-severity="warning"'));
+        assert.ok(!caption(nearLimit).startsWith('100%'), `said "${caption(nearLimit)}" while under the limit`);
+
+        const nearWarning = render({ totalTokens: 7_999, contextLimit: 10_000 });
+        assert.ok(nearWarning.includes('data-severity="ok"'));
+        assert.ok(!caption(nearWarning).startsWith('80%'), `said "${caption(nearWarning)}" while unwarned`);
+
+        // And the thresholds themselves still read exactly.
+        assert.ok(caption(render({ totalTokens: 8_000, contextLimit: 10_000 })).startsWith('80%'));
+        assert.ok(caption(render({ totalTokens: 10_000, contextLimit: 10_000 })).startsWith('100%'));
+    });
+
     test('the meter fill never runs past the end of its track', () => {
         // A count far over the limit would otherwise produce a width of several
         // hundred percent and spill out of the panel.

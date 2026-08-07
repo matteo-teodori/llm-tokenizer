@@ -33,6 +33,7 @@ jobs:
           npm run check-types
           npm run lint
           npm run sync-manifest -- --check
+          node scripts/third-party-notices.mjs --check
       - name: Test
         run: xvfb-run -a npm test
 

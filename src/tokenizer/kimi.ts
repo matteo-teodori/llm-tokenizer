@@ -23,14 +23,18 @@ import { BytePairEncodingCore } from 'gpt-tokenizer/BytePairEncodingCore';
  * Moonshot's pre-tokenizer, translated from the pattern in
  * `tokenization_kimi.py`.
  *
- * Three constructs there have no JavaScript equivalent as written:
+ * Four constructs there have no JavaScript equivalent as written:
  *
  *   `[A&&[^B]]`  set intersection with a negation — expressed here as the
  *                difference `[[A]--[B]]`, which needs the `v` flag;
  *   `\p{Han}`    Han is a *Script*, not a General_Category, so JavaScript
  *                needs `\p{Script=Han}`;
  *   `(?i:x|y)`   JavaScript has no inline group flags, so the alternatives are
- *                spelled out in both cases.
+ *                spelled out in both cases;
+ *   `\s`         Rust's `\s` is `\p{White_Space}`; JavaScript's is a different
+ *                set that excludes U+0085 and includes U+FEFF. Those two code
+ *                points are the whole difference, and spelling the property out
+ *                closes it — `\S` likewise becomes `[^\p{White_Space}]`.
  *
  * The split decides which pieces the merges run over, so a translation that is
  * merely close would produce counts that are merely close. It is exact.
@@ -45,10 +49,10 @@ export const SPLIT_PATTERN = [
     String.raw`[^\r\n\p{L}\p{N}]?${UPPERISH}*${LOWERISH}+${CONTRACTIONS}`,
     String.raw`[^\r\n\p{L}\p{N}]?${UPPERISH}+${LOWERISH}*${CONTRACTIONS}`,
     String.raw`\p{N}{1,3}`,
-    String.raw` ?[^\s\p{L}\p{N}]+[\r\n]*`,
-    String.raw`\s*[\r\n]+`,
-    String.raw`\s+(?!\S)`,
-    String.raw`\s+`,
+    String.raw` ?[^\p{White_Space}\p{L}\p{N}]+[\r\n]*`,
+    String.raw`\p{White_Space}*[\r\n]+`,
+    String.raw`\p{White_Space}+(?![^\p{White_Space}])`,
+    String.raw`\p{White_Space}+`,
 ].join('|');
 
 /** The compiled pre-tokenizer, exported so its translation can be tested. */

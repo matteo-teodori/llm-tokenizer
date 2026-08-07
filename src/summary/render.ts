@@ -103,7 +103,15 @@ function meter(view: SummaryView): string {
     const share = view.totalTokens / view.contextLimit;
     const filled = Math.min(share, 1) * 100;
     const severity = severityOf(view);
-    const percent = share >= 0.1 ? (share * 100).toFixed(0) : (share * 100).toFixed(1);
+
+    // The figure and the caption sit next to each other, so they must not
+    // disagree. Rounding let 99.7% print as "100% — Approaching the limit", and
+    // 79.99% print as "80%" with none of the warning styling. Truncating means
+    // the figure can never claim a threshold the severity has not crossed.
+    const percent =
+        share >= 0.1
+            ? String(Math.floor(share * 100))
+            : (Math.floor(share * 1000) / 10).toFixed(1);
 
     const verdict =
         severity === 'error'

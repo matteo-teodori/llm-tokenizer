@@ -35,6 +35,12 @@ jobs:
       - name: Model registry is in sync with the manifest
         run: npm run sync-manifest -- --check
 
+      # Dependencies are compiled into the bundle, so their licences travel with
+      # it. This fails the build if one is added, removed or bumped without
+      # regenerating the notices that ship alongside.
+      - name: Third-party notices are up to date
+        run: node scripts/third-party-notices.mjs --check
+
       - name: Audit production dependencies
         run: npm audit --audit-level=high --omit=dev
 

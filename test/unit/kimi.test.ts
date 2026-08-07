@@ -9,11 +9,12 @@ const rankFile = (): string => fs.readFileSync(path.join(FIXTURES, 'tiktoken.mod
 
 suite('Kimi pre-tokenizer', () => {
     /**
-     * Moonshot's pattern uses three constructs JavaScript does not have as
-     * written — `&&` class intersection, `\p{Han}` as a bare property, and
-     * `(?i:…)` inline flags — so it had to be translated. The split decides
-     * which pieces the merges run over, so a translation that is merely close
-     * gives counts that are merely close.
+     * Moonshot's pattern uses four constructs JavaScript does not have as
+     * written — `&&` class intersection, `\p{Han}` as a bare property,
+     * `(?i:…)` inline flags, and `\s` meaning `\p{White_Space}` rather than
+     * JavaScript's narrower class — so it had to be translated. The split
+     * decides which pieces the merges run over, so a translation that is
+     * merely close gives counts that are merely close.
      *
      * These are the splits Moonshot's own pattern produces, captured from the
      * reference engine. Every case must match exactly.
@@ -40,6 +41,17 @@ suite('Kimi pre-tokenizer', () => {
         // their own piece and never merge into a neighbouring Latin word.
         const pieces = [...'ab漢字cd'.matchAll(splitRegex())].map(m => m[0]);
         assert.ok(pieces.includes('漢字'), pieces.join('|'));
+    });
+
+    test('treats whitespace as the reference engine does, not as JavaScript does', () => {
+        // `\s` is the one class where the two engines genuinely disagree:
+        // U+0085 is whitespace to the reference and not to JavaScript, and
+        // U+FEFF is the reverse. Spelling out `\p{White_Space}` is what makes
+        // these two split like Moonshot's pattern rather than merely near it.
+        const split = (text: string): string[] => [...text.matchAll(splitRegex())].map(m => m[0]);
+
+        assert.deepStrictEqual(split('line\u0085next'), ['line', '\u0085next']);
+        assert.deepStrictEqual(split('\uFEFF_x'), ['\uFEFF_', 'x']);
     });
 
     test('matches contractions in either case', () => {

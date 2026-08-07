@@ -4,7 +4,7 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
-## [2.1.0] - 2026-08-07
+## [2.1.0] - 2026-08-08
 
 ### Added
 - **Kimi is counted exactly.** Moonshot publishes a tiktoken rank table instead
@@ -13,12 +13,15 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   and because the rank file is byte-identical across the family, one download
   covers all three.
 
-  Moonshot's pre-tokenizer uses three constructs JavaScript does not have, so
-  it had to be translated. The translation was checked against the reference
-  implementation both ways: identical splits on 20 cases, and identical counts
-  on 28 spanning Latin, Han, Kana, Hangul, Cyrillic, emoji, contractions and
-  source files. It needs a recent JavaScript engine; on an older one Kimi
-  simply stays an estimate rather than failing.
+  Moonshot's pre-tokenizer uses four constructs JavaScript does not have, so
+  it had to be translated. One of them is `\s` itself: to the reference engine
+  that means `\p{White_Space}`, which is not the set JavaScript understands by
+  the same name — U+0085 belongs to one and U+FEFF to the other. The
+  translation was checked against the reference implementation both ways:
+  identical splits on 26 cases, and identical counts on 28 spanning Latin, Han,
+  Kana, Hangul, Cyrillic, emoji, contractions and source files. It needs a
+  recent JavaScript engine; on an older one Kimi simply stays an estimate
+  rather than failing.
 - **The multi-file summary is now a dashboard.** Counting a folder answers the
   question you actually had — *what is eating my context?* — instead of only
   *how much is it?*
@@ -37,10 +40,26 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - The summary's colours come entirely from VS Code's own theme tokens, so the
   panel follows the editor into any theme, high-contrast ones included.
 
+### Fixed
+- **Nested workspace roots were counted twice.** A workspace holding both
+  `/repo` and `/repo/packages/web` walked the nested subtree once under each
+  root, so its tokens landed in the project total twice — and could push the
+  status bar to an amber or red the project had not actually reached. Only the
+  outermost roots are walked now, which covers every file exactly once.
+- **The summary's meter could contradict itself.** The percentage was rounded
+  while the wording beside it was not, so a count at 99.7% of the limit read
+  "100% — Approaching the … limit", and one at 79.99% showed "80%" with none of
+  the warning styling. The figure is truncated now, so it can never claim a
+  threshold the caption has not crossed.
+
 ### Internal
 - The aggregation behind the summary is pure and separately tested, and the
   downloaded-vocabulary path is now one code path serving two published shapes.
-  The suite is up to 142 tests.
+  The suite is up to 144 tests.
+- Every dependency is compiled into the shipped bundle, which drops the
+  upstream licence comments, so `THIRD-PARTY-NOTICES.md` now reproduces them
+  and ships in the VSIX. It is generated from what esbuild actually inlines,
+  and CI fails if it drifts.
 
 ## [2.0.1] - 2026-08-03
 
