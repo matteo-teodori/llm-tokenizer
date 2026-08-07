@@ -40,7 +40,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Internal
 - The aggregation behind the summary is pure and separately tested, and the
   downloaded-vocabulary path is now one code path serving two published shapes.
-  The suite is up to 146 tests.
+  The suite is up to 139 tests.
 
 ## [2.0.1] - 2026-08-03
 
