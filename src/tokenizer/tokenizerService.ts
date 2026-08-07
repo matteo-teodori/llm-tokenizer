@@ -162,6 +162,29 @@ export class TokenizerService implements vscode.Disposable {
         }
     }
 
+    /**
+     * Forget every loaded vocabulary, in the worker as well as here.
+     *
+     * Clearing the store alone left the worker holding its parsed tokenizers —
+     * a rank table is ~150 MB of heap — and left `loadedRepos` populated, so
+     * the download command afterwards reported "already downloaded" and did
+     * nothing, while counts quietly reverted to estimates on the next reload.
+     */
+    public async forgetLoaded(): Promise<void> {
+        const repos = [...this.loadedRepos];
+        this.loadedRepos.clear();
+        this.unavailable.clear();
+
+        for (const repo of repos) {
+            try {
+                await this.send({ type: 'evict', id: 0, repo });
+            } catch (error) {
+                // A dead worker has already forgotten everything.
+                this.log.debug(`Could not evict ${repo}: ${describe(error)}`);
+            }
+        }
+    }
+
     /** True when a downloadable vocabulary is already loaded or on disk. */
     private async isVocabularyPresent(spec: DownloadableSpec): Promise<boolean> {
         return this.loadedRepos.has(spec.repo) || this.store.isDownloaded(spec.repo, spec.kind);

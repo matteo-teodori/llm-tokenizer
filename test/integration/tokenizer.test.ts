@@ -300,6 +300,25 @@ suite('tokenizer service', () => {
         }
     });
 
+    test('forgetting loaded vocabularies reverts counts to estimates', async () => {
+        // Clearing the store alone left the worker holding its parsed
+        // tokenizer, so the download command afterwards said "already
+        // downloaded" and did nothing, while the ~150 MB rank table stayed
+        // resident until the window reloaded.
+        const kimi = model('kimi-k3');
+        assert.strictEqual(kimi.encoder.kind, 'tiktokenModel');
+        await seedRankTable(storageUri, kimi.encoder.repo);
+        assert.strictEqual(await tokenizer.ensureExact(kimi), true);
+        assert.strictEqual((await tokenizer.count('Hello', kimi)).exact, true);
+
+        await store.clear();
+        await tokenizer.forgetLoaded();
+
+        const after = await tokenizer.count('Hello', kimi);
+        assert.strictEqual(after.exact, false, 'the worker should have forgotten it too');
+        assert.strictEqual(await tokenizer.isExact(kimi), false);
+    });
+
     test('large input is counted without blocking the host', async () => {
         const big = 'lorem ipsum dolor sit amet '.repeat(20_000); // ~540 KB
         const started = Date.now();

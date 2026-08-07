@@ -384,6 +384,12 @@ td.share { text-align: right; color: var(--ink-muted); width: 60px; font-variant
 .file-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
 .file-link:hover { text-decoration: underline; }
 .note, .empty { color: var(--ink-muted); font-size: 0.9em; margin: 10px 0 0; }
+.truncation {
+    color: var(--ink-muted);
+    font-size: 0.9em;
+    font-style: italic;
+    margin: 10px 0 0;
+}
 
 .plain-list { list-style: none; padding: 0; margin: 10px 0 0; }
 .plain-list li { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; }

@@ -119,14 +119,11 @@ export function evictKimiCore(repo: string): void {
 /**
  * Count tokens without materialising them.
  *
- * `encodeNative` yields one id at a time, so this counts iterations rather than
- * collecting them: a 10 MB file would otherwise build a throwaway array of
- * several million numbers just to read its length.
+ * `countNative`, not `encodeNative`: despite the name the latter returns a
+ * fully built `number[]`, so iterating it still allocates one number per token.
+ * Measured on a 1.4 MB input that is ~60 MB of heap for an array read once for
+ * its length — and files up to 10 MB reach here during a scan.
  */
 export function countWithCore(core: BytePairEncodingCore, text: string): number {
-    let total = 0;
-    for (const _id of core.encodeNative(text, new Set())) {
-        total++;
-    }
-    return total;
+    return core.countNative(text, new Set());
 }

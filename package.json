@@ -368,7 +368,7 @@
     "pretest": "npm run compile-tests && npm run build",
     "test": "vscode-test",
     "release": "npm run package && vsce package --no-dependencies",
-    "compile-tests": "node -e \"require('fs').rmSync('.test-out',{recursive:true,force:true})\" && tsc -p tsconfig.test.json"
+    "compile-tests": "node scripts/clean.mjs .test-out && tsc -p tsconfig.test.json"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -133,10 +133,20 @@ suite('Kimi counting', () => {
     });
 
     test('counts without materialising the token array', () => {
-        // A 10 MB file would otherwise build a throwaway array of millions of
-        // numbers purely to read its length.
+        // `encodeNative` sounds like a generator and is not: it returns a fully
+        // built number[], so iterating it allocates one number per token —
+        // ~60 MB for a 1.4 MB input, and files up to 10 MB reach here during a
+        // scan. `countNative` is the allocation-free one.
         const core = kimiCore('fixture', rankFile());
         const big = 'world! '.repeat(20_000);
+
         assert.strictEqual(countWithCore(core, big), 7 * 20_000);
+
+        // Equivalent to the reference path, which is what makes the cheap one
+        // safe to use.
+        assert.strictEqual(
+            countWithCore(core, big),
+            core.encodeNative(big, new Set()).length,
+        );
     });
 });

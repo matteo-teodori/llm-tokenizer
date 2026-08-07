@@ -12,7 +12,9 @@
  *   4. `heuristic`      characters ÷ ratio. Only where no tokenizer is public
  *                       (Claude, Grok). Always reported as an estimate.
  *
- * Everything here runs inside the tokenizer worker, never on the extension host.
+ * The encoders themselves run inside the worker; the host imports this module
+ * only for the spec types and the `isDownloadable` / `supportsRankTables`
+ * predicates it needs to decide what to offer.
  */
 
 import * as path from 'path';
@@ -72,6 +74,26 @@ export type DownloadableSpec = HfSpec | TiktokenModelSpec;
 
 export function isDownloadable(spec: EncoderSpec): spec is DownloadableSpec {
     return spec.kind === 'hf' || spec.kind === 'tiktokenModel';
+}
+
+/**
+ * How much a model's counts can be trusted, as three states rather than two.
+ *
+ * Callers used to ask about a specific kind — `=== 'hf'` for "downloadable",
+ * `=== 'heuristic'` for "not exact" — and both stopped being true as kinds were
+ * added: the first shipped a download path Kimi could never reach, the second
+ * labelled Kimi "exact" with nothing on disk. Deciding it here means a new kind
+ * is a compile error rather than a wrong label.
+ */
+export type Accuracy = 'exact' | 'after-download' | 'estimated';
+
+export function accuracyOf(spec: EncoderSpec): Accuracy {
+    switch (spec.kind) {
+        case 'tiktoken': return 'exact';
+        case 'hf':
+        case 'tiktokenModel': return 'after-download';
+        case 'heuristic': return 'estimated';
+    }
 }
 
 /** A loaded, ready-to-use encoder. */

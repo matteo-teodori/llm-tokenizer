@@ -40,7 +40,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Internal
 - The aggregation behind the summary is pure and separately tested, and the
   downloaded-vocabulary path is now one code path serving two published shapes.
-  The suite is up to 139 tests.
+  The suite is up to 142 tests.
 
 ## [2.0.1] - 2026-08-03
 
@@ -120,6 +120,13 @@ either exact or visibly marked as estimates.
   above them. Both now show the true total and disclose what they left out.
 - A summary with nothing to count said "No file matches that filter" when no
   filter had been typed.
+- **"Clear Downloaded Tokenizers" only cleared half of it.** The worker kept
+  its parsed vocabulary, so counts stayed exact until the next reload and the
+  download command reported nothing left to fetch — while a rank table's worth
+  of memory stayed resident.
+- The model picker labelled every non-estimated model "exact", including ones
+  whose vocabulary had not been downloaded, contradicting both the settings
+  dropdown and the `≈` in the status bar.
 - The summary rendered one row and one click listener per file and held them
   for the lifetime of the window. Listings are capped at 1,000 entries, largest
   first, with the omission stated; totals still cover every file.

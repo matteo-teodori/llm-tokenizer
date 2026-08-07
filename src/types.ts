@@ -35,8 +35,6 @@ export interface SkippedFile {
  */
 export interface IgnoredFile {
     path: string;
-    /** Directories are listed as plain text; only counted files are clickable. */
-    isDirectory?: boolean;
 }
 
 /**

@@ -160,6 +160,36 @@ suite('model registry', () => {
     });
 });
 
+suite('accuracy labelling', () => {
+    test('every encoder kind maps to one of three states', async () => {
+        const { accuracyOf } = await import('../../src/tokenizer/encoders');
+
+        assert.strictEqual(accuracyOf({ kind: 'tiktoken', encoding: 'o200k_base' }), 'exact');
+        assert.strictEqual(accuracyOf({ kind: 'heuristic', charsPerToken: 3 }), 'estimated');
+
+        const fallback = { kind: 'heuristic', charsPerToken: 3 } as const;
+        assert.strictEqual(accuracyOf({ kind: 'hf', repo: 'a/b', fallback }), 'after-download');
+        assert.strictEqual(
+            accuracyOf({ kind: 'tiktokenModel', repo: 'a/b', fallback }),
+            'after-download',
+        );
+    });
+
+    test('a downloadable model is never labelled plainly exact', async () => {
+        // The picker said "exact" for Kimi with nothing downloaded, which
+        // contradicted both the settings dropdown and the ≈ in the status bar.
+        const { accuracyOf, isDownloadable } = await import('../../src/tokenizer/encoders');
+
+        for (const model of MODELS.filter(m => isDownloadable(m.encoder))) {
+            assert.strictEqual(
+                accuracyOf(model.encoder),
+                'after-download',
+                `${model.id} should not claim to be exact before its download`,
+            );
+        }
+    });
+});
+
 suite('downloadable-kind discrimination', () => {
     /**
      * Nothing outside the encoder module may use `'hf'` as a stand-in for
@@ -176,7 +206,7 @@ suite('downloadable-kind discrimination', () => {
      * directly, below the gate. This checks the invariant instead of the
      * behaviour, which is what makes it cheap and total.
      */
-    test('no module treats the hf kind as a synonym for downloadable', () => {
+    test('no module uses one encoder kind as a stand-in for a class of models', () => {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const fs = require('fs') as typeof import('fs');
         // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -201,13 +231,16 @@ suite('downloadable-kind discrimination', () => {
                     continue;
                 }
 
-                // Only `encoder.kind` against `'hf'`: that is the comparison
-                // that silently means "downloadable" and stops being true the
-                // moment a second such kind exists. Dispatching on an asset's
-                // own kind — picking which file to fetch, or which builder to
-                // call — is legitimate and left alone.
+                // `encoder.kind` against `'hf'` or `'heuristic'`: both are
+                // comparisons that silently stand for a *class* of model —
+                // "downloadable" and "not exact" — and both stop being true the
+                // moment a fourth kind exists. The first shipped a dead download
+                // path; the second labelled Kimi "exact" with nothing on disk.
+                //
+                // Dispatching on an asset's own kind — which file to fetch,
+                // which builder to call — is legitimate and left alone.
                 fs.readFileSync(full, 'utf8').split('\n').forEach((line, i) => {
-                    if (/encoder\.kind\s*[!=]==\s*'hf'/.test(line)) {
+                    if (/encoder\.kind\s*[!=]==\s*'(hf|heuristic)'/.test(line)) {
                         offenders.push(`${path.relative(src, full)}:${i + 1}`);
                     }
                 });
@@ -219,7 +252,7 @@ suite('downloadable-kind discrimination', () => {
         assert.deepStrictEqual(
             offenders,
             [],
-            `use isDownloadable() instead of comparing to 'hf', at: ${offenders.join(', ')}`,
+            `use isDownloadable() rather than naming a kind, at: ${offenders.join(', ')}`,
         );
     });
 });
