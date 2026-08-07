@@ -60,6 +60,19 @@ suite('Kimi pre-tokenizer', () => {
     });
 });
 
+suite('Kimi runtime support', () => {
+    test('this runtime supports the pattern, and says so', async () => {
+        // The pattern needs the `v` flag for set difference. Every supported
+        // VS Code should have it, but `engines` allows 1.105 and the suite runs
+        // against much newer builds, so the capability is probed rather than
+        // assumed — on an older host Kimi stays an estimate instead of every
+        // count failing.
+        const { supportsRankTables } = await import('../../src/tokenizer/encoders');
+        assert.strictEqual(supportsRankTables(), true, 'the test host should support it');
+        assert.doesNotThrow(() => splitRegex());
+    });
+});
+
 suite('Kimi rank file', () => {
     test('parses base64 tokens into an array indexed by rank', () => {
         const ranks = parseRankFile('IQ== 0\nIg== 1\nIw== 2\n');

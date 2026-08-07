@@ -232,6 +232,29 @@ export function hfEncoder(repo: string, files: HfTokenizerFiles): Encoder {
 // tiktoken rank tables (downloaded once, exact)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Whether this runtime can compile the Kimi pre-tokenizer.
+ *
+ * The pattern needs the `v` flag for set difference, which arrived in V8 11.6.
+ * Every VS Code the extension supports should have it, but `engines` allows
+ * 1.105 and the suite runs against much newer builds, so this is checked rather
+ * than assumed: on an older host Kimi quietly stays an estimate instead of
+ * every count failing.
+ */
+let setNotation: boolean | undefined;
+
+export function supportsRankTables(): boolean {
+    if (setNotation === undefined) {
+        try {
+            new RegExp(String.raw`[[\p{L}]--[\p{Script=Han}]]`, 'v');
+            setNotation = true;
+        } catch {
+            setNotation = false;
+        }
+    }
+    return setNotation;
+}
+
 const rankCache = new Map<string, Encoder>();
 
 export function tiktokenModelEncoder(repo: string, file: TiktokenModelFile): Encoder {
@@ -296,7 +319,7 @@ export function resolveEncoder(spec: EncoderSpec, asset?: TokenizerAsset): Encod
                 ? hfEncoder(spec.repo, asset)
                 : heuristicEncoder(spec.fallback.charsPerToken);
         case 'tiktokenModel':
-            return asset?.kind === 'tiktokenModel'
+            return asset?.kind === 'tiktokenModel' && supportsRankTables()
                 ? tiktokenModelEncoder(spec.repo, asset)
                 : heuristicEncoder(spec.fallback.charsPerToken);
     }

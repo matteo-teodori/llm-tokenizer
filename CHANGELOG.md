@@ -17,7 +17,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   it had to be translated. The translation was checked against the reference
   implementation both ways: identical splits on 20 cases, and identical counts
   on 28 spanning Latin, Han, Kana, Hangul, Cyrillic, emoji, contractions and
-  source files.
+  source files. It needs a recent JavaScript engine; on an older one Kimi
+  simply stays an estimate rather than failing.
 - **The multi-file summary is now a dashboard.** Counting a folder answers the
   question you actually had — *what is eating my context?* — instead of only
   *how much is it?*
@@ -39,7 +40,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Internal
 - The aggregation behind the summary is pure and separately tested, and the
   downloaded-vocabulary path is now one code path serving two published shapes.
-  The suite is up to 143 tests.
+  The suite is up to 144 tests.
 
 ## [2.0.1] - 2026-08-03
 

@@ -8,7 +8,12 @@
 import { Worker } from 'worker_threads';
 import * as vscode from 'vscode';
 
-import { isDownloadable, type EncoderSpec } from './encoders';
+import {
+    isDownloadable,
+    supportsRankTables,
+    type DownloadableSpec,
+    type EncoderSpec,
+} from './encoders';
 import type { WorkerRequest, WorkerResponse } from './protocol';
 import { TokenizerStore, type AssetKind } from './tokenizerStore';
 import type { ModelInfo } from './registry';
@@ -149,10 +154,17 @@ export class TokenizerService implements vscode.Disposable {
             case 'heuristic':
                 return false;
             case 'tiktokenModel':
+                // An older host cannot compile the pre-tokenizer, so promising
+                // an exact count here would be a promise the worker breaks.
+                return supportsRankTables() && this.isVocabularyPresent(model.encoder);
             case 'hf':
-                return this.loadedRepos.has(model.encoder.repo)
-                    || this.store.isDownloaded(model.encoder.repo, model.encoder.kind);
+                return this.isVocabularyPresent(model.encoder);
         }
+    }
+
+    /** True when a downloadable vocabulary is already loaded or on disk. */
+    private async isVocabularyPresent(spec: DownloadableSpec): Promise<boolean> {
+        return this.loadedRepos.has(spec.repo) || this.store.isDownloaded(spec.repo, spec.kind);
     }
 
     /**
@@ -166,6 +178,12 @@ export class TokenizerService implements vscode.Disposable {
     ): Promise<boolean> {
         if (!isDownloadable(model.encoder)) {
             return model.encoder.kind === 'tiktoken';
+        }
+        if (model.encoder.kind === 'tiktokenModel' && !supportsRankTables()) {
+            this.log.warn(
+                `${model.id} needs a newer VS Code to be counted exactly; using an estimate`,
+            );
+            return false;
         }
 
         const { repo, kind } = model.encoder;
