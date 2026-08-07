@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 
 import { formatNumber } from './utils';
 import { CONTEXT_ERROR_THRESHOLD, CONTEXT_WARNING_THRESHOLD } from './constants';
+import { isDownloadable } from './tokenizer/encoders';
 import type { ModelInfo } from './tokenizer/registry';
 
 /** The manifest's default; the code used to disagree with it and fall back to 'file'. */
@@ -178,7 +179,7 @@ function tooltip(title: string, display: CountDisplay, status: Status): vscode.M
     if (!display.exact) {
         lines.push(
             '',
-            display.model.encoder.kind === 'hf'
+            isDownloadable(display.model.encoder)
                 ? '_Estimated._ Run **LLM Tokenizer: Download Exact Tokenizer** for an exact count.'
                 : `_Estimated._ ${display.model.provider} does not publish a tokenizer for this model.`,
         );

@@ -90,8 +90,17 @@ setting.enumDescriptions = MODELS.map(m => {
     const accuracy = {
         tiktoken: 'exact',
         hf: 'exact once the tokenizer is downloaded',
+        tiktokenModel: 'exact once the tokenizer is downloaded',
         heuristic: 'estimated — no public tokenizer',
     }[m.encoder.kind];
+
+    // A missing entry used to write the string "undefined" into the settings
+    // dropdown, which shipped. Fail the build instead.
+    if (!accuracy) {
+        console.error(`No accuracy wording for encoder kind "${m.encoder.kind}" (${m.id}).`);
+        process.exit(1);
+    }
+
     return `${m.provider} · ${limit} · ${accuracy}`;
 });
 

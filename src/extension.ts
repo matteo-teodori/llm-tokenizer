@@ -19,6 +19,7 @@ import {
     shouldCount,
     type SkipReason,
 } from './scan';
+import { isDownloadable } from './tokenizer/encoders';
 import { CountCache } from './countCache';
 import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 
@@ -237,7 +238,7 @@ function buildModelPickerItems(): ModelQuickPickItem[] {
 async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Promise<void> {
     // Invoked from the command palette this must always say something. Doing
     // nothing at all is indistinguishable from the command being broken.
-    if (model.encoder.kind !== 'hf') {
+    if (!isDownloadable(model.encoder)) {
         if (interactive) {
             void vscode.window.showInformationMessage(
                 model.encoder.kind === 'tiktoken'

@@ -63,6 +63,25 @@ suite('extension', () => {
         assert.deepStrictEqual(setting.enumItemLabels, MODELS.map(m => m.label));
     });
 
+    test('every downloadable model is reachable from the extension host', async () => {
+        // The blocker this test exists for: the download gate in extension.ts
+        // read `kind !== 'hf'`, so when a second downloadable kind was added
+        // for Kimi, every Kimi model returned before reaching the download —
+        // and the command told users Moonshot publishes no tokenizer, which is
+        // the opposite of what shipped. The service-level tests could not catch
+        // it because they call ensureExact directly, below the gate.
+        const { MODELS } = await import('../../src/tokenizer/registry');
+        const { isDownloadable } = await import('../../src/tokenizer/encoders');
+
+        const downloadable = MODELS.filter(m => isDownloadable(m.encoder));
+        assert.ok(downloadable.length > 0);
+
+        // Both published vocabulary shapes must be represented, or this test
+        // stops covering the case it was written for.
+        const kinds = new Set(downloadable.map(m => m.encoder.kind));
+        assert.deepStrictEqual([...kinds].sort(), ['hf', 'tiktokenModel']);
+    });
+
     test('declares that it works in untrusted workspaces', () => {
         // Without this the extension silently disables itself in Restricted
         // Mode — the worst possible default for a tool people reach for on

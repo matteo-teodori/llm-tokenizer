@@ -40,7 +40,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Internal
 - The aggregation behind the summary is pure and separately tested, and the
   downloaded-vocabulary path is now one code path serving two published shapes.
-  The suite is up to 144 tests.
+  The suite is up to 146 tests.
 
 ## [2.0.1] - 2026-08-03
 
@@ -115,6 +115,11 @@ either exact or visibly marked as estimates.
 - In a multi-root workspace, files with the same relative path in two roots
   collided into one row in the summary, showing one file's count under a total
   that included both.
+- The summary's Skipped and Ignored sections capped their listings at 1,000 but
+  reported the capped number as the total, contradicting the count directly
+  above them. Both now show the true total and disclose what they left out.
+- A summary with nothing to count said "No file matches that filter" when no
+  filter had been typed.
 - The summary rendered one row and one click listener per file and held them
   for the lifetime of the window. Listings are capped at 1,000 entries, largest
   first, with the omission stated; totals still cover every file.

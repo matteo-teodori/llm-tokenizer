@@ -141,14 +141,33 @@ function statRow(view: SummaryView): string {
     </div>`;
 }
 
-function collapsibleList(title: string, rows: { display: string; reason?: string }[]): string {
+/**
+ * Discloses rows a listing left out, so a cap never reads as a total.
+ *
+ * Every capped section says how many it dropped; a silent cap is how a partial
+ * list starts being mistaken for the whole one.
+ */
+function truncationNote(hidden: number): string {
+    return hidden === 0
+        ? ''
+        : `<p class="truncation">…and ${hidden.toLocaleString('en-US')} more, not listed.</p>`;
+}
+
+function collapsibleList(
+    title: string,
+    rows: { display: string; reason?: string }[],
+    total: number,
+): string {
     if (rows.length === 0) {
         return '';
     }
 
+    // The badge reports the true total, not the number of rows shown, or it
+    // would contradict the stat row directly above it.
+    const hidden = Math.max(0, total - rows.length);
     return `
     <details class="panel">
-        <summary><h2>${escapeHtml(title)} <span class="count">${rows.length.toLocaleString('en-US')}</span></h2></summary>
+        <summary><h2>${escapeHtml(title)} <span class="count">${total.toLocaleString('en-US')}</span></h2></summary>
         <ul class="plain-list">
             ${rows
                 .map(
@@ -158,6 +177,7 @@ function collapsibleList(title: string, rows: { display: string; reason?: string
                 )
                 .join('')}
         </ul>
+        ${truncationNote(hidden)}
     </details>`;
 }
 
@@ -413,7 +433,11 @@ ${breakdown('By language', view.byLanguage, 'Everything is one language.')}
         </thead>
         <tbody id="rows"></tbody>
     </table>
-    <p class="empty" id="empty" hidden>No file matches that filter.</p>
+    <p class="empty" id="empty" hidden>${
+        view.files.length === 0
+            ? 'No files were counted.'
+            : 'No file matches that filter.'
+    }</p>
     ${
         view.filesNotListed > 0
             ? `<p class="note">${view.filesNotListed.toLocaleString(
@@ -423,8 +447,8 @@ ${breakdown('By language', view.byLanguage, 'Everything is one language.')}
     }
 </section>
 
-${collapsibleList('Skipped', view.skipped)}
-${collapsibleList('Ignored', view.ignored)}
+${collapsibleList('Skipped', view.skipped, view.filesSkipped)}
+${collapsibleList('Ignored', view.ignored, view.filesIgnored)}
 
 </div>
 <script nonce="${nonce}">
