@@ -4,6 +4,31 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.1.0] - 2026-08-07
+
+### Added
+- **The multi-file summary is now a dashboard.** Counting a folder answers the
+  question you actually had — *what is eating my context?* — instead of only
+  *how much is it?*
+  - The total leads as a headline figure, with context use as a filled meter
+    that turns amber past 80% and red past 100%.
+  - **Where the tokens are**: a ranked breakdown by folder. The old tree was
+    ordered by name, so the folder eating half your context looked like every
+    other row.
+  - **By language**: the same breakdown by file type.
+  - The file list is a sortable, filterable table, with a button to copy it or
+    export it as CSV.
+- Paths are shown relative to what the selection shares, so counting one deep
+  folder no longer repeats the same long prefix on every row.
+
+### Changed
+- The summary's colours come entirely from VS Code's own theme tokens, so the
+  panel follows the editor into any theme, high-contrast ones included.
+
+### Internal
+- The aggregation behind the summary is pure and separately tested; the suite
+  is up to 129 tests.
+
 ## [2.0.1] - 2026-08-03
 
 ### Fixed
