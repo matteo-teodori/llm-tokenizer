@@ -83,11 +83,31 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   cell beginning `=`, `+`, `-` or `@` is a live formula to a spreadsheet, so a
   file named `=cmd|…` became executable content on opening the export. Both are
   neutralised.
+- **A legacy id in `defaultModel` silently disabled the setting.** A stored
+  model is how the extension knows you have picked one. Resolving a renamed id
+  from the *setting* wrote one anyway, so on the first activation after
+  upgrading, anyone who had set `defaultModel` from the old dropdown was
+  recorded as having chosen a model they never chose — after which their
+  setting was ignored for good and editing it did nothing. 41 of the 69 ids
+  that dropdown offered are renamed today. Only a saved choice is migrated now;
+  a legacy id in the setting still resolves, it just no longer counts as a
+  decision you made.
+- **A large open file could hang the editor.** Folder scans skip files over
+  10 MB, but a file open in the editor is already in memory and went to the
+  tokenizer whole — 8.5 seconds and a 3.3 GB spike for a 30 MB file on a
+  downloaded tokenizer, repeated as you typed. The same cap now applies
+  wherever text reaches the tokenizer, and past it the count is shown as an
+  estimate.
+- **Every folder count opened another summary tab.** Ten counts left ten
+  panels, each holding its rendered page and its own live message handler.
+  Counting again reuses the one panel and brings it forward.
+- **Cancelling a tokenizer download reported it as a failure**, with an error
+  notification and a button offering to show the log.
 
 ### Internal
 - The aggregation behind the summary is pure and separately tested, and the
   downloaded-vocabulary path is now one code path serving two published shapes.
-  The suite is up to 147 tests.
+  The suite is up to 150 tests.
 - Every dependency is compiled into the shipped bundle, which drops the
   upstream licence comments, so `THIRD-PARTY-NOTICES.md` now reproduces them
   and ships in the VSIX. It is generated from what esbuild actually inlines,

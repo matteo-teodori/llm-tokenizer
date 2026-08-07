@@ -7,6 +7,7 @@ import { TokenizerService } from '../../src/tokenizer/tokenizerService';
 import { TokenizerStore, writeWhole } from '../../src/tokenizer/tokenizerStore';
 import { findModel } from '../../src/tokenizer/registry';
 import type { ModelInfo } from '../../src/tokenizer/registry';
+import { MAX_TOKENIZED_FILE_BYTES } from '../../src/constants';
 
 /** The bundled worker, as the extension host loads it. */
 const WORKER = path.join(__dirname, '..', '..', '..', 'out', 'worker.js');
@@ -361,6 +362,23 @@ suite('tokenizer service', () => {
             false,
             'the store still reports a tokenizer after being cleared',
         );
+    });
+
+    test('text past the file cap is estimated, not tokenized', async () => {
+        // The scan caps file size before reading, but an open editor hands over
+        // a document that is already in memory, so nothing stopped a 30 MB file
+        // reaching the tokenizer — 8.5 s and a 3.3 GB spike on the Hugging Face
+        // backend, repeated on every debounced keystroke.
+        const gpt = model('gpt-5.6-sol');
+        const over = 'a'.repeat(MAX_TOKENIZED_FILE_BYTES + 1);
+
+        const result = await tokenizer.count(over, gpt);
+        assert.strictEqual(result.exact, false, 'an uncounted estimate must not claim to be exact');
+        assert.ok(result.count > 0);
+
+        // Just under the cap still goes to the worker and counts exactly.
+        const under = await tokenizer.count('a'.repeat(1_000), gpt);
+        assert.strictEqual(under.exact, true);
     });
 
     test('large input is counted without blocking the host', async () => {

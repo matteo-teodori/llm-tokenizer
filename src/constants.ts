@@ -20,9 +20,11 @@ export const CONTEXT_ERROR_THRESHOLD = 100;
 /**
  * Largest file we will tokenize.
  *
- * Tokenizing costs roughly 4.5 bytes of heap per input byte, so a 40 MB CSV is
- * ~450 MB of RSS and several seconds of blocked worker. Files above this are
- * reported as skipped rather than counted.
+ * Cost per input byte depends on the backend: measured at ~5 bytes of heap for
+ * a tiktoken rank table, and ~90 for the Hugging Face one, where a 30 MB input
+ * took 8.5 seconds and peaked at 3.3 GB of RSS. Files above this are reported
+ * as skipped rather than counted, and text that reaches the tokenizer by
+ * another route is estimated rather than tokenized (see TokenizerService.count).
  */
 export const MAX_TOKENIZED_FILE_BYTES = 10 * 1024 * 1024;
 

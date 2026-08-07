@@ -1,6 +1,11 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 
+import { showMultiFileSummary, type MultiFileSummaryConfig } from '../../src/webview';
+import { resolveInitialModel } from '../../src/extension';
+import { STORAGE_KEY } from '../../src/constants';
+import { MODEL_ALIASES } from '../../src/tokenizer/registry';
+
 const EXTENSION_ID = 'matteoteodori.llm-tokenizer';
 const CONFIG = 'llm-tokenizer';
 
@@ -13,6 +18,91 @@ suite('extension', () => {
 
     test('activates', () => {
         assert.strictEqual(vscode.extensions.getExtension(EXTENSION_ID)?.isActive, true);
+    });
+
+    test('a legacy id in the setting does not fabricate a stored choice', async () => {
+        // A non-empty globalState is the sentinel for "the user has picked a
+        // model". Migrating an aliased `defaultModel` wrote one, which turned a
+        // user who had never picked into one who had — permanently. Their
+        // setting was ignored from then on, and the live settings-change
+        // handler, gated on global state being empty, went dead with it. 41 of
+        // the 69 ids the v1.3.0 dropdown offered are aliases today.
+        const writes: [string, unknown][] = [];
+        const context = (saved: string | undefined): vscode.ExtensionContext =>
+            ({
+                globalState: {
+                    get: (key: string) => (key === STORAGE_KEY ? saved : undefined),
+                    update: (key: string, value: unknown) => {
+                        writes.push([key, value]);
+                        return Promise.resolve();
+                    },
+                },
+            } as unknown as vscode.ExtensionContext);
+
+        // This file is a second module instance from the one the host activated,
+        // so the module's own channel was never assigned; pass one in.
+        const channel = vscode.window.createOutputChannel('LLM Tokenizer (test)', { log: true });
+
+        const config = vscode.workspace.getConfiguration(CONFIG);
+        const original = config.inspect<string>('defaultModel')?.globalValue;
+        const alias = Object.keys(MODEL_ALIASES)[0];
+        assert.ok(alias, 'the registry should carry at least one alias to test with');
+
+        await config.update('defaultModel', alias, vscode.ConfigurationTarget.Global);
+        try {
+            const resolved = resolveInitialModel(context(undefined), channel);
+
+            // The alias still resolves — the setting keeps working.
+            assert.strictEqual(resolved.id, MODEL_ALIASES[alias]);
+            // …but nothing was stored, so the user has still not "picked".
+            assert.deepStrictEqual(writes, [], `activation stored ${JSON.stringify(writes)}`);
+
+            // A stale *saved* id is still migrated: that is what the write is for.
+            resolveInitialModel(context(alias), channel);
+            assert.deepStrictEqual(writes, [[STORAGE_KEY, MODEL_ALIASES[alias]]]);
+        } finally {
+            await config.update('defaultModel', original, vscode.ConfigurationTarget.Global);
+            channel.dispose();
+        }
+    });
+
+    test('repeated summaries reuse one panel instead of stacking up', () => {
+        // Every run used to create its own panel. Ten counts left ten tabs, each
+        // created with retainContextWhenHidden and each holding its rendered
+        // page and a live message handler closed over that run's paths.
+        const summary = (n: number): MultiFileSummaryConfig => ({
+            totalTokens: n,
+            filesProcessed: 1,
+            processedFiles: [{ path: `/repo/run${n}.ts`, tokens: n }],
+            skippedFiles: [],
+            ignoredFiles: [],
+            modelLabel: 'GPT-5.6 Sol',
+            exact: true,
+            cancelled: false,
+            contextStatus: { percentage: 0, status: 'ok', limit: 922_000 },
+        });
+
+        const first = showMultiFileSummary(summary(1));
+        try {
+            for (let i = 2; i <= 5; i++) {
+                assert.strictEqual(
+                    showMultiFileSummary(summary(i)),
+                    first,
+                    `run ${i} created a second panel`,
+                );
+            }
+        } finally {
+            first.dispose();
+        }
+
+        // Closing it releases the reference, so the next run opens a fresh one
+        // rather than reviving a disposed panel.
+        const reopened = showMultiFileSummary(summary(6));
+        try {
+            assert.notStrictEqual(reopened, first, 'a disposed panel was reused');
+        } finally {
+            reopened.dispose();
+        }
     });
 
     test('registers every contributed command', async () => {

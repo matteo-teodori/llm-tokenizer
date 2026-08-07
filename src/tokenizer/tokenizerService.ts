@@ -17,6 +17,7 @@ import {
 import type { WorkerRequest, WorkerResponse } from './protocol';
 import { TokenizerStore, type AssetKind } from './tokenizerStore';
 import type { ModelInfo } from './registry';
+import { MAX_TOKENIZED_FILE_BYTES } from '../constants';
 
 /** A token count plus whether it can be trusted as exact. */
 export interface TokenCount {
@@ -88,6 +89,18 @@ export class TokenizerService implements vscode.Disposable {
     public async count(text: string, model: ModelInfo): Promise<TokenCount> {
         if (text.length === 0) {
             return { count: 0, exact: true };
+        }
+
+        // The same cap the scan applies before reading a file, enforced here so
+        // the open-editor paths get it too. Those read an already-in-memory
+        // document, so nothing had stopped a 30 MB file reaching the tokenizer:
+        // measured at 8.5 seconds and a 3.3 GB spike on the Hugging Face
+        // backend, which costs ~90 bytes of heap per input byte — and repeated
+        // on every debounced keystroke. Above the cap the count degrades to the
+        // same estimate used when the worker is unavailable, which the UI
+        // already presents as "≈".
+        if (text.length > MAX_TOKENIZED_FILE_BYTES) {
+            return { count: estimate(text, model), exact: false };
         }
 
         // A restarted worker has forgotten its downloaded tokenizers. Without

@@ -116,7 +116,13 @@ export function deactivate(): void {
  * a hardcoded fallback. Removed and renamed ids are migrated through
  * MODEL_ALIASES so nobody is silently reset.
  */
-function resolveInitialModel(context: vscode.ExtensionContext): ModelInfo {
+export function resolveInitialModel(
+    context: vscode.ExtensionContext,
+    // Defaulted rather than read from the module so a test can drive this
+    // without activating: the test host loads the bundle, and an import of this
+    // file is a second module instance whose `log` was never assigned.
+    channel: vscode.LogOutputChannel = log,
+): ModelInfo {
     const saved = context.globalState.get<string>(STORAGE_KEY);
     const configured = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('defaultModel');
 
@@ -126,8 +132,19 @@ function resolveInitialModel(context: vscode.ExtensionContext): ModelInfo {
         }
 
         const model = findModel(candidate);
-        if (model && model.id !== candidate) {
-            log.info(`Model "${candidate}" no longer exists; migrated to "${model.id}"`);
+
+        // Only a *saved* choice is migrated. A stored value is the sentinel for
+        // "the user has picked a model", and rewriting it for an aliased
+        // `defaultModel` turned a user who had never picked one into one who
+        // had — permanently, and with no action on their part. Their setting
+        // was then ignored on every later activation, and the live
+        // settings-change handler, which is gated on global state being empty,
+        // went dead with it. 41 of the 69 ids the v1.3.0 dropdown offered are
+        // aliases today, so this fired on the first activation after upgrade
+        // for anyone who had set it. An aliased setting still resolves below;
+        // it just no longer fabricates a stored choice.
+        if (model && model.id !== candidate && candidate === saved) {
+            channel.info(`Model "${candidate}" no longer exists; migrated to "${model.id}"`);
             void context.globalState.update(STORAGE_KEY, model.id);
             void vscode.window.showInformationMessage(
                 `LLM Tokenizer: "${candidate}" is no longer available. Switched to ${model.label}.`,
@@ -137,7 +154,7 @@ function resolveInitialModel(context: vscode.ExtensionContext): ModelInfo {
             return model;
         }
         if (MODEL_ALIASES[candidate] === undefined) {
-            log.warn(`Unknown model "${candidate}" in settings; falling back to the default`);
+            channel.warn(`Unknown model "${candidate}" in settings; falling back to the default`);
         }
     }
 
@@ -281,13 +298,19 @@ async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Pro
         return;
     }
 
+    let cancelled = false;
     const succeeded = await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
             title: `Downloading the ${model.label} tokenizer…`,
             cancellable: true,
         },
-        (_progress, token) => tokenizer.ensureExact(model, token),
+        (_progress, token) => {
+            token.onCancellationRequested(() => {
+                cancelled = true;
+            });
+            return tokenizer.ensureExact(model, token);
+        },
     );
 
     // ensureExact never rejects — a failed download is logged and reported as
@@ -298,6 +321,17 @@ async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Pro
         void vscode.window.showInformationMessage(
             `${model.label} is now counted exactly.`,
         );
+        return;
+    }
+
+    // Checked after `succeeded`, so a download that landed just before the
+    // cancel took effect still reports the success that actually happened.
+    // Otherwise: the user asked for it to stop, and an error notification would
+    // report their own action back to them as a failure, with a button
+    // inviting them to read the log about it. The progress notification
+    // disappearing is the acknowledgement.
+    if (cancelled) {
+        log.info(`Download of the ${model.label} tokenizer was cancelled`);
         return;
     }
 

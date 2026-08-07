@@ -77,9 +77,23 @@ function buildView(config: MultiFileSummaryConfig): SummaryView {
     };
 }
 
+/**
+ * The one summary panel, reused across runs.
+ *
+ * Every run used to create its own. Ten counts left ten "Token Summary" tabs,
+ * each created with `retainContextWhenHidden` — so each kept its whole webview
+ * context alive while hidden — and each holding its rendered HTML plus a live
+ * message handler closed over that run's set of openable paths, which is not
+ * subject to the display cap. Measured over a 20,000-file workspace that was
+ * ~0.87 MB of extension-host heap retained per stale panel, and every stale
+ * handler stayed able to open its own run's files.
+ */
+let summaryPanel: vscode.WebviewPanel | undefined;
+let summaryListener: vscode.Disposable | undefined;
+
 /** Create and show the multi-file token summary. */
 export function showMultiFileSummary(config: MultiFileSummaryConfig): vscode.WebviewPanel {
-    const panel = vscode.window.createWebviewPanel(
+    const panel = summaryPanel ?? vscode.window.createWebviewPanel(
         'llmTokenizer.summary',
         'Token Summary',
         vscode.ViewColumn.Active,
@@ -91,12 +105,27 @@ export function showMultiFileSummary(config: MultiFileSummaryConfig): vscode.Web
         },
     );
 
+    if (summaryPanel) {
+        panel.reveal();
+    } else {
+        summaryPanel = panel;
+        panel.onDidDispose(() => {
+            summaryPanel = undefined;
+            summaryListener?.dispose();
+            summaryListener = undefined;
+        });
+    }
+
+    // The previous run's handler closed over the previous run's paths, and this
+    // run replaces the page it belonged to.
+    summaryListener?.dispose();
+
     // The webview may only ask to open a file this summary actually listed.
     // Without that check, anything able to post a message could make the
     // extension open an arbitrary path.
     const openable = new Set(config.processedFiles.map(f => f.path));
 
-    panel.webview.onDidReceiveMessage(async (message: unknown) => {
+    summaryListener = panel.webview.onDidReceiveMessage(async (message: unknown) => {
         if (typeof message !== 'object' || message === null) {
             return;
         }
