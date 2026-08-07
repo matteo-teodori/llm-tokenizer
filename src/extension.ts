@@ -764,7 +764,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                 ignoredFiles: result.ignored,
                 modelLabel: model.label,
                 exact: result.exact,
-                contextStatus: contextStatus(result.total),
+                contextStatus: contextStatus(result.total, model),
             });
         },
     );
@@ -860,8 +860,16 @@ async function refreshProjectCount(): Promise<void> {
 
 // ═══════════════════════════════════════════════════════════════
 
-function contextStatus(count: number): { percentage: number; status: 'ok' | 'warning' | 'error'; limit: number | undefined } {
-    const limit = currentModel.contextLimit;
+/**
+ * A count's standing against a model's context limit.
+ *
+ * The model is a parameter rather than a read of `currentModel`: a multi-file
+ * count snapshots the model it started with and can finish after the user has
+ * switched, and the summary would then meter the new model's limit under the
+ * old model's name.
+ */
+function contextStatus(count: number, model: ModelInfo): { percentage: number; status: 'ok' | 'warning' | 'error'; limit: number | undefined } {
+    const limit = model.contextLimit;
     if (!limit) {
         return { percentage: 0, status: 'ok', limit: undefined };
     }

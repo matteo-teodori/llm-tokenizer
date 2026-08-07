@@ -64,11 +64,17 @@ suite('Kimi pre-tokenizer', () => {
     });
 
     test('the regex is rebuilt per call, so matching is not stateful', () => {
-        // A shared /g regex carries lastIndex between calls and would silently
-        // skip the start of the second string.
-        const once = [...'hello'.matchAll(splitRegex())].map(m => m[0]);
-        const twice = [...'hello'.matchAll(splitRegex())].map(m => m[0]);
-        assert.deepStrictEqual(once, twice);
+        // Comparing two matchAll runs proves nothing: matchAll clones its
+        // argument, so that assertion holds even for a shared regex. What has
+        // to be true is that callers never get the same object.
+        assert.notStrictEqual(splitRegex(), splitRegex());
+
+        // And that it matters: a /g regex advances lastIndex, so a shared one
+        // would resume mid-string on the next count.
+        const shared = splitRegex();
+        shared.exec('hello world');
+        assert.ok(shared.lastIndex > 0, 'exec should have advanced lastIndex');
+        assert.strictEqual(splitRegex().lastIndex, 0, 'a fresh regex must start at 0');
     });
 });
 
@@ -108,6 +114,16 @@ suite('Kimi rank file', () => {
         // encoder that silently counts everything as one token.
         assert.throws(() => parseRankFile(''), /no usable entries/);
         assert.throws(() => parseRankFile('not a rank file\n'), /no usable entries/);
+    });
+
+    test('rejects a table with a missing rank', () => {
+        // Ranks are dense in every published tiktoken vocabulary. A gap means
+        // lines were lost or reordered, and such a table still encodes — into
+        // more tokens than the model would use, while claiming to be exact.
+        assert.throws(() => parseRankFile('IQ== 0\nIg== 2\n'), /missing 1 of 3 ranks/);
+
+        // A dense table is unaffected.
+        assert.strictEqual(parseRankFile('IQ== 0\nIg== 1\nIw== 2\n').length, 3);
     });
 });
 

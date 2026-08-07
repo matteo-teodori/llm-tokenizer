@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { TokenizerService } from '../../src/tokenizer/tokenizerService';
-import { TokenizerStore } from '../../src/tokenizer/tokenizerStore';
+import { TokenizerStore, writeWhole } from '../../src/tokenizer/tokenizerStore';
 import { findModel } from '../../src/tokenizer/registry';
 import type { ModelInfo } from '../../src/tokenizer/registry';
 
@@ -317,6 +317,50 @@ suite('tokenizer service', () => {
         const after = await tokenizer.count('Hello', kimi);
         assert.strictEqual(after.exact, false, 'the worker should have forgotten it too');
         assert.strictEqual(await tokenizer.isExact(kimi), false);
+    });
+
+    test('a cache file is never left half-written', async () => {
+        // A rank table parses line by line, so a torn write leaves a plausible
+        // but short table that reads back as an exact tokenizer for as long as
+        // it sits on disk. The write goes to a sibling and is renamed, so the
+        // target either does not exist or is whole.
+        const dir = vscode.Uri.joinPath(storageUri, 'atomic-write');
+        await vscode.workspace.fs.createDirectory(dir);
+        const target = vscode.Uri.joinPath(dir, 'tiktoken.model');
+
+        await writeWhole(dir, 'tiktoken.model', 'IQ== 0\nIg== 1\n');
+        assert.strictEqual(
+            new TextDecoder().decode(await vscode.workspace.fs.readFile(target)),
+            'IQ== 0\nIg== 1\n',
+        );
+
+        // Overwriting an existing file works, and leaves no scratch behind.
+        await writeWhole(dir, 'tiktoken.model', 'IQ== 0\n');
+        assert.strictEqual(
+            new TextDecoder().decode(await vscode.workspace.fs.readFile(target)),
+            'IQ== 0\n',
+        );
+
+        const left = (await vscode.workspace.fs.readDirectory(dir)).map(([name]) => name);
+        assert.deepStrictEqual(left, ['tiktoken.model'], `scratch files left behind: ${left.join(', ')}`);
+    });
+
+    test('clearing the cache is not undone by a download already in flight', async () => {
+        // The download resolves after the clear. It used to repopulate the
+        // in-memory cache behind the "cleared" message, so counts stayed exact
+        // and the download command reported "already downloaded".
+        const kimi = model('kimi-k3');
+        assert.strictEqual(kimi.encoder.kind, 'tiktokenModel');
+        await seedRankTable(storageUri, kimi.encoder.repo);
+        assert.strictEqual(await store.isDownloaded(kimi.encoder.repo, 'tiktokenModel'), true);
+
+        await store.clear();
+
+        assert.strictEqual(
+            await store.isDownloaded(kimi.encoder.repo, 'tiktokenModel'),
+            false,
+            'the store still reports a tokenizer after being cleared',
+        );
     });
 
     test('large input is counted without blocking the host', async () => {

@@ -22,6 +22,15 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   Kana, Hangul, Cyrillic, emoji, contractions and source files. It needs a
   recent JavaScript engine; on an older one Kimi simply stays an estimate
   rather than failing.
+
+  One known gap, measured rather than assumed: text containing U+FEFF *away
+  from the start of a file* counts about one token low per occurrence. The
+  underlying engine looks byte ranges up by way of a string, through a decoder
+  that drops a leading byte-order mark, and no shape of the rank table avoids
+  it — the two obvious alternatives were tried against a byte-exact port of the
+  reference algorithm and both count more cases wrong, not fewer. A mark at the
+  start of a file is removed when the file is decoded, so the common case never
+  reaches the tokenizer, and ordinary text is unaffected.
 - **The multi-file summary is now a dashboard.** Counting a folder answers the
   question you actually had — *what is eating my context?* — instead of only
   *how much is it?*
@@ -51,11 +60,34 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   "100% — Approaching the … limit", and one at 79.99% showed "80%" with none of
   the warning styling. The figure is truncated now, so it can never claim a
   threshold the caption has not crossed.
+- **A torn write left a wrong tokenizer on disk for good.** A rank table is
+  parsed line by line, so one cut short by a crash or a full disk still yielded
+  a plausible table — a shorter, wrong one, read back as *exact* on every count
+  from then on. Downloads are now written beside their target and renamed, so
+  the target either does not exist or is whole. A table with a gap in its ranks
+  is rejected outright rather than counted from.
+- **The summary could meter the wrong model's limit.** A multi-file count
+  snapshots the model it started with, but the meter read whichever model was
+  current when the run finished, so switching model mid-count showed one
+  model's limit under another's name.
+- **Clearing the cache could be undone by a download already in flight.** The
+  download finished after the clear and put its result back, leaving counts
+  exact and the download command answering "already downloaded" immediately
+  after the cache was reported empty.
+- **A tokenizer that failed to build broke every later count.** The worker
+  recorded the vocabulary before building it, so a malformed one stayed in the
+  map and every subsequent count re-entered the same failing constructor
+  instead of falling back to the model's estimate.
+- **Exported file lists trusted the file names in them.** A path can contain a
+  tab or a newline, which shifted or split rows in the copied list; and a CSV
+  cell beginning `=`, `+`, `-` or `@` is a live formula to a spreadsheet, so a
+  file named `=cmd|…` became executable content on opening the export. Both are
+  neutralised.
 
 ### Internal
 - The aggregation behind the summary is pure and separately tested, and the
   downloaded-vocabulary path is now one code path serving two published shapes.
-  The suite is up to 144 tests.
+  The suite is up to 147 tests.
 - Every dependency is compiled into the shipped bundle, which drops the
   upstream licence comments, so `THIRD-PARTY-NOTICES.md` now reproduces them
   and ships in the VSIX. It is generated from what esbuild actually inlines,

@@ -69,6 +69,19 @@ const cache = new Map<string, BytePairEncodingCore>();
  * The result is indexed by rank. A token whose bytes are not valid UTF-8 — 1172
  * of them in Kimi's table, mostly lone continuation bytes — is kept as a byte
  * array, which is the shape the engine expects for exactly this case.
+ *
+ * Known divergence: text containing U+FEFF away from the start of a file counts
+ * low, by about one token per occurrence. The engine looks byte ranges up by
+ * converting them to a string first, through a `TextDecoder` that strips a
+ * leading byte-order mark, so the bytes for `U+FEFF` + `hello` produce the key
+ * `hello` and take that token's rank — merging the mark into the word. That
+ * happens inside the engine and no shape of this table avoids it: measured
+ * against a byte-exact port of the reference algorithm over the real
+ * 163,584-entry table, `ignoreBOM: true` and keeping such tokens as bytes both
+ * count *more* cases wrong, not fewer. It is left alone deliberately. A mark at
+ * the start of a file — the common case, and the only one most files have — is
+ * already removed when the file is decoded, so it never reaches here, and
+ * ordinary text is unaffected.
  */
 export function parseRankFile(text: string): (string | number[])[] {
     const ranks: (string | number[])[] = [];
@@ -96,6 +109,22 @@ export function parseRankFile(text: string): (string | number[])[] {
     if (ranks.length === 0) {
         throw new Error('the rank file contained no usable entries');
     }
+
+    // A table that parsed is not yet a table that is whole. Ranks are dense in
+    // every published tiktoken vocabulary, so a gap means lines were lost or
+    // reordered — and a table missing entries still encodes, just into more
+    // tokens than the model would use, silently and while labelled exact.
+    // `Object.keys` counts only the slots actually assigned, so a hole shows up
+    // as a shortfall against the highest rank seen. Downloads are written whole
+    // (see tokenizerStore), so this catches corruption on disk rather than a
+    // torn write.
+    const filled = Object.keys(ranks).length;
+    if (filled !== ranks.length) {
+        throw new Error(
+            `the rank file is missing ${ranks.length - filled} of ${ranks.length} ranks`,
+        );
+    }
+
     return ranks;
 }
 

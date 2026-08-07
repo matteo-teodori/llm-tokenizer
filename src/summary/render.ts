@@ -529,20 +529,35 @@ ${collapsibleList('Ignored', view.ignored, view.filesIgnored)}
         if (file) { vscode.postMessage({ command: 'openFile', path: file.path }); }
     });
 
+    // A path is whatever the file system allowed, which on Unix includes tabs
+    // and newlines. Left in, one such name shifts every following column or
+    // splits the row in two, so the separators are stripped from the cell
+    // rather than allowed to act as separators.
+    function cell(value) {
+        return String(value).replace(/[\\t\\r\\n]+/g, ' ');
+    }
+
     document.getElementById('copy').addEventListener('click', () => {
         vscode.postMessage({
             command: 'copy',
-            text: visible.map(f => f.display + '\\t' + f.tokens).join('\\n'),
+            text: visible.map(f => cell(f.display) + '\\t' + f.tokens).join('\\n'),
         });
     });
 
     document.getElementById('csv').addEventListener('click', () => {
+        // Quoting alone does not stop a spreadsheet treating a cell as a
+        // formula: a file named "=cmd|'/c calc'!A1.ts" is executable content
+        // once the export is opened. A leading apostrophe forces it to text.
+        function csv(value) {
+            const text = cell(value);
+            const escaped = /^[=+\\-@]/.test(text) ? "'" + text : text;
+            return '"' + escaped.replace(/"/g, '""') + '"';
+        }
+
         const rows = [['path', 'tokens'], ...visible.map(f => [f.display, String(f.tokens)])];
         vscode.postMessage({
             command: 'export',
-            text: rows
-                .map(r => r.map(v => '"' + v.replace(/"/g, '""') + '"').join(','))
-                .join('\\n'),
+            text: rows.map(r => r.map(csv).join(',')).join('\\n'),
         });
     });
 

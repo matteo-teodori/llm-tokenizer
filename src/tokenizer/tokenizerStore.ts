@@ -29,6 +29,37 @@ const MAX_TOKENIZER_BYTES = 64 * 1024 * 1024;
 
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
+/**
+ * Write a cache file so a reader can never see a partial one.
+ *
+ * The rank table is why this matters. It is parsed line by line and a truncated
+ * one still yields a plausible table — just a shorter, wrong one — which is then
+ * read back as an exact tokenizer on every count for as long as it sits on disk.
+ * A `tokenizer.json` cut short at least fails to parse and is re-fetched, so it
+ * degrades safely; the rank file does not. Writing beside the target and
+ * renaming means the target either does not exist or is whole, whatever happens
+ * mid-write.
+ *
+ * Exported for the test that proves the target never appears half-written.
+ */
+export async function writeWhole(dir: vscode.Uri, name: string, contents: string): Promise<void> {
+    const target = vscode.Uri.joinPath(dir, name);
+    const partial = vscode.Uri.joinPath(dir, `${name}.part`);
+
+    await vscode.workspace.fs.writeFile(partial, new TextEncoder().encode(contents));
+    try {
+        await vscode.workspace.fs.rename(partial, target, { overwrite: true });
+    } catch (error) {
+        try {
+            await vscode.workspace.fs.delete(partial, { useTrash: false });
+        } catch {
+            // Best effort. A leftover `.part` is never read — readFromDisk asks
+            // for exact names — so it costs disk and nothing else.
+        }
+        throw error;
+    }
+}
+
 export class TokenizerDownloadError extends Error {
     constructor(readonly repo: string, message: string) {
         super(`Could not download the tokenizer for ${repo}: ${message}`);
@@ -45,6 +76,12 @@ export class TokenizerDownloadError extends Error {
 export class TokenizerStore {
     private readonly inFlight = new Map<string, Promise<TokenizerAsset>>();
     private readonly memory = new Map<string, TokenizerAsset>();
+
+    /**
+     * Bumped by `clear()`, so a download that was already in flight when the
+     * user cleared the cache does not put its result back afterwards.
+     */
+    private generation = 0;
 
     constructor(private readonly storageUri: vscode.Uri) {}
 
@@ -89,19 +126,43 @@ export class TokenizerStore {
             return existing;
         }
 
-        const download = this.download(repo, kind, token)
+        const generation = this.generation;
+        const download: Promise<TokenizerAsset> = this.download(repo, kind, generation, token)
             .then(asset => {
-                this.memory.set(repo, asset);
+                // Still the caller's asset either way — it just no longer
+                // belongs in a cache the user has since emptied.
+                if (generation === this.generation) {
+                    this.memory.set(repo, asset);
+                }
                 return asset;
             })
-            .finally(() => this.inFlight.delete(repo));
+            .finally(() => {
+                // Only if it is still ours: `clear()` empties the map, and a
+                // later download for the same repo must not be evicted by this
+                // one finishing.
+                if (this.inFlight.get(repo) === download) {
+                    this.inFlight.delete(repo);
+                }
+            });
 
         this.inFlight.set(repo, download);
         return download;
     }
 
-    /** Delete every cached tokenizer. Exposed as a command so users can reclaim disk. */
+    /**
+     * Delete every cached tokenizer. Exposed as a command so users can reclaim
+     * disk.
+     *
+     * Downloads already in flight are disowned rather than awaited: one can
+     * have up to two minutes left to run, and the command is awaited before the
+     * user is told the cache is empty. Disowning them is what stops a finished
+     * download repopulating the cache behind the message — which used to leave
+     * counts exact, and the download command answering "already downloaded",
+     * straight after a successful clear.
+     */
     public async clear(): Promise<void> {
+        this.generation++;
+        this.inFlight.clear();
         this.memory.clear();
         try {
             await vscode.workspace.fs.delete(this.storageUri, { recursive: true, useTrash: false });
@@ -169,33 +230,33 @@ export class TokenizerStore {
     private async download(
         repo: string,
         kind: AssetKind,
+        generation: number,
         token?: vscode.CancellationToken,
     ): Promise<TokenizerAsset> {
+        // Skipped when the user cleared the cache while this was in flight:
+        // the directory has already been deleted, and writing now would put a
+        // file back behind the delete.
+        const stale = (): boolean => generation !== this.generation;
+
         if (kind === 'tiktokenModel') {
             const rankFile = await this.fetchText(repo, RANK_FILE, token);
-            const dir = this.repoDir(repo);
-            await vscode.workspace.fs.createDirectory(dir);
-            await vscode.workspace.fs.writeFile(
-                vscode.Uri.joinPath(dir, RANK_FILE),
-                new TextEncoder().encode(rankFile),
-            );
+            if (!stale()) {
+                const dir = this.repoDir(repo);
+                await vscode.workspace.fs.createDirectory(dir);
+                await writeWhole(dir, RANK_FILE, rankFile);
+            }
             return { kind: 'tiktokenModel', rankFile };
         }
 
         const tokenizerJSON = await this.fetchJson(repo, 'tokenizer.json', true, token);
         const tokenizerConfig = (await this.fetchJson(repo, 'tokenizer_config.json', false, token)) ?? {};
 
-        const dir = this.repoDir(repo);
-        await vscode.workspace.fs.createDirectory(dir);
-        const encoder = new TextEncoder();
-        await vscode.workspace.fs.writeFile(
-            vscode.Uri.joinPath(dir, 'tokenizer.json'),
-            encoder.encode(JSON.stringify(tokenizerJSON)),
-        );
-        await vscode.workspace.fs.writeFile(
-            vscode.Uri.joinPath(dir, 'tokenizer_config.json'),
-            encoder.encode(JSON.stringify(tokenizerConfig)),
-        );
+        if (!stale()) {
+            const dir = this.repoDir(repo);
+            await vscode.workspace.fs.createDirectory(dir);
+            await writeWhole(dir, 'tokenizer.json', JSON.stringify(tokenizerJSON));
+            await writeWhole(dir, 'tokenizer_config.json', JSON.stringify(tokenizerConfig));
+        }
 
         return { kind: 'hf', tokenizerJSON, tokenizerConfig };
     }

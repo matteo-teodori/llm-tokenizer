@@ -55,7 +55,6 @@ function handle(request: WorkerRequest): void {
         }
 
         case 'loadTokenizer': {
-            loaded.set(request.repo, request.asset);
             // Built now so the cost lands here rather than inside the first
             // count, and so a malformed vocabulary is reported as a failed load
             // rather than a failed count.
@@ -64,6 +63,11 @@ function handle(request: WorkerRequest): void {
             } else {
                 tiktokenModelEncoder(request.repo, request.asset);
             }
+            // Recorded only once it builds. Recording it first meant a
+            // vocabulary that failed to build stayed in the map, so every
+            // later count re-entered the same failing constructor and threw
+            // instead of falling back to the model's estimate.
+            loaded.set(request.repo, request.asset);
             reply({ type: 'ack', id: request.id });
             break;
         }
