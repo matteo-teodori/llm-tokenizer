@@ -7,6 +7,17 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ## [2.1.0] - 2026-08-07
 
 ### Added
+- **Kimi is counted exactly.** Moonshot publishes a tiktoken rank table instead
+  of a `tokenizer.json`, which no loader here could read, so the whole family
+  was estimated. K3, K2.7 Code and K2.6 now use Moonshot's real vocabulary —
+  and because the rank file is byte-identical across the family, one download
+  covers all three.
+
+  Moonshot's pre-tokenizer uses three constructs JavaScript does not have, so
+  it had to be translated. The translation was checked against the reference
+  implementation both ways: identical splits on 20 cases, and identical counts
+  on 28 spanning Latin, Han, Kana, Hangul, Cyrillic, emoji, contractions and
+  source files.
 - **The multi-file summary is now a dashboard.** Counting a folder answers the
   question you actually had — *what is eating my context?* — instead of only
   *how much is it?*
@@ -26,8 +37,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   panel follows the editor into any theme, high-contrast ones included.
 
 ### Internal
-- The aggregation behind the summary is pure and separately tested; the suite
-  is up to 129 tests.
+- The aggregation behind the summary is pure and separately tested, and the
+  downloaded-vocabulary path is now one code path serving two published shapes.
+  The suite is up to 143 tests.
 
 ## [2.0.1] - 2026-08-03
 

@@ -5,7 +5,7 @@
  * pulls in the other's dependencies.
  */
 
-import type { EncoderSpec, HfTokenizerFiles } from './encoders';
+import type { EncoderSpec, TokenizerAsset } from './encoders';
 
 /** Count the tokens in `text` using `spec`. */
 export interface CountRequest {
@@ -23,7 +23,7 @@ export interface LoadTokenizerRequest {
     type: 'loadTokenizer';
     id: number;
     repo: string;
-    files: HfTokenizerFiles;
+    asset: TokenizerAsset;
 }
 
 /** Release a loaded Hugging Face tokenizer (each holds ~120 MB of heap). */

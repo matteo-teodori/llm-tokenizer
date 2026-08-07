@@ -41,6 +41,18 @@ async function seedTokenizer(
     }
 }
 
+/** Place the synthetic Kimi rank table in the store as if downloaded. */
+async function seedRankTable(storage: vscode.Uri, repo: string): Promise<void> {
+    const fixture = vscode.Uri.file(
+        path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'kimi', 'tiktoken.model'),
+    );
+    const target = vscode.Uri.joinPath(storage, repo.replace(/[/\\]/g, '--'));
+    await vscode.workspace.fs.createDirectory(target);
+    await vscode.workspace.fs.copy(fixture, vscode.Uri.joinPath(target, 'tiktoken.model'), {
+        overwrite: true,
+    });
+}
+
 suite('tokenizer service', () => {
     let log: vscode.LogOutputChannel;
     let store: TokenizerStore;
@@ -184,7 +196,7 @@ suite('tokenizer service', () => {
         assert.strictEqual(result.exact, false);
         assert.ok(Number.isFinite(result.count) && result.count > 0);
         assert.strictEqual(
-            await store.isDownloaded(llama.encoder.repo),
+            await store.isDownloaded(llama.encoder.repo, 'hf'),
             false,
             'counting must not trigger a download on its own',
         );
@@ -249,6 +261,43 @@ suite('tokenizer service', () => {
 
         // And an empty file is still zero, not one.
         assert.deepStrictEqual(await tokenizer.count('', llama), { count: 0, exact: true });
+    });
+
+    test('Kimi is estimated until its rank table is present, then exact', async () => {
+        // Moonshot publishes a tiktoken rank table rather than a
+        // tokenizer.json, so this is a different download path to the Hugging
+        // Face one — and the whole family was estimated before it existed.
+        const kimi = model('kimi-k3');
+        assert.strictEqual(kimi.encoder.kind, 'tiktokenModel');
+
+        const before = await tokenizer.count('Hello', kimi);
+        assert.strictEqual(before.exact, false);
+
+        await seedRankTable(storageUri, kimi.encoder.repo);
+        assert.strictEqual(await tokenizer.ensureExact(kimi), true);
+
+        // The fixture merges "He" and "lo", so "Hello" is exactly three.
+        const after = await tokenizer.count('Hello', kimi);
+        assert.strictEqual(after.exact, true);
+        assert.strictEqual(after.count, 3);
+    });
+
+    test('every Kimi model shares one downloaded rank table', async () => {
+        // The rank file is byte-identical across the family, so the registry
+        // points them all at one repo: downloading once must serve all three.
+        const repos = ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'].map(id => {
+            const m = model(id);
+            assert.strictEqual(m.encoder.kind, 'tiktokenModel');
+            return m.encoder.kind === 'tiktokenModel' ? m.encoder.repo : '';
+        });
+        assert.strictEqual(new Set(repos).size, 1, `expected one repo, got ${repos.join(', ')}`);
+
+        await seedRankTable(storageUri, repos[0]);
+        for (const id of ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']) {
+            const result = await tokenizer.count('Hello', model(id));
+            assert.strictEqual(result.exact, true, `${id} should be exact`);
+            assert.strictEqual(result.count, 3, id);
+        }
     });
 
     test('large input is counted without blocking the host', async () => {

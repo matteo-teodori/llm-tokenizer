@@ -315,9 +315,9 @@
             "MiniMax · 205K context · exact once the tokenizer is downloaded",
             "MiniMax · 205K context · exact once the tokenizer is downloaded",
             "MiniMax · 205K context · exact once the tokenizer is downloaded",
-            "Moonshot · 1M context · estimated — no public tokenizer",
-            "Moonshot · 262K context · estimated — no public tokenizer",
-            "Moonshot · 262K context · estimated — no public tokenizer",
+            "Moonshot · 1M context · undefined",
+            "Moonshot · 262K context · undefined",
+            "Moonshot · 262K context · undefined",
             "Xiaomi · 1M context · exact once the tokenizer is downloaded",
             "Xiaomi · 262K context · exact once the tokenizer is downloaded",
             "Tencent · 262K context · exact once the tokenizer is downloaded"

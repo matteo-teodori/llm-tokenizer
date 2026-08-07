@@ -8,9 +8,9 @@
 import { Worker } from 'worker_threads';
 import * as vscode from 'vscode';
 
-import type { EncoderSpec } from './encoders';
+import { isDownloadable, type EncoderSpec } from './encoders';
 import type { WorkerRequest, WorkerResponse } from './protocol';
-import { TokenizerStore } from './tokenizerStore';
+import { TokenizerStore, type AssetKind } from './tokenizerStore';
 import type { ModelInfo } from './registry';
 
 /** A token count plus whether it can be trusted as exact. */
@@ -119,16 +119,16 @@ export class TokenizerService implements vscode.Disposable {
      * the user has not opted into stays an estimate.
      */
     private async rehydrateIfNeeded(model: ModelInfo): Promise<void> {
-        if (model.encoder.kind !== 'hf') {
+        if (!isDownloadable(model.encoder)) {
             return;
         }
 
-        const { repo } = model.encoder;
+        const { repo, kind } = model.encoder;
         if (this.loadedRepos.has(repo) || this.unavailable.has(repo)) {
             return;
         }
 
-        if (!(await this.store.isDownloaded(repo))) {
+        if (!(await this.store.isDownloaded(repo, kind))) {
             this.unavailable.add(repo);
             return;
         }
@@ -148,9 +148,10 @@ export class TokenizerService implements vscode.Disposable {
                 return true;
             case 'heuristic':
                 return false;
+            case 'tiktokenModel':
             case 'hf':
                 return this.loadedRepos.has(model.encoder.repo)
-                    || this.store.isDownloaded(model.encoder.repo);
+                    || this.store.isDownloaded(model.encoder.repo, model.encoder.kind);
         }
     }
 
@@ -163,11 +164,11 @@ export class TokenizerService implements vscode.Disposable {
         model: ModelInfo,
         token?: vscode.CancellationToken,
     ): Promise<boolean> {
-        if (model.encoder.kind !== 'hf') {
+        if (!isDownloadable(model.encoder)) {
             return model.encoder.kind === 'tiktoken';
         }
 
-        const { repo } = model.encoder;
+        const { repo, kind } = model.encoder;
         if (this.loadedRepos.has(repo)) {
             return true;
         }
@@ -180,15 +181,19 @@ export class TokenizerService implements vscode.Disposable {
             return existing;
         }
 
-        const load = this.loadTokenizer(repo, token).finally(() => this.loading.delete(repo));
+        const load = this.loadTokenizer(repo, kind, token).finally(() => this.loading.delete(repo));
         this.loading.set(repo, load);
         return load;
     }
 
-    private async loadTokenizer(repo: string, token?: vscode.CancellationToken): Promise<boolean> {
+    private async loadTokenizer(
+        repo: string,
+        kind: AssetKind,
+        token?: vscode.CancellationToken,
+    ): Promise<boolean> {
         try {
-            const files = await this.store.fetch(repo, token);
-            const response = await this.send({ type: 'loadTokenizer', id: 0, repo, files });
+            const asset = await this.store.fetch(repo, kind, token);
+            const response = await this.send({ type: 'loadTokenizer', id: 0, repo, asset });
 
             if (response.type === 'error') {
                 this.log.error(`Could not load the tokenizer for ${repo}: ${response.message}`);
@@ -295,7 +300,8 @@ function estimate(text: string, model: ModelInfo): number {
 function fallbackRatio(spec: EncoderSpec): number {
     switch (spec.kind) {
         case 'heuristic': return spec.charsPerToken;
-        case 'hf': return spec.fallback.charsPerToken;
+        case 'hf':
+        case 'tiktokenModel': return spec.fallback.charsPerToken;
         case 'tiktoken': return 3.8;
     }
 }

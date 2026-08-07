@@ -10,11 +10,12 @@ import { parentPort } from 'worker_threads';
 import {
     type Encoder,
     type EncoderSpec,
-    type HfTokenizerFiles,
-    evictHfEncoder,
-    heuristicEncoder,
+    type TokenizerAsset,
+    evictDownloadedEncoder,
     hfEncoder,
+    isDownloadable,
     resolveEncoder,
+    tiktokenModelEncoder,
 } from './tokenizer/encoders';
 import type { WorkerRequest, WorkerResponse } from './tokenizer/protocol';
 
@@ -24,24 +25,20 @@ if (!parentPort) {
 
 const port = parentPort;
 
-/** Hugging Face tokenizers the host has handed us, keyed by repo id. */
-const loaded = new Map<string, HfTokenizerFiles>();
+/** Vocabularies the host has handed us, keyed by repo id. */
+const loaded = new Map<string, TokenizerAsset>();
 
 function reply(response: WorkerResponse): void {
     port.postMessage(response);
 }
 
 function encoderFor(spec: EncoderSpec): Encoder {
-    if (spec.kind !== 'hf') {
-        return resolveEncoder(spec);
-    }
-
-    const files = loaded.get(spec.repo);
-    return files
-        ? hfEncoder(spec.repo, files)
-        // Not downloaded yet: an estimate now beats an error, and the host will
-        // re-count once the download lands.
-        : heuristicEncoder(spec.fallback.charsPerToken);
+    // resolveEncoder falls back to the spec's own heuristic when the asset is
+    // absent: not downloaded yet, so an estimate now beats an error, and the
+    // host re-counts once the download lands.
+    return isDownloadable(spec)
+        ? resolveEncoder(spec, loaded.get(spec.repo))
+        : resolveEncoder(spec);
 }
 
 function handle(request: WorkerRequest): void {
@@ -58,18 +55,22 @@ function handle(request: WorkerRequest): void {
         }
 
         case 'loadTokenizer': {
-            loaded.set(request.repo, request.files);
-            // Build it now so the cost lands here rather than inside the first
-            // count, and so a malformed tokenizer.json is reported as a failed
-            // load instead of a failed count.
-            hfEncoder(request.repo, request.files);
+            loaded.set(request.repo, request.asset);
+            // Built now so the cost lands here rather than inside the first
+            // count, and so a malformed vocabulary is reported as a failed load
+            // rather than a failed count.
+            if (request.asset.kind === 'hf') {
+                hfEncoder(request.repo, request.asset);
+            } else {
+                tiktokenModelEncoder(request.repo, request.asset);
+            }
             reply({ type: 'ack', id: request.id });
             break;
         }
 
         case 'evict': {
             loaded.delete(request.repo);
-            evictHfEncoder(request.repo);
+            evictDownloadedEncoder(request.repo);
             reply({ type: 'ack', id: request.id });
             break;
         }

@@ -1,17 +1,26 @@
 /**
- * On-disk store for Hugging Face `tokenizer.json` files.
+ * On-disk store for downloaded vocabularies.
  *
- * These files are large (2–19 MB each) and there are too many models to ship
- * them all, so they are fetched on first use and kept in the extension's global
- * storage. A download is never required: callers fall back to the model's
- * heuristic while one is missing or in flight.
+ * Two shapes are published in the wild: a Hugging Face `tokenizer.json` (plus
+ * its config), and a bare tiktoken rank table — Moonshot ships the latter for
+ * the whole Kimi family. Both are large (2–19 MB) and there are too many models
+ * to bundle, so they are fetched on first use and kept in global storage.
+ *
+ * A download is never required: callers fall back to the model's heuristic
+ * while one is missing or in flight.
  *
  * Only ungated repos are referenced by the registry — Meta's and Google's own
  * repos return 401 without a Hugging Face token, so mirrors are used instead.
  */
 
 import * as vscode from 'vscode';
-import type { HfTokenizerFiles } from './encoders';
+import type { TokenizerAsset } from './encoders';
+
+/** Which shape of vocabulary a repo publishes. */
+export type AssetKind = TokenizerAsset['kind'];
+
+/** The file each shape lives in, relative to the repo root. */
+const RANK_FILE = 'tiktoken.model';
 
 const HF_ENDPOINT = 'https://huggingface.co';
 
@@ -34,39 +43,43 @@ export class TokenizerDownloadError extends Error {
  * that touches hundreds of files still only fetches once.
  */
 export class TokenizerStore {
-    private readonly inFlight = new Map<string, Promise<HfTokenizerFiles>>();
-    private readonly memory = new Map<string, HfTokenizerFiles>();
+    private readonly inFlight = new Map<string, Promise<TokenizerAsset>>();
+    private readonly memory = new Map<string, TokenizerAsset>();
 
     constructor(private readonly storageUri: vscode.Uri) {}
 
-    /** Cached files for `repo`, or undefined if it has never been downloaded. */
-    public async peek(repo: string): Promise<HfTokenizerFiles | undefined> {
+    /** The cached asset for `repo`, or undefined if it has never been downloaded. */
+    public async peek(repo: string, kind: AssetKind): Promise<TokenizerAsset | undefined> {
         const cached = this.memory.get(repo);
         if (cached) {
             return cached;
         }
 
         try {
-            const files = await this.readFromDisk(repo);
-            this.memory.set(repo, files);
-            return files;
+            const asset = await this.readFromDisk(repo, kind);
+            this.memory.set(repo, asset);
+            return asset;
         } catch {
             return undefined;
         }
     }
 
     /** True when `repo` is already on disk, so the UI can offer an exact count. */
-    public async isDownloaded(repo: string): Promise<boolean> {
-        return (await this.peek(repo)) !== undefined;
+    public async isDownloaded(repo: string, kind: AssetKind): Promise<boolean> {
+        return (await this.peek(repo, kind)) !== undefined;
     }
 
     /**
-     * Download `repo` if needed and return its files.
+     * Download `repo` if needed and return its asset.
      *
-     * @throws {TokenizerDownloadError} when the tokenizer cannot be obtained.
+     * @throws {TokenizerDownloadError} when the vocabulary cannot be obtained.
      */
-    public async fetch(repo: string, token?: vscode.CancellationToken): Promise<HfTokenizerFiles> {
-        const cached = await this.peek(repo);
+    public async fetch(
+        repo: string,
+        kind: AssetKind,
+        token?: vscode.CancellationToken,
+    ): Promise<TokenizerAsset> {
+        const cached = await this.peek(repo, kind);
         if (cached) {
             return cached;
         }
@@ -76,10 +89,10 @@ export class TokenizerStore {
             return existing;
         }
 
-        const download = this.download(repo, token)
-            .then(files => {
-                this.memory.set(repo, files);
-                return files;
+        const download = this.download(repo, kind, token)
+            .then(asset => {
+                this.memory.set(repo, asset);
+                return asset;
             })
             .finally(() => this.inFlight.delete(repo));
 
@@ -125,9 +138,14 @@ export class TokenizerStore {
         return vscode.Uri.joinPath(this.storageUri, repo.replace(/[/\\]/g, '--'));
     }
 
-    private async readFromDisk(repo: string): Promise<HfTokenizerFiles> {
+    private async readFromDisk(repo: string, kind: AssetKind): Promise<TokenizerAsset> {
         const dir = this.repoDir(repo);
         const decoder = new TextDecoder();
+
+        if (kind === 'tiktokenModel') {
+            const bytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, RANK_FILE));
+            return { kind: 'tiktokenModel', rankFile: decoder.decode(bytes) };
+        }
 
         const read = async (name: string): Promise<unknown> =>
             JSON.parse(
@@ -145,13 +163,25 @@ export class TokenizerStore {
             tokenizerConfig = {};
         }
 
-        return { tokenizerJSON, tokenizerConfig };
+        return { kind: 'hf', tokenizerJSON, tokenizerConfig };
     }
 
     private async download(
         repo: string,
+        kind: AssetKind,
         token?: vscode.CancellationToken,
-    ): Promise<HfTokenizerFiles> {
+    ): Promise<TokenizerAsset> {
+        if (kind === 'tiktokenModel') {
+            const rankFile = await this.fetchText(repo, RANK_FILE, token);
+            const dir = this.repoDir(repo);
+            await vscode.workspace.fs.createDirectory(dir);
+            await vscode.workspace.fs.writeFile(
+                vscode.Uri.joinPath(dir, RANK_FILE),
+                new TextEncoder().encode(rankFile),
+            );
+            return { kind: 'tiktokenModel', rankFile };
+        }
+
         const tokenizerJSON = await this.fetchJson(repo, 'tokenizer.json', true, token);
         const tokenizerConfig = (await this.fetchJson(repo, 'tokenizer_config.json', false, token)) ?? {};
 
@@ -167,25 +197,36 @@ export class TokenizerStore {
             encoder.encode(JSON.stringify(tokenizerConfig)),
         );
 
-        return { tokenizerJSON, tokenizerConfig };
+        return { kind: 'hf', tokenizerJSON, tokenizerConfig };
     }
 
-    private async fetchJson(
+    /** Fetch a file as text, for vocabularies that are not JSON. */
+    private async fetchText(
+        repo: string,
+        file: string,
+        token?: vscode.CancellationToken,
+    ): Promise<string> {
+        const body = await this.fetchBody(repo, file, true, token);
+        if (body === undefined) {
+            throw new TokenizerDownloadError(repo, `${file} was empty`);
+        }
+        return body;
+    }
+
+    /** Fetch a file's body, or undefined when it is optional and absent. */
+    private async fetchBody(
         repo: string,
         file: string,
         required: boolean,
         token?: vscode.CancellationToken,
-    ): Promise<unknown> {
+    ): Promise<string | undefined> {
         const url = `${HF_ENDPOINT}/${repo}/resolve/main/${file}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
         const cancel = token?.onCancellationRequested(() => controller.abort());
 
         try {
-            const response = await fetch(url, {
-                signal: controller.signal,
-                headers: { accept: 'application/json' },
-            });
+            const response = await fetch(url, { signal: controller.signal });
 
             if (!response.ok) {
                 if (!required) {
@@ -207,12 +248,7 @@ export class TokenizerStore {
             if (body.length > MAX_TOKENIZER_BYTES) {
                 throw new TokenizerDownloadError(repo, 'file is implausibly large');
             }
-
-            try {
-                return JSON.parse(body);
-            } catch {
-                throw new TokenizerDownloadError(repo, `${file} is not valid JSON`);
-            }
+            return body;
         } catch (error) {
             if (error instanceof TokenizerDownloadError) {
                 throw error;
@@ -229,6 +265,26 @@ export class TokenizerStore {
         } finally {
             clearTimeout(timer);
             cancel?.dispose();
+        }
+    }
+
+    private async fetchJson(
+        repo: string,
+        file: string,
+        required: boolean,
+        token?: vscode.CancellationToken,
+    ): Promise<unknown> {
+        const body = await this.fetchBody(repo, file, required, token);
+        if (body === undefined) {
+            return undefined;
+        }
+        try {
+            return JSON.parse(body) as unknown;
+        } catch {
+            if (!required) {
+                return undefined;
+            }
+            throw new TokenizerDownloadError(repo, `${file} is not valid JSON`);
         }
     }
 }
