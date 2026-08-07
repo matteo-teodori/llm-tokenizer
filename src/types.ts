@@ -35,8 +35,6 @@ export interface SkippedFile {
  */
 export interface IgnoredFile {
     path: string;
-    /** Ignored directories are rendered as folders — clicking one opened nothing. */
-    isDirectory?: boolean;
 }
 
 /**
@@ -47,18 +45,6 @@ export interface DirectoryCountResult {
     files: ProcessedFile[];
     skipped: SkippedFile[];
     ignored: IgnoredFile[];
-}
-
-/**
- * File tree node for hierarchical display
- */
-export interface FileNode {
-    name: string;
-    path: string;
-    isFile: boolean;
-    tokens?: number;
-    reason?: string;
-    children?: Map<string, FileNode>;
 }
 
 /**

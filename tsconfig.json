@@ -22,7 +22,17 @@
         "esModuleInterop": true,
         "forceConsistentCasingInFileNames": true,
         "skipLibCheck": true,
-        "resolveJsonModule": true
+        "resolveJsonModule": true,
+
+        // gpt-tokenizer publishes its modules through an exports map, which
+        // classic module resolution does not read. esbuild resolves the
+        // specifier natively; this only tells TypeScript where the types are.
+        "baseUrl": ".",
+        "paths": {
+            "gpt-tokenizer/BytePairEncodingCore": [
+                "node_modules/gpt-tokenizer/cjs/BytePairEncodingCore"
+            ]
+        }
     },
     "include": ["src/**/*.ts", "test/**/*.ts"],
     "exclude": ["node_modules", ".vscode-test", "out", ".test-out", "test/fixtures"]

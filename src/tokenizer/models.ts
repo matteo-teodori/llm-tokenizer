@@ -51,7 +51,7 @@ const GEMINI_UNMAPPED = 4.0;
 /** Qwen's closed-weight API models, proxied through the open Qwen3.6 vocab. */
 const QWEN_CLOSED = 3.6;
 
-/** Moonshot ships a tiktoken-style .model file but no tokenizer.json. */
+/** Only used until Kimi's rank table has been downloaded. */
 const KIMI = 3.6;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,7 +75,20 @@ const HF = {
     minimaxLegacy: 'MiniMaxAI/MiniMax-M2',
     mimo: 'XiaomiMiMo/MiMo-V2-Flash',
     hunyuan: 'tencent/Hy3',
+    /**
+     * Moonshot publishes `tiktoken.model` rather than a `tokenizer.json`.
+     *
+     * One repo serves the whole family: the rank file is byte-identical across
+     * K3, K2.7-Code, K2.6 and K2.5 (verified by hash), so pointing them all at
+     * one repo means a single download covers every Kimi model.
+     */
+    kimi: 'moonshotai/Kimi-K3',
 } as const;
+
+/** A `tiktokenModel` encoder with the estimate used until it is downloaded. */
+function rankTable(repo: string, charsPerToken: number): ModelInfo['encoder'] {
+    return { kind: 'tiktokenModel', repo, fallback: { kind: 'heuristic', charsPerToken } };
+}
 
 /** An `hf` encoder with the fallback used until the download completes. */
 function hf(repo: string, charsPerToken: number): ModelInfo['encoder'] {
@@ -203,13 +216,12 @@ export const MODELS: ModelInfo[] = [
     { id: 'minimax-m2.1', label: 'MiniMax M2.1', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Moonshot Kimi — estimated. Moonshot ships tiktoken-style rank files and
-    // tokenization_kimi.py rather than a tokenizer.json, so the Hugging Face
-    // loader cannot read them. Needs a rank-file parser to become exact.
+    // Moonshot Kimi — exact. Moonshot publishes a tiktoken rank table rather
+    // than a tokenizer.json, which is why these were estimated until 2.1.
     // ─────────────────────────────────────────────────────────────────────────
-    { id: 'kimi-k3', label: 'Kimi K3', provider: 'Moonshot', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: KIMI } },
-    { id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', provider: 'Moonshot', contextLimit: 262_144, encoder: { kind: 'heuristic', charsPerToken: KIMI } },
-    { id: 'kimi-k2.6', label: 'Kimi K2.6', provider: 'Moonshot', contextLimit: 262_144, encoder: { kind: 'heuristic', charsPerToken: KIMI } },
+    { id: 'kimi-k3', label: 'Kimi K3', provider: 'Moonshot', contextLimit: 1_048_576, encoder: rankTable(HF.kimi, KIMI) },
+    { id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', provider: 'Moonshot', contextLimit: 262_144, encoder: rankTable(HF.kimi, KIMI) },
+    { id: 'kimi-k2.6', label: 'Kimi K2.6', provider: 'Moonshot', contextLimit: 262_144, encoder: rankTable(HF.kimi, KIMI) },
 
     // ─────────────────────────────────────────────────────────────────────────
     // Xiaomi MiMo / Tencent Hunyuan — exact.

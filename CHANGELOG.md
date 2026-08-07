@@ -4,6 +4,44 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.1.0] - 2026-08-07
+
+### Added
+- **Kimi is counted exactly.** Moonshot publishes a tiktoken rank table instead
+  of a `tokenizer.json`, which no loader here could read, so the whole family
+  was estimated. K3, K2.7 Code and K2.6 now use Moonshot's real vocabulary —
+  and because the rank file is byte-identical across the family, one download
+  covers all three.
+
+  Moonshot's pre-tokenizer uses three constructs JavaScript does not have, so
+  it had to be translated. The translation was checked against the reference
+  implementation both ways: identical splits on 20 cases, and identical counts
+  on 28 spanning Latin, Han, Kana, Hangul, Cyrillic, emoji, contractions and
+  source files. It needs a recent JavaScript engine; on an older one Kimi
+  simply stays an estimate rather than failing.
+- **The multi-file summary is now a dashboard.** Counting a folder answers the
+  question you actually had — *what is eating my context?* — instead of only
+  *how much is it?*
+  - The total leads as a headline figure, with context use as a filled meter
+    that turns amber past 80% and red past 100%.
+  - **Where the tokens are**: a ranked breakdown by folder. The old tree was
+    ordered by name, so the folder eating half your context looked like every
+    other row.
+  - **By language**: the same breakdown by file type.
+  - The file list is a sortable, filterable table, with a button to copy it or
+    export it as CSV.
+- Paths are shown relative to what the selection shares, so counting one deep
+  folder no longer repeats the same long prefix on every row.
+
+### Changed
+- The summary's colours come entirely from VS Code's own theme tokens, so the
+  panel follows the editor into any theme, high-contrast ones included.
+
+### Internal
+- The aggregation behind the summary is pure and separately tested, and the
+  downloaded-vocabulary path is now one code path serving two published shapes.
+  The suite is up to 142 tests.
+
 ## [2.0.1] - 2026-08-03
 
 ### Fixed
@@ -77,6 +115,18 @@ either exact or visibly marked as estimates.
 - In a multi-root workspace, files with the same relative path in two roots
   collided into one row in the summary, showing one file's count under a total
   that included both.
+- The summary's Skipped and Ignored sections capped their listings at 1,000 but
+  reported the capped number as the total, contradicting the count directly
+  above them. Both now show the true total and disclose what they left out.
+- A summary with nothing to count said "No file matches that filter" when no
+  filter had been typed.
+- **"Clear Downloaded Tokenizers" only cleared half of it.** The worker kept
+  its parsed vocabulary, so counts stayed exact until the next reload and the
+  download command reported nothing left to fetch — while a rank table's worth
+  of memory stayed resident.
+- The model picker labelled every non-estimated model "exact", including ones
+  whose vocabulary had not been downloaded, contradicting both the settings
+  dropdown and the `≈` in the status bar.
 - The summary rendered one row and one click listener per file and held them
   for the lifetime of the window. Listings are capped at 1,000 entries, largest
   first, with the omission stated; totals still cover every file.

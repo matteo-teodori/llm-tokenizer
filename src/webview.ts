@@ -1,12 +1,26 @@
 import * as vscode from 'vscode';
+
 import { ContextStatusResult, ProcessedFile, SkippedFile, IgnoredFile } from './types';
-import { formatNumber, getStatusColor } from './utils';
-import { buildProcessedFilesHtml, buildSkippedFilesHtml, buildIgnoredFilesHtml } from './fileTree';
-import { contentSecurityPolicy, createNonce, escapeHtml } from './html';
+import { contentSecurityPolicy, createNonce } from './html';
+import {
+    byFolder,
+    byLanguage,
+    commonRoot,
+    displayPath,
+    largestFirst,
+    type CountedFile,
+} from './summary/aggregate';
+import { renderSummary, type SummaryView } from './summary/render';
 
 /**
- * Configuration for multi-file summary webview
+ * Most files listed in the table.
+ *
+ * The panel keeps its context while hidden, so both the embedded data and the
+ * rendered rows stay in memory for the lifetime of the window. Totals and the
+ * breakdowns always cover every file — only the listing is capped.
  */
+const MAX_LISTED_FILES = 1000;
+
 export interface MultiFileSummaryConfig {
     totalTokens: number;
     filesProcessed: number;
@@ -21,231 +35,93 @@ export interface MultiFileSummaryConfig {
     contextStatus: ContextStatusResult;
 }
 
-/**
- * Create and show a webview panel with multi-file token summary
- */
+function buildView(config: MultiFileSummaryConfig): SummaryView {
+    const counted: CountedFile[] = config.processedFiles.map(f => ({
+        path: f.path,
+        tokens: f.tokens,
+    }));
+
+    // Paths are shown relative to what every entry shares, so counting one deep
+    // folder does not show the same long prefix on every row.
+    const root = commonRoot([
+        ...counted,
+        ...config.skippedFiles.map(f => ({ path: f.path, tokens: 0 })),
+        ...config.ignoredFiles.map(f => ({ path: f.path, tokens: 0 })),
+    ]);
+
+    const ranked = largestFirst(counted);
+
+    return {
+        totalTokens: config.totalTokens,
+        exact: config.exact,
+        cancelled: config.cancelled,
+        modelLabel: config.modelLabel,
+        contextLimit: config.contextStatus.limit,
+        filesCounted: config.filesProcessed,
+        filesSkipped: config.skippedFiles.length,
+        filesIgnored: config.ignoredFiles.length,
+        byFolder: byFolder(counted),
+        byLanguage: byLanguage(counted),
+        files: ranked.slice(0, MAX_LISTED_FILES).map(f => ({
+            path: f.path,
+            display: displayPath(f.path, root),
+            tokens: f.tokens,
+        })),
+        filesNotListed: Math.max(0, ranked.length - MAX_LISTED_FILES),
+        skipped: config.skippedFiles
+            .slice(0, MAX_LISTED_FILES)
+            .map(f => ({ display: displayPath(f.path, root), reason: f.reason })),
+        ignored: config.ignoredFiles
+            .slice(0, MAX_LISTED_FILES)
+            .map(f => ({ display: displayPath(f.path, root) })),
+    };
+}
+
+/** Create and show the multi-file token summary. */
 export function showMultiFileSummary(config: MultiFileSummaryConfig): vscode.WebviewPanel {
     const panel = vscode.window.createWebviewPanel(
-        'multiFileSummary',
-        'Multi-file Token Summary',
+        'llmTokenizer.summary',
+        'Token Summary',
         vscode.ViewColumn.Active,
         {
             enableScripts: true,
-            retainContextWhenHidden: true,  // Preserve tree state when switching tabs
-            // The page is fully self-contained, so it needs access to nothing
-            // on disk.
-            localResourceRoots: []
-        }
+            retainContextWhenHidden: true,
+            // The page is fully self-contained, so it needs nothing on disk.
+            localResourceRoots: [],
+        },
     );
 
-    // The webview may only ask to open a file that this summary actually
-    // listed. Without that check, anything able to post a message could make
-    // the extension open an arbitrary path.
-    const openable = new Set([
-        ...config.processedFiles.map(f => f.path),
-        ...config.skippedFiles.map(f => f.path),
-        ...config.ignoredFiles.map(f => f.path)
-    ]);
+    // The webview may only ask to open a file this summary actually listed.
+    // Without that check, anything able to post a message could make the
+    // extension open an arbitrary path.
+    const openable = new Set(config.processedFiles.map(f => f.path));
 
     panel.webview.onDidReceiveMessage(async (message: unknown) => {
-        if (
-            typeof message !== 'object' || message === null ||
-            (message as { command?: unknown }).command !== 'openFile'
-        ) {
+        if (typeof message !== 'object' || message === null) {
+            return;
+        }
+        const { command, path: requested, text } = message as {
+            command?: unknown;
+            path?: unknown;
+            text?: unknown;
+        };
+
+        if (command === 'openFile' && typeof requested === 'string' && openable.has(requested)) {
+            await vscode.window.showTextDocument(vscode.Uri.file(requested));
             return;
         }
 
-        const requested = (message as { path?: unknown }).path;
-        if (typeof requested !== 'string' || !openable.has(requested)) {
-            return;
+        if ((command === 'copy' || command === 'export') && typeof text === 'string') {
+            await vscode.env.clipboard.writeText(text);
+            void vscode.window.showInformationMessage(
+                command === 'export'
+                    ? 'LLM Tokenizer: CSV copied to the clipboard.'
+                    : 'LLM Tokenizer: file list copied to the clipboard.',
+            );
         }
-
-        await vscode.window.showTextDocument(vscode.Uri.file(requested));
     });
 
-    panel.webview.html = generateSummaryHtml(config);
-    return panel;
-}
-
-/**
- * Get status icon based on context status
- */
-function getStatusIcon(status: ContextStatusResult['status']): string {
-    switch (status) {
-        case 'error': return '🔴';
-        case 'warning': return '⚠️';
-        default: return '📊';
-    }
-}
-
-/**
- * Generate context info HTML if limit exists
- */
-function generateContextInfoHtml(contextStatus: ContextStatusResult): string {
-    if (!contextStatus.limit) {
-        return '';
-    }
-
-    let html = `<p><strong>Context Usage:</strong> ${contextStatus.percentage.toFixed(1)}% of ${formatNumber(contextStatus.limit)} tokens</p>`;
-
-    if (contextStatus.status === 'warning') {
-        html += '<p style="color: #ff9800;">⚠️ Approaching context limit (80%+)</p>';
-    } else if (contextStatus.status === 'error') {
-        html += '<p style="color: #f44336;">🔴 Exceeds context limit!</p>';
-    }
-
-    return html;
-}
-
-/**
- * Generate complete HTML for multi-file summary webview
- */
-function generateSummaryHtml(config: MultiFileSummaryConfig): string {
-    const {
-        totalTokens,
-        filesProcessed,
-        processedFiles,
-        skippedFiles,
-        ignoredFiles,
-        modelLabel,
-        exact,
-        cancelled,
-        contextStatus
-    } = config;
-
-    const statusColor = getStatusColor(contextStatus.status);
-    const icon = getStatusIcon(contextStatus.status);
-    const contextInfo = generateContextInfoHtml(contextStatus);
-    const processedFilesHtml = buildProcessedFilesHtml(processedFiles);
-    const skippedFilesHtml = buildSkippedFilesHtml(skippedFiles);
-    const ignoredFilesHtml = buildIgnoredFilesHtml(ignoredFiles);
     const nonce = createNonce();
-
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
-    <style>
-        body {
-            font-family: var(--vscode-font-family);
-            color: var(--vscode-foreground);
-            padding: 20px;
-            line-height: 1.6;
-        }
-        h1 {
-            color: ${statusColor};
-            border-bottom: 2px solid ${statusColor};
-            padding-bottom: 10px;
-            margin-bottom: 20px;
-        }
-        p { margin: 8px 0; }
-        strong { color: var(--vscode-textLink-foreground); }
-        .icon { font-size: 1.2em; margin-right: 8px; }
-        
-        details {
-            margin-top: 20px;
-            border: 1px solid var(--vscode-panel-border);
-            border-radius: 4px;
-            padding: 10px;
-        }
-        summary {
-            cursor: pointer;
-            user-select: none;
-            padding: 5px;
-        }
-        summary:hover { background: var(--vscode-list-hoverBackground); }
-        
-        .tree-list {
-            list-style: none;
-            padding-left: 20px;
-            margin: 0;
-        }
-        .root-list { padding-left: 0; padding-top: 10px; }
-        
-        .folder-item { margin: 4px 0; }
-        .folder-item > details { border: none; padding: 0; margin: 0; }
-        .folder-item > details > summary {
-            padding: 4px 8px;
-            border-radius: 3px;
-            font-weight: 500;
-        }
-        .folder-item > details > summary:hover {
-            background: var(--vscode-list-hoverBackground);
-        }
-        .folder-icon { margin-right: 6px; }
-        
-        .file-item {
-            padding: 4px 8px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-radius: 3px;
-        }
-        .file-item:hover { background: var(--vscode-list-hoverBackground); }
-        
-        .file-link {
-            color: var(--vscode-textLink-foreground);
-            text-decoration: none;
-            cursor: pointer;
-        }
-        .file-link:hover { text-decoration: underline; }
-        
-        .token-count {
-            color: var(--vscode-descriptionForeground);
-            font-size: 0.9em;
-        }
-        .reason {
-            color: var(--vscode-errorForeground);
-            font-size: 0.9em;
-            font-style: italic;
-        }
-        .cancelled {
-            color: var(--vscode-editorWarning-foreground);
-            font-weight: 500;
-            margin: 12px 0;
-        }
-        .truncation {
-            color: var(--vscode-descriptionForeground);
-            font-size: 0.9em;
-            font-style: italic;
-            padding: 6px 8px 2px;
-            margin: 0;
-        }
-        .folder-total {
-            color: var(--vscode-textPreformat-foreground);
-            font-size: 0.85em;
-            font-weight: normal;
-            margin-left: 10px;
-            opacity: 0.8;
-        }
-    </style>
-</head>
-<body>
-    <h1><span class="icon">${icon}</span>Multi-file Summary</h1>
-    <p><strong>Total Tokens:</strong> ${exact ? '' : '≈'}${formatNumber(totalTokens)}${exact ? '' : ' <em>(estimated)</em>'}</p>
-    ${cancelled ? '<p class="cancelled">⚠️ Cancelled — this total covers only the files counted before you stopped it.</p>' : ''}
-    <p><strong>Files Processed:</strong> ${filesProcessed}</p>
-    ${skippedFiles.length > 0 ? `<p><strong>Files Skipped:</strong> ${skippedFiles.length}</p>` : ''}
-    ${ignoredFiles.length > 0 ? `<p><strong>Files Ignored:</strong> ${ignoredFiles.length}</p>` : ''}
-    <p><strong>Model:</strong> ${escapeHtml(modelLabel)}</p>
-    ${contextInfo}
-    ${processedFilesHtml}
-    ${skippedFilesHtml}
-    ${ignoredFilesHtml}
-    <script nonce="${nonce}">
-        const vscode = acquireVsCodeApi();
-        // One delegated listener rather than one per file: a large scan used to
-        // attach thousands, all retained because the panel keeps its context.
-        document.body.addEventListener('click', (e) => {
-            const link = e.target.closest('.file-link');
-            if (!link) { return; }
-            e.preventDefault();
-            vscode.postMessage({ command: 'openFile', path: link.dataset.path });
-        });
-    </script>
-</body>
-</html>
-    `;
+    panel.webview.html = renderSummary(buildView(config), nonce, contentSecurityPolicy(nonce));
+    return panel;
 }

@@ -1,21 +1,26 @@
 /**
  * Encoder backends.
  *
- * Three tiers, in descending order of trustworthiness:
+ * Four backends, in descending order of trustworthiness:
  *
- *   1. `tiktoken`   — OpenAI's own BPE, via `gpt-tokenizer`. Exact, bundled, fast.
- *   2. `hf`         — the model's real `tokenizer.json`, fetched once from Hugging
- *                     Face and cached on disk. Exact, but costs a download.
- *   3. `heuristic`  — characters ÷ ratio. Only for models whose tokenizer is not
- *                     public (Claude, Gemini, Grok). Always reported as an estimate.
+ *   1. `tiktoken`       OpenAI's own BPE, via `gpt-tokenizer`. Exact, bundled, fast.
+ *   2. `hf`             the model's real `tokenizer.json`, fetched once from
+ *                       Hugging Face and cached. Exact, but costs a download.
+ *   3. `tiktokenModel`  a tiktoken rank table where the provider publishes one
+ *                       instead of a tokenizer.json — Moonshot's Kimi family.
+ *                       Also exact, also downloaded.
+ *   4. `heuristic`      characters ÷ ratio. Only where no tokenizer is public
+ *                       (Claude, Grok). Always reported as an estimate.
  *
- * Everything here runs inside the tokenizer worker, never on the extension host.
+ * The encoders themselves run inside the worker; the host imports this module
+ * only for the spec types and the `isDownloadable` / `supportsRankTables`
+ * predicates it needs to decide what to offer.
  */
 
 import * as path from 'path';
 
 /** How a model's tokens are counted, and how much you should trust the number. */
-export type EncoderKind = 'tiktoken' | 'hf' | 'heuristic';
+export type EncoderKind = 'tiktoken' | 'hf' | 'tiktokenModel' | 'heuristic';
 
 /**
  * tiktoken encodings we ship. Must stay in sync with `ENCODINGS` in build.mjs.
@@ -41,6 +46,18 @@ export interface HfSpec {
     fallback: HeuristicSpec;
 }
 
+/**
+ * A model whose vocabulary ships as a tiktoken rank table rather than a
+ * `tokenizer.json` — Moonshot's Kimi family. Downloaded and cached the same
+ * way, and exact once present.
+ */
+export interface TiktokenModelSpec {
+    kind: 'tiktokenModel';
+    /** Hugging Face repo holding a downloadable `tiktoken.model`. Must be ungated. */
+    repo: string;
+    fallback: HeuristicSpec;
+}
+
 export interface HeuristicSpec {
     kind: 'heuristic';
     /**
@@ -50,7 +67,34 @@ export interface HeuristicSpec {
     charsPerToken: number;
 }
 
-export type EncoderSpec = TiktokenSpec | HfSpec | HeuristicSpec;
+export type EncoderSpec = TiktokenSpec | HfSpec | TiktokenModelSpec | HeuristicSpec;
+
+/** Specs whose vocabulary is fetched once and cached, rather than bundled. */
+export type DownloadableSpec = HfSpec | TiktokenModelSpec;
+
+export function isDownloadable(spec: EncoderSpec): spec is DownloadableSpec {
+    return spec.kind === 'hf' || spec.kind === 'tiktokenModel';
+}
+
+/**
+ * How much a model's counts can be trusted, as three states rather than two.
+ *
+ * Callers used to ask about a specific kind — `=== 'hf'` for "downloadable",
+ * `=== 'heuristic'` for "not exact" — and both stopped being true as kinds were
+ * added: the first shipped a download path Kimi could never reach, the second
+ * labelled Kimi "exact" with nothing on disk. Deciding it here means a new kind
+ * is a compile error rather than a wrong label.
+ */
+export type Accuracy = 'exact' | 'after-download' | 'estimated';
+
+export function accuracyOf(spec: EncoderSpec): Accuracy {
+    switch (spec.kind) {
+        case 'tiktoken': return 'exact';
+        case 'hf':
+        case 'tiktokenModel': return 'after-download';
+        case 'heuristic': return 'estimated';
+    }
+}
 
 /** A loaded, ready-to-use encoder. */
 export interface Encoder {
@@ -153,9 +197,25 @@ function loadTokenizerLibrary(): TokenizerCtor {
 
 /** Raw `tokenizer.json` + `tokenizer_config.json`, as fetched from the Hub. */
 export interface HfTokenizerFiles {
+    kind: 'hf';
     tokenizerJSON: unknown;
     tokenizerConfig: unknown;
 }
+
+/** A raw `tiktoken.model` rank table, as fetched from the Hub. */
+export interface TiktokenModelFile {
+    kind: 'tiktokenModel';
+    rankFile: string;
+}
+
+/**
+ * A downloaded vocabulary.
+ *
+ * One type so the store, the worker protocol and the service all have a single
+ * path for "fetch this model's vocabulary and hand it to the worker", whatever
+ * shape the provider happens to publish.
+ */
+export type TokenizerAsset = HfTokenizerFiles | TiktokenModelFile;
 
 const hfCache = new Map<string, Encoder>();
 
@@ -190,9 +250,63 @@ export function hfEncoder(repo: string, files: HfTokenizerFiles): Encoder {
     return encoder;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// tiktoken rank tables (downloaded once, exact)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Whether this runtime can compile the Kimi pre-tokenizer.
+ *
+ * The pattern needs the `v` flag for set difference, which arrived in V8 11.6.
+ * Every VS Code the extension supports should have it, but `engines` allows
+ * 1.105 and the suite runs against much newer builds, so this is checked rather
+ * than assumed: on an older host Kimi quietly stays an estimate instead of
+ * every count failing.
+ */
+let setNotation: boolean | undefined;
+
+export function supportsRankTables(): boolean {
+    if (setNotation === undefined) {
+        try {
+            new RegExp(String.raw`[[\p{L}]--[\p{Script=Han}]]`, 'v');
+            setNotation = true;
+        } catch {
+            setNotation = false;
+        }
+    }
+    return setNotation;
+}
+
+const rankCache = new Map<string, Encoder>();
+
+export function tiktokenModelEncoder(repo: string, file: TiktokenModelFile): Encoder {
+    const cached = rankCache.get(repo);
+    if (cached) {
+        return cached;
+    }
+
+    // Deferred like the others: a workspace that never selects a Kimi model
+    // never parses a 2.7 MB rank table.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { kimiCore, countWithCore } = require('./kimi') as typeof import('./kimi');
+    const core = kimiCore(repo, file.rankFile);
+
+    const encoder: Encoder = {
+        kind: 'tiktokenModel',
+        exact: true,
+        count: text => countWithCore(core, text),
+    };
+
+    rankCache.set(repo, encoder);
+    return encoder;
+}
+
 /** Free the memory held by a downloaded tokenizer (each costs ~120 MB of heap). */
-export function evictHfEncoder(repo: string): void {
+export function evictDownloadedEncoder(repo: string): void {
     hfCache.delete(repo);
+    rankCache.delete(repo);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    (require('./kimi') as typeof import('./kimi')).evictKimiCore(repo);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,15 +330,19 @@ export function heuristicEncoder(charsPerToken: number): Encoder {
  * and the on-disk cache; when they are absent we degrade to the spec's own
  * fallback rather than failing the count.
  */
-export function resolveEncoder(spec: EncoderSpec, hfFiles?: HfTokenizerFiles): Encoder {
+export function resolveEncoder(spec: EncoderSpec, asset?: TokenizerAsset): Encoder {
     switch (spec.kind) {
         case 'tiktoken':
             return tiktokenEncoder(spec.encoding);
         case 'heuristic':
             return heuristicEncoder(spec.charsPerToken);
         case 'hf':
-            return hfFiles
-                ? hfEncoder(spec.repo, hfFiles)
+            return asset?.kind === 'hf'
+                ? hfEncoder(spec.repo, asset)
+                : heuristicEncoder(spec.fallback.charsPerToken);
+        case 'tiktokenModel':
+            return asset?.kind === 'tiktokenModel' && supportsRankTables()
+                ? tiktokenModelEncoder(spec.repo, asset)
                 : heuristicEncoder(spec.fallback.charsPerToken);
     }
 }

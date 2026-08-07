@@ -19,6 +19,7 @@ import {
     shouldCount,
     type SkipReason,
 } from './scan';
+import { accuracyOf, isDownloadable } from './tokenizer/encoders';
 import { CountCache } from './countCache';
 import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 
@@ -179,10 +180,15 @@ function registerCommands(context: vscode.ExtensionContext, store: TokenizerStor
         }),
 
         vscode.commands.registerCommand('llm-tokenizer.clearTokenizerCache', async () => {
+            // Both halves, or the worker keeps counting from a vocabulary the
+            // user just deleted and the download command thinks it still has it.
             await store.clear();
+            await tokenizer.forgetLoaded();
             invalidateCounts();
+
             void vscode.window.showInformationMessage('LLM Tokenizer: downloaded tokenizers cleared.');
             void refreshFileStatusBar(vscode.window.activeTextEditor);
+            void refreshProjectCount();
         }),
     );
 }
@@ -217,7 +223,11 @@ function buildModelPickerItems(): ModelQuickPickItem[] {
         }
 
         const selected = model.id === currentModel.id;
-        const accuracy = model.encoder.kind === 'heuristic' ? 'estimated' : 'exact';
+        const accuracy = {
+            exact: 'exact',
+            'after-download': 'exact once downloaded',
+            estimated: 'estimated',
+        }[accuracyOf(model.encoder)];
         items.push({
             label: `${selected ? '$(check) ' : ''}${model.label}`,
             description: model.id,
@@ -237,7 +247,7 @@ function buildModelPickerItems(): ModelQuickPickItem[] {
 async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Promise<void> {
     // Invoked from the command palette this must always say something. Doing
     // nothing at all is indistinguishable from the command being broken.
-    if (model.encoder.kind !== 'hf') {
+    if (!isDownloadable(model.encoder)) {
         if (interactive) {
             void vscode.window.showInformationMessage(
                 model.encoder.kind === 'tiktoken'
@@ -709,7 +719,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                         candidates.push({ ...file, context });
                     }
                     for (const dir of found.ignoredDirectories) {
-                        result.ignored.push({ path: dir.fsPath, isDirectory: true });
+                        result.ignored.push({ path: dir.fsPath });
                     }
                     for (const bad of found.unreadable) {
                         result.skipped.push({ path: bad.fsPath, reason: describeSkipReason('unreadable') });

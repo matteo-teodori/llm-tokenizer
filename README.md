@@ -36,7 +36,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 ## Features
 
 ### 🎯 Core Features
-- **Exact counts, not guesses**: ~50 of the 71 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
+- **Exact counts, not guesses**: 52 of the 71 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
 - **Real-time Token Count**: The active file's token count in the Status Bar
 - **Context Limit Warnings**: Indicators at 80% and 100% of the model's *usable input* limit
 - **Project-wide Counting**: Workspace totals with caching, cancellation, and multi-root support
@@ -78,7 +78,7 @@ is migrated automatically.
 | Alibaba    | Qwen3.7 Max/Plus, Qwen3.6 Plus, Qwen3.6 27B, Qwen3.6 35B-A3B | Exact¹ / estimated |
 | Zhipu      | GLM-5.2, GLM-5.1, GLM-5, GLM-5-Turbo | Exact¹ |
 | MiniMax    | MiniMax M3, M2.7, M2.5, M2.1 | Exact¹ |
-| Moonshot   | Kimi K3, K2.7 Code, K2.6 | Estimated |
+| Moonshot   | Kimi K3, K2.7 Code, K2.6 | Exact¹ |
 | Xiaomi     | MiMo V2.5 Pro, MiMo V2 Flash | Exact¹ |
 | Tencent    | Hunyuan Hy3 | Exact¹ |
 
@@ -92,7 +92,7 @@ vocabulary, so they fall back to a character estimate
 1. **Open a file**: Token count appears in Status Bar (bottom right)
 2. **Click Status Bar item** to change model
 3. **Right-click a single file** → **Count Tokens** (shows a popup notification with the token count)
-4. **Right-click a folder** (or multiple files) → **Count Tokens** (opens a detailed Tree View summary)
+4. **Right-click a folder** (or multiple files) → **Count Tokens** (opens a summary showing where the tokens are, by folder and by language)
 5. **Select text** in editor → **Count Tokens** to count only the selection
 
 ### Configuration
@@ -113,12 +113,15 @@ A leading `≈` means the count is an estimate rather than an exact tokenization
 ## Accuracy
 
 There are three tiers, and the status bar tells you which one you are in.
+Two vocabulary formats are published in the wild — a Hugging Face
+`tokenizer.json`, and a bare tiktoken rank table (Moonshot ships the latter) —
+and both are read.
 
 | Tier | Shown as | Method | Models |
 |------|----------|--------|--------|
 | **Exact, offline** | `12,340` | OpenAI's own BPE, bundled | All OpenAI models |
-| **Exact after one download** | `≈` → `12,340` | The model's real `tokenizer.json` (~2–19 MB, cached) | Llama, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hunyuan |
-| **Estimated** | `≈12,340` | Calibrated characters per token | Claude, Grok, Kimi, closed Qwen |
+| **Exact after one download** | `≈` → `12,340` | The model's published vocabulary (~2–19 MB, cached) | Llama, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hunyuan, Kimi |
+| **Estimated** | `≈12,340` | Calibrated characters per token | Claude, Grok, closed Qwen |
 
 **Why some models are only estimated.** Anthropic and xAI do not publish a
 tokenizer for any current model, and Anthropic explicitly advises against

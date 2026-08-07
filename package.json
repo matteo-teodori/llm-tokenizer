@@ -3,7 +3,7 @@
   "displayName": "LLM Tokenizer",
   "description": "Count tokens for 70+ AI models directly in your editor — exact counts for GPT, Llama, Gemini, DeepSeek, Qwen, Mistral and more.",
   "license": "MIT",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "publisher": "matteoteodori",
   "author": {
     "name": "Matteo Teodori",
@@ -315,9 +315,9 @@
             "MiniMax · 205K context · exact once the tokenizer is downloaded",
             "MiniMax · 205K context · exact once the tokenizer is downloaded",
             "MiniMax · 205K context · exact once the tokenizer is downloaded",
-            "Moonshot · 1M context · estimated — no public tokenizer",
-            "Moonshot · 262K context · estimated — no public tokenizer",
-            "Moonshot · 262K context · estimated — no public tokenizer",
+            "Moonshot · 1M context · exact once the tokenizer is downloaded",
+            "Moonshot · 262K context · exact once the tokenizer is downloaded",
+            "Moonshot · 262K context · exact once the tokenizer is downloaded",
             "Xiaomi · 1M context · exact once the tokenizer is downloaded",
             "Xiaomi · 262K context · exact once the tokenizer is downloaded",
             "Tencent · 262K context · exact once the tokenizer is downloaded"
@@ -368,7 +368,7 @@
     "pretest": "npm run compile-tests && npm run build",
     "test": "vscode-test",
     "release": "npm run package && vsce package --no-dependencies",
-    "compile-tests": "tsc -p tsconfig.test.json"
+    "compile-tests": "node scripts/clean.mjs .test-out && tsc -p tsconfig.test.json"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
