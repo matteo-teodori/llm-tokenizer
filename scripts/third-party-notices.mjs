@@ -17,6 +17,7 @@
  */
 
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 
 const check = process.argv.includes('--check');
@@ -44,7 +45,7 @@ for (const { entryPoints, external } of BUNDLES) {
         write: false,
         metafile: true,
         logLevel: 'silent',
-        absWorkingDir: new URL('.', root).pathname,
+        absWorkingDir: fileURLToPath(new URL('.', root)),
     });
 
     for (const input of Object.keys(result.metafile.inputs)) {

@@ -41,8 +41,16 @@ jobs:
       - name: Third-party notices are up to date
         run: node scripts/third-party-notices.mjs --check
 
-      - name: Audit production dependencies
-        run: npm audit --audit-level=high --omit=dev
+      # `--omit=dev` used to be here, and it made this gate vacuous: every
+      # dependency in this project is a devDependency, because the three
+      # libraries that actually ship — gpt-tokenizer, @huggingface/tokenizers and
+      # ignore — are compiled into out/*.js by esbuild rather than installed
+      # alongside the VSIX. So the production tree is empty and the step could
+      # only ever report "found 0 vulnerabilities", including for the code that
+      # does ship. Auditing the whole tree is the only scope npm audit offers
+      # that covers those three.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
   test:
     name: Test (${{ matrix.os }})
