@@ -123,6 +123,28 @@ suite('summary page', () => {
         assert.ok(!render({ filesNotListed: 0 }).includes('not listed'));
     });
 
+    test('the copy and CSV exports carry the truncation note too', () => {
+        // The page said so in its own note while Copy and Export CSV emitted a
+        // silently truncated list — the exact failure the on-page note exists to
+        // prevent, one surface along. The note is embedded server-side so the
+        // wording is absent entirely when nothing was dropped.
+        const truncated = render({ filesNotListed: 1_500 });
+        assert.ok(
+            truncated.includes('TRUNCATION_NOTE'),
+            'the export handlers should reference the note',
+        );
+        assert.ok(
+            /TRUNCATION_NOTE = "[^"]*1,500 smaller files/.test(truncated),
+            'the note should be embedded with the real count',
+        );
+
+        const complete = render({ filesNotListed: 0 });
+        assert.ok(
+            /TRUNCATION_NOTE = ""/.test(complete),
+            'a complete list should embed an empty note',
+        );
+    });
+
     test('escapes workspace-controlled text everywhere it appears', () => {
         // File and folder names are attacker-controlled: these are all legal
         // names on macOS and Linux, and the page runs with scripts enabled.

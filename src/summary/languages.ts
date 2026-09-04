@@ -5,7 +5,18 @@
  * an LLM context. Anything unlisted falls back to showing the extension, which
  * is honest and needs no maintenance.
  */
-export const LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = Object.freeze({
+/**
+ * Extension → language name.
+ *
+ * Null-prototyped, not a plain object literal. A lookup on a plain literal walks
+ * `Object.prototype`, so the two prototype keys that survive lower-casing —
+ * `constructor` and `__proto__` — returned a function or an object instead of
+ * `undefined`, which defeated the `?? fallback` in `languageOf`. That non-string
+ * label then reached `localeCompare` and `escapeHtml`, where `.replace` does not
+ * exist, and a single file named `x.constructor` took down the whole summary.
+ */
+export const LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = Object.freeze(
+    Object.assign(Object.create(null) as Record<string, string>, {
     // Web
     ts: 'TypeScript', tsx: 'TypeScript', mts: 'TypeScript', cts: 'TypeScript',
     js: 'JavaScript', jsx: 'JavaScript', mjs: 'JavaScript', cjs: 'JavaScript',
@@ -50,4 +61,5 @@ export const LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = Object.fr
     // Notebooks & templates
     ipynb: 'Jupyter', j2: 'Jinja', jinja: 'Jinja', hbs: 'Handlebars',
     ejs: 'EJS', pug: 'Pug', liquid: 'Liquid', twig: 'Twig', erb: 'ERB',
-});
+    }),
+);

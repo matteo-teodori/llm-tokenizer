@@ -470,6 +470,16 @@ ${collapsibleList('Ignored', view.ignored, view.filesIgnored)}
     const vscode = acquireVsCodeApi();
     const FILES = ${embed(view.files)};
     const TOTAL = ${embed(view.totalTokens)};
+    // The page discloses the row cap in its own note; the exports did not, so a
+    // copied list or a CSV of the "whole" folder silently stopped at 1,000 rows.
+    // A silent cap is how a partial list starts being mistaken for a complete one.
+    // Rendered server-side and empty when nothing was dropped, so the wording
+    // never appears in a page that has nothing to disclose.
+    const TRUNCATION_NOTE = ${embed(
+        view.filesNotListed > 0
+            ? `${view.filesNotListed.toLocaleString()} smaller files are counted in the total but not listed`
+            : '',
+    )};
 
     const tbody = document.getElementById('rows');
     const empty = document.getElementById('empty');
@@ -538,10 +548,11 @@ ${collapsibleList('Ignored', view.ignored, view.filesIgnored)}
     }
 
     document.getElementById('copy').addEventListener('click', () => {
-        vscode.postMessage({
-            command: 'copy',
-            text: visible.map(f => cell(f.display) + '\\t' + f.tokens).join('\\n'),
-        });
+        const lines = visible.map(f => cell(f.display) + '\\t' + f.tokens);
+        if (TRUNCATION_NOTE) {
+            lines.push('# ' + TRUNCATION_NOTE);
+        }
+        vscode.postMessage({ command: 'copy', text: lines.join('\\n') });
     });
 
     document.getElementById('csv').addEventListener('click', () => {
@@ -555,6 +566,9 @@ ${collapsibleList('Ignored', view.ignored, view.filesIgnored)}
         }
 
         const rows = [['path', 'tokens'], ...visible.map(f => [f.display, String(f.tokens)])];
+        if (TRUNCATION_NOTE) {
+            rows.push([TRUNCATION_NOTE, '']);
+        }
         vscode.postMessage({
             command: 'export',
             text: rows.map(r => r.map(csv).join(',')).join('\\n'),
