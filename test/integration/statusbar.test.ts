@@ -115,3 +115,140 @@ suite('status bar colouring', () => {
         assert.strictEqual(colourId(fileItem().backgroundColor), undefined);
     });
 });
+
+suite('status bar visibility', () => {
+    // The method that decides which of the two items is visible encodes two
+    // documented past bugs — the code default disagreeing with the manifest
+    // default, and 'project' mode hiding everything when project scanning is
+    // off — and nothing asserted either. These items are spies rather than real
+    // ones so visibility can be read back; StatusBarManager only ever pushes
+    // them onto `subscriptions`.
+    const CONFIG = 'llm-tokenizer';
+
+    let manager: StatusBarManager;
+    let ctx: ReturnType<typeof fakeContext>;
+    let shown: Map<vscode.StatusBarItem, boolean>;
+    let original: string | undefined;
+
+    function display(display: Partial<Parameters<StatusBarManager['showFileCount']>[0]> = {}) {
+        return {
+            count: 100,
+            exact: true,
+            model: model('gpt-5.6-sol'),
+            projectScanEnabled: true,
+            ...display,
+        };
+    }
+
+    /** [fileVisible, projectVisible] */
+    function visibility(): [boolean, boolean] {
+        const items = [...shown.keys()];
+        return [shown.get(items[0]) ?? false, shown.get(items[1]) ?? false];
+    }
+
+    async function setMode(mode: string): Promise<void> {
+        await vscode.workspace
+            .getConfiguration(CONFIG)
+            .update('statusBarDisplay', mode, vscode.ConfigurationTarget.Global);
+    }
+
+    setup(() => {
+        original = vscode.workspace
+            .getConfiguration(CONFIG)
+            .inspect<string>('statusBarDisplay')?.globalValue;
+
+        shown = new Map();
+        const create = vscode.window.createStatusBarItem.bind(vscode.window);
+        // Wrap the real factory so show()/hide() are observable.
+        (vscode.window as unknown as { createStatusBarItem: unknown }).createStatusBarItem = (
+            ...args: unknown[]
+        ) => {
+            const item = (create as (...a: unknown[]) => vscode.StatusBarItem)(...args);
+            shown.set(item, false);
+            const realShow = item.show.bind(item);
+            const realHide = item.hide.bind(item);
+            item.show = () => { shown.set(item, true); realShow(); };
+            item.hide = () => { shown.set(item, false); realHide(); };
+            return item;
+        };
+
+        ctx = fakeContext();
+        manager = new StatusBarManager(ctx.context);
+        (vscode.window as unknown as { createStatusBarItem: unknown }).createStatusBarItem = create;
+    });
+
+    teardown(async () => {
+        ctx.dispose();
+        await vscode.workspace
+            .getConfiguration(CONFIG)
+            .update('statusBarDisplay', original, vscode.ConfigurationTarget.Global);
+    });
+
+    test("the code's default display mode matches the manifest's", () => {
+        // These disagreed once: the manifest said 'both' and the code fell back
+        // to 'file', so a user who had never touched the setting saw one item.
+        const manifest = vscode.extensions.getExtension('matteoteodori.llm-tokenizer')
+            ?.packageJSON as {
+                contributes: { configuration: { properties: Record<string, { default?: string }> } };
+            };
+        const declared = manifest.contributes.configuration.properties[`${CONFIG}.statusBarDisplay`];
+
+        // With the setting unset, both counts present, the manifest default of
+        // 'both' must be what actually happens.
+        assert.strictEqual(declared.default, 'both');
+        manager.showFileCount(display());
+        manager.showProjectCount(display());
+        assert.deepStrictEqual(visibility(), [true, true]);
+    });
+
+    test('each mode shows what it says, and project mode degrades rather than emptying', async () => {
+        manager.showFileCount(display());
+        manager.showProjectCount(display());
+
+        await setMode('file');
+        manager.applyDisplayMode(true);
+        assert.deepStrictEqual(visibility(), [true, false], "'file' should show only the file item");
+
+        await setMode('project');
+        manager.applyDisplayMode(true);
+        assert.deepStrictEqual(visibility(), [false, true], "'project' should show only the total");
+
+        // The bug this guards: reading 'project' naively with scanning off hides
+        // both items, and the extension looks uninstalled.
+        manager.applyDisplayMode(false);
+        assert.deepStrictEqual(
+            visibility(),
+            [true, false],
+            "'project' with scanning off should fall back to the file item",
+        );
+    });
+
+    test('clearing the total re-derives visibility instead of just hiding', async () => {
+        // clearProjectCount used to hide its own item directly, so in 'project'
+        // mode the same logical state rendered as an empty status bar when
+        // reached by clearing and as the file item when reached by
+        // applyDisplayMode. Switching model clears the total, so this is the
+        // ordinary path, not a corner case.
+        await setMode('project');
+        manager.showFileCount(display());
+        manager.showProjectCount(display());
+        assert.deepStrictEqual(visibility(), [false, true]);
+
+        manager.clearProjectCount();
+        assert.deepStrictEqual(
+            visibility(),
+            [true, false],
+            'clearing the total should leave the file count visible, not an empty bar',
+        );
+    });
+
+    test('with no file counted the file item stays hidden in every mode', async () => {
+        // Re-showing it would resurrect the number last written to it, which
+        // belongs to a file the user has since closed.
+        for (const mode of ['both', 'file', 'project']) {
+            await setMode(mode);
+            manager.applyDisplayMode(true);
+            assert.strictEqual(visibility()[0], false, `mode ${mode} showed a stale file count`);
+        }
+    });
+});
