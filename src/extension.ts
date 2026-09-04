@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { promises as fs } from 'fs';
 
 import { TokenizerService } from './tokenizer/tokenizerService';
 import { TokenizerStore } from './tokenizer/tokenizerStore';
@@ -939,6 +940,43 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
 // Project-wide count
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * Reduce declared workspace folders to the ones that must actually be walked.
+ *
+ * Workspace folders are allowed to nest: `/repo` and `/repo/packages/web` can
+ * both be roots. `findFiles` walks a root's entire subtree, so a nested root's
+ * files would be counted once under each — inflating the total and pushing the
+ * badge to an amber or red the project has not reached.
+ *
+ * Exported so it can be tested directly. It used to be four lines inside a
+ * function nothing in the suite reached, so reverting it broke nothing visible.
+ *
+ * `delete` rather than `has`: it returns true only the first time, so two
+ * folders sharing one URI still contribute a single root.
+ */
+export function outermostFolders(
+    folders: readonly vscode.WorkspaceFolder[],
+): vscode.WorkspaceFolder[] {
+    const outermost = new Set(dedupeSelection(folders.map(f => f.uri)).map(uri => uri.toString()));
+    return folders.filter(folder => outermost.delete(folder.uri.toString()));
+}
+
+/**
+ * Record a file's real path, returning false if it has already been counted.
+ *
+ * Falls back to the URI when the path cannot be resolved, which keeps a file on
+ * a filesystem without symlink support countable rather than silently dropped.
+ */
+async function claimRealPath(uri: vscode.Uri, seen: Set<string>): Promise<boolean> {
+    let key: string;
+    try {
+        key = await fs.realpath(uri.fsPath);
+    } catch {
+        key = uri.toString();
+    }
+    return !seen.has(key) && (seen.add(key), true);
+}
+
 async function refreshProjectCount(): Promise<void> {
     if (!isProjectScanEnabled()) {
         statusBar.clearProjectCount();
@@ -963,19 +1001,38 @@ async function refreshProjectCount(): Promise<void> {
         let total = 0;
         let exact = true;
 
-        // Workspace folders are allowed to nest: `/repo` and `/repo/packages/web`
-        // can both be roots. `findFiles` walks a root's entire subtree, so a
-        // nested root's files would be counted once under each — inflating the
-        // total and pushing the badge to an amber or red the project has not
-        // actually reached. Keeping only the outermost roots covers every file
-        // exactly once.
-        // `delete` rather than `has`: it returns true only the first time, so
-        // two folders sharing one URI still contribute a single root.
-        const outermost = new Set(dedupeSelection(folders.map(f => f.uri)).map(uri => uri.toString()));
-        const roots = folders.filter(folder => outermost.delete(folder.uri.toString()));
+        const roots = outermostFolders(folders);
+
+        // One ignore context per *declared* folder, not per walked root. A
+        // nested root inherits its parent's walk, and it used to inherit the
+        // parent's .gitignore with it — so a workspace that added, say,
+        // `/repo/vendor/lib` as a second root while `/repo/.gitignore` excluded
+        // `vendor/` counted none of it, even though the user had asked for it by
+        // name. Files are matched against the most specific folder that contains
+        // them, which is the rule `vscode.workspace.getWorkspaceFolder` uses and
+        // the one the right-click count already followed.
+        const contexts = await Promise.all(
+            folders.map(async folder => ({
+                folder,
+                context: await FolderContext.create(folder, useGitignore),
+            })),
+        );
+        // Longest path first, so the most specific containing folder wins.
+        contexts.sort((a, b) => b.folder.uri.path.length - a.folder.uri.path.length);
+        const contextFor = (uri: vscode.Uri): FolderContext =>
+            contexts.find(
+                c => uri.path === c.folder.uri.path || uri.path.startsWith(`${c.folder.uri.path}/`),
+            )?.context ?? contexts[contexts.length - 1].context;
+
+        // Symlinked trees are visited once. `findFiles` is the ripgrep walker,
+        // which follows symlinks (per `search.followSymlinks`) and does not
+        // deduplicate, so a sibling symlink counted the same tree twice — while
+        // the right-click count, which goes through `collectFiles`, resolves
+        // real paths and counted it once. The two totals disagreed on the same
+        // directory.
+        const seen = new Set<string>();
 
         for (const folder of roots) {
-            const context = await FolderContext.create(folder, useGitignore);
             const files = await vscode.workspace.findFiles(
                 new vscode.RelativePattern(folder, '**/*'),
                 buildExcludeGlob(),
@@ -987,6 +1044,10 @@ async function refreshProjectCount(): Promise<void> {
                     return;
                 }
 
+                if (!(await claimRealPath(uri, seen))) {
+                    continue;
+                }
+
                 let size: number;
                 try {
                     size = (await vscode.workspace.fs.stat(uri)).size;
@@ -994,7 +1055,7 @@ async function refreshProjectCount(): Promise<void> {
                     continue;
                 }
 
-                if (shouldCount(uri, size, context)) {
+                if (shouldCount(uri, size, contextFor(uri))) {
                     continue;
                 }
 

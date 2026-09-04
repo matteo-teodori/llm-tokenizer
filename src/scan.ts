@@ -203,7 +203,18 @@ export function dedupeSelection(uris: readonly vscode.Uri[]): vscode.Uri[] {
 
     const kept: vscode.Uri[] = [];
     for (const uri of unique) {
-        const contained = kept.some(parent => uri.path.startsWith(`${parent.path}/`));
+        // Scheme and authority first: two URIs on different schemes that happen
+        // to share a path prefix are not nested, and treating them as nested
+        // dropped a whole workspace folder from the project total. The trailing
+        // slash is normalised too, or a filesystem root ("/" or "/c:/") built a
+        // "//" prefix that matched nothing and made the root contain nobody.
+        const contained = kept.some(parent => {
+            if (parent.scheme !== uri.scheme || parent.authority !== uri.authority) {
+                return false;
+            }
+            const base = parent.path.endsWith('/') ? parent.path : `${parent.path}/`;
+            return uri.path.startsWith(base);
+        });
         if (!contained) {
             kept.push(uri);
         }

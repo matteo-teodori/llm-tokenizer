@@ -42,8 +42,11 @@ export const MAX_TOKENIZED_FILE_BYTES = 10 * 1024 * 1024;
  * These files cannot be meaningfully tokenized
  */
 export const BINARY_EXTENSIONS = new Set([
-    // Images
-    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.svg', '.tiff',
+    // Images. `.svg` is deliberately absent: it is XML text, it tokenizes fine,
+    // and it is one of the more common things to paste into a context window.
+    // Grouping it with the raster formats meant every SVG was excluded from
+    // every total and reported to the user as an unsupported binary file.
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff',
     // Archives
     '.zip', '.tar', '.gz', '.7z', '.rar', '.bz2', '.xz',
     // Executables
