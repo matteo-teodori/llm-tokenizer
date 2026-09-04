@@ -4,6 +4,105 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.1.1] - 2026-09-04
+
+### Added
+- **Fourteen models released since the August registry check.** GPT-6 Astra,
+  Claude Fable 5.1, Gemini 3.8 Flash and 3.7 Flash, Grok 4.6, Meta's Muse
+  Glimmer 30B, the Qwen3.8 family (Max, Flash, 27B, 2.4T-A95B), GLM-5.3 and
+  GLM-5.3-Flash, MiniMax M2, and Tencent's Hy4 preview. 85 models across the
+  same 13 providers.
+
+  GPT-6 Astra is the one OpenAI model here that is **estimated rather than
+  exact**. OpenAI documents no encoding for it and `tiktoken`'s own model table
+  stops at `gpt-5`, so counting it with o200k_base would be a guess presented as
+  an exact number. It moves to exact the moment that mapping is published.
+
+  Two verified-real models are deliberately absent: Claude Mythos 5.1 and
+  GPT-5.6 Cyber are both behind approval-only access programmes, and each counts
+  identically to a sibling already in the list.
+
+### Fixed
+- **The workspace total did not refresh when anything wrote to the disk from
+  outside the editor.** A coding agent editing files, a `git checkout`, an
+  `npm install`, a formatter run from a terminal — none of them updated the
+  count, which sat on its old number until some unrelated save happened to
+  trigger a rescan.
+
+  The three file events the extension listened to are documented in VS Code's
+  own API as *not* firing for changes made on disk by another application, so a
+  comment claiming they made a branch switch cheap was describing an
+  optimisation that never ran. There is now a `FileSystemWatcher`, filtered so
+  `.git`, `node_modules` and build output cannot keep a scan re-arming, and the
+  scan debounce has a ceiling — under continuous churn it used to be pushed back
+  indefinitely and simply stopped happening.
+- **A file containing a special-token literal silently degraded the whole
+  workspace to an estimate.** Any file holding `<|endoftext|>` — a prompt
+  template, a `tokenizer_config.json`, a fine-tuning dataset — made the
+  tokenizer throw, and the failure was invisible: the count fell back to
+  characters ÷ 3.8, and because the scan folds exactness across files, one such
+  file relabelled an entirely exact workspace as approximate.
+- **`hunyuan-hy3` was never a Tencent model id.** It appears on none of
+  Tencent's model tables, on either their international or their China
+  documentation. The real id is `hy3`, and its usable input limit is 196,608 —
+  not the 262,144 that was recorded.
+- **Mistral's ids were the marketing names, which its API does not accept.**
+  `mistral-large-3`, `mistral-medium-3.5` and `mistral-small-4` are now
+  `mistral-large-2512`, `mistral-medium-3-5` and `mistral-small-2603`, and their
+  context limit is 262,144 rather than 256,000 — Mistral's "256k" is binary.
+- **Qwen's limits were the advertised windows, not the usable input caps.**
+  Model Studio publishes both; the registry now records the input cap it always
+  said it recorded (991,808 rather than 1,000,000, 260,096 rather than 262,144).
+- **MiMo V2 Flash was retired.** Xiaomi took the V2 series offline on
+  2026-06-30 and has routed it to V2.5 since 2026-06-18.
+- **A slower older count could overwrite a newer one in the status bar**, and
+  stay there. The file count now carries the same generation guard the project
+  scan has. It also snapshots its model, so switching model mid-count can no
+  longer render one model's number under another's name, limit and colour.
+- **A selection change in a non-active editor cancelled the pending update** for
+  the editor being typed in, rather than delaying it — so with the same file
+  open in a split, the count stopped moving.
+- **A transient tokenizer failure was cached as an estimate forever** for
+  bundled models, which emit no download event to invalidate it.
+- **SVG files were treated as binary** and excluded from every total, though
+  they are XML text and count perfectly well.
+- **A file with a `.constructor` or `.__proto__` extension crashed the summary.**
+  The language lookup walked `Object.prototype` and returned a function where a
+  name was expected.
+- **A truncated or non-vocabulary download could be cached and trusted.** A rank
+  table cut short at the end still parses, and a captive portal answering 200
+  with HTML was written to disk as a vocabulary; both are now rejected on
+  arrival.
+- **A worker crash while re-sending a vocabulary permanently disabled exact
+  counting** for that model, defeating the crash recovery it was meant to use.
+- **Clearing downloaded tokenizers left an in-flight download running**, which
+  repopulated the cache the user had just been told was empty.
+- **Copy and Export CSV silently emitted only the first 1,000 files.** The page
+  disclosed the cap; the exports did not.
+- **A nested workspace root excluded by the outer root's `.gitignore`** was
+  dropped from the workspace total entirely, even though the user had added it
+  by name. Symlinked trees are also counted once now, as the folder count
+  already did.
+- Two windows downloading the same tokenizer shared one scratch file, so one
+  could rename the other's half-written download into place.
+- `formatNumber` rendered totals between 999,950 and 999,999 as `1000.0K`.
+- Packaging failed on any checkout path containing a space or a non-ASCII
+  character, because a URL path was used where a filesystem path was needed.
+
+### Changed
+- **Publishing to both marketplaces is now re-runnable.** A transient failure
+  publishing to one registry skipped the other *and* the GitHub release, and
+  re-running could not recover — the registry that had succeeded rejected the
+  duplicate and failed the job again. Both publishes are idempotent now and
+  neither depends on the other's outcome.
+- **CI's dependency audit actually audits something.** It ran with `--omit=dev`
+  against a project whose every dependency is a devDependency — the three
+  libraries that ship are compiled into the bundle — so it could only ever
+  report zero.
+- The default model is pinned to one constant that the manifest is generated
+  from, rather than being whichever model happens to be first in the registry.
+  It is deliberately the newest model that can be counted *exactly*.
+
 ## [2.1.0] - 2026-08-08
 
 ### Added

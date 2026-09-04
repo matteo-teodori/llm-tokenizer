@@ -4,7 +4,7 @@
   <h1>LLM Tokenizer</h1>
 
   <p><b>The ultimate AI token counter for your IDE.</b><br>
-  Token counting for 71 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
+  Token counting for 85 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
 
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
@@ -36,7 +36,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 ## Features
 
 ### 🎯 Core Features
-- **Exact counts, not guesses**: 52 of the 71 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
+- **Exact counts, not guesses**: 60 of the 85 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
 - **Real-time Token Count**: The active file's token count in the Status Bar
 - **Context Limit Warnings**: Indicators at 80% and 100% of the model's *usable input* limit
 - **Project-wide Counting**: Workspace totals with caching, cancellation, and multi-root support
@@ -61,30 +61,39 @@ off with `llm-tokenizer.downloadTokenizers`.
 
 ## Supported Models
 
-71 models across 13 providers. Every id is checked against the provider's own
+85 models across 13 providers. Every id is checked against the provider's own
 documentation; models that a provider has retired are removed, and your setting
 is migrated automatically.
+
+Ids are the strings the provider's API actually accepts, which are not always
+the marketing names — Mistral Large 3 is `mistral-large-2512`, and Tencent's Hy3
+is `hy3`, never `hunyuan-hy3`.
 
 | Provider   | Models | Accuracy |
 |------------|--------|----------|
 | OpenAI     | GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 (+mini), GPT-5.3 Codex, GPT-5.2, GPT-5.1, GPT-5, GPT-4.1, GPT-4o (+mini), o3, o4-mini, gpt-oss 120b/20b, GPT-4 Turbo, GPT-3.5 Turbo | Exact |
-| Anthropic  | Claude Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
+| OpenAI     | GPT-6 Astra | Estimated³ |
+| Anthropic  | Claude Fable 5.1, Fable 5, Opus 5, Sonnet 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
 | Google     | Gemini 3.5 Flash, 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
-| Google     | Gemini 3.6 Flash, 3.5 Flash-Lite | Estimated² |
-| xAI        | Grok 4.5, Grok 4.3, Grok 4.20, Grok Build 0.1 | Estimated |
+| Google     | Gemini 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.5 Flash-Lite | Estimated² |
+| xAI        | Grok 4.6, 4.5, 4.3, 4.20, Grok Build 0.1 | Estimated |
 | DeepSeek   | DeepSeek V4 Pro, V4 Flash | Exact¹ |
-| Meta       | Llama 4 Scout, Llama 4 Maverick, Llama 3.3 70B, Llama 3.1 8B | Exact¹ |
+| Meta       | Muse Glimmer 30B, Llama 4 Scout, Llama 4 Maverick, Llama 3.3 70B, Llama 3.1 8B | Exact¹ |
 | Mistral    | Mistral Large 3, Medium 3.5, Small 4 | Exact¹ |
-| Alibaba    | Qwen3.7 Max/Plus, Qwen3.6 Plus, Qwen3.6 27B, Qwen3.6 35B-A3B | Exact¹ / estimated |
-| Zhipu      | GLM-5.2, GLM-5.1, GLM-5, GLM-5-Turbo | Exact¹ |
-| MiniMax    | MiniMax M3, M2.7, M2.5, M2.1 | Exact¹ |
+| Alibaba    | Qwen3.8 Flash/27B/2.4T-A95B, Qwen3.6 27B, Qwen3.6 35B-A3B | Exact¹ |
+| Alibaba    | Qwen3.8 Max, Qwen3.7 Max/Plus, Qwen3.6 Plus | Estimated |
+| Zhipu      | GLM-5.3, GLM-5.3-Flash, GLM-5.2, GLM-5.1, GLM-5, GLM-5-Turbo | Exact¹ |
+| MiniMax    | MiniMax M3, M2.7, M2.5, M2.1, M2 | Exact¹ |
 | Moonshot   | Kimi K3, K2.7 Code, K2.6 | Exact¹ |
-| Xiaomi     | MiMo V2.5 Pro, MiMo V2 Flash | Exact¹ |
-| Tencent    | Hunyuan Hy3 | Exact¹ |
+| Xiaomi     | MiMo V2.5 Pro, MiMo V2.5 | Exact¹ |
+| Tencent    | Hy4 preview, Hy3 | Exact¹ |
 
 ¹ after a one-time tokenizer download
-² these two releases are too recent for Google's SDK to map them to a published
+² these releases are too recent for Google's SDK to map them to a published
 vocabulary, so they fall back to a character estimate
+³ OpenAI has not published which encoding GPT-6 uses — `tiktoken`'s own model
+table stops at `gpt-5` — so it is estimated rather than counted with an
+encoding it may not use. It moves to exact as soon as that mapping ships.
 
 ## Usage
 
@@ -119,9 +128,9 @@ and both are read.
 
 | Tier | Shown as | Method | Models |
 |------|----------|--------|--------|
-| **Exact, offline** | `12,340` | OpenAI's own BPE, bundled | All OpenAI models |
-| **Exact after one download** | `≈` → `12,340` | The model's published vocabulary (~2–19 MB, cached) | Llama, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hunyuan, Kimi |
-| **Estimated** | `≈12,340` | Calibrated characters per token | Claude, Grok, closed Qwen |
+| **Exact, offline** | `12,340` | OpenAI's own BPE, bundled | Every OpenAI model tiktoken maps (all but GPT-6) |
+| **Exact after one download** | `≈` → `12,340` | The model's published vocabulary (~2–28 MB, cached) | Llama, Muse Glimmer, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hy, Kimi |
+| **Estimated** | `≈12,340` | Calibrated characters per token | Claude, Grok, GPT-6, closed Qwen, recent Gemini |
 
 **Why some models are only estimated.** Anthropic and xAI do not publish a
 tokenizer for any current model, and Anthropic explicitly advises against
@@ -132,6 +141,11 @@ The per-family ratios are measured against real corpora where a tokenizer
 exists to measure against. Grok is the exception: no Grok tokenizer has ever
 been published, so its ratio is inferred rather than measured, and it is the
 least reliable number here.
+
+One limitation worth stating plainly: the ratios are calibrated on English prose
+and code and are applied per UTF-16 code unit, so an estimate for CJK text reads
+substantially low. Exact models are unaffected — this only applies to counts
+already shown with a `≈`.
 
 **Known limitation:** only the `.gitignore` at the root of each workspace
 folder is read, plus `.git/info/exclude`. Nested `.gitignore` files deeper in
