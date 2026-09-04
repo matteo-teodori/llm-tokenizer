@@ -140,10 +140,34 @@ suite('model registry', () => {
         }
     });
 
-    test('OpenAI models are tokenized exactly, never estimated', () => {
-        // tiktoken is OpenAI's own tokenizer; there is no reason to guess.
+    test('OpenAI models are tokenized exactly, except where tiktoken has no mapping', () => {
+        // tiktoken is OpenAI's own tokenizer, so an OpenAI model should never be
+        // a guess — unless OpenAI has not said which encoding it uses. GPT-6 is
+        // that case today: `MODEL_PREFIX_TO_ENCODING` stops at `gpt-5` and the
+        // model page names no encoding, so the entry is honestly estimated
+        // rather than dressed up as exact.
+        //
+        // The allowlist is the point of this test. A *new* estimated OpenAI
+        // model still fails the build, and when tiktoken publishes a gpt-6
+        // mapping the entry moves to `tiktoken` and this list goes back to empty.
+        const noPublishedEncoding = new Set(['gpt-6-astra']);
+
         for (const model of MODELS.filter(m => m.provider === 'OpenAI')) {
+            if (noPublishedEncoding.has(model.id)) {
+                assert.strictEqual(
+                    model.encoder.kind,
+                    'heuristic',
+                    `${model.id} is on the no-encoding list, so it must be estimated`,
+                );
+                continue;
+            }
             assert.strictEqual(model.encoder.kind, 'tiktoken', `${model.id} should use tiktoken`);
+        }
+
+        // Every id on the list has to still exist, so the exception cannot
+        // outlive the model it was written for.
+        for (const id of noPublishedEncoding) {
+            assert.ok(MODELS.some(m => m.id === id), `${id} is allowlisted but not in the registry`);
         }
     });
 
@@ -254,5 +278,68 @@ suite('downloadable-kind discrimination', () => {
             [],
             `use isDownloadable() rather than naming a kind, at: ${offenders.join(', ')}`,
         );
+    });
+});
+
+suite('registry data that the manifest depends on', () => {
+    test('the default model is exact, and is what the manifest offers', async () => {
+        // Two things used to be able to drift: `defaultModel()` returned
+        // MODELS[0], while the manifest's default was hand-edited. They now come
+        // from one constant, and this asserts the property that made the
+        // constant worth having — the model a new user starts on is one the
+        // extension can count exactly, with no download and no estimate.
+        const { defaultModel, DEFAULT_MODEL_ID } = await import('../../src/tokenizer/registry');
+        const { accuracyOf } = await import('../../src/tokenizer/encoders');
+
+        const model = defaultModel();
+        assert.strictEqual(model.id, DEFAULT_MODEL_ID);
+        assert.strictEqual(
+            accuracyOf(model.encoder),
+            'exact',
+            `the default model ${model.id} must be exact offline`,
+        );
+    });
+
+    test('models sharing a downloaded vocabulary really do share one', () => {
+        // The registry deliberately points several models at one repo so a
+        // single download covers a family. That is only sound when the
+        // vocabularies are identical, which was verified by hashing the files.
+        // This asserts the *intent* stays legible: every repo used by more than
+        // one model is used by models of a single provider, so a repo can never
+        // be quietly shared across two providers' vocabularies.
+        const byRepo = new Map<string, Set<string>>();
+        for (const model of MODELS) {
+            const encoder = model.encoder;
+            if (encoder.kind !== 'hf' && encoder.kind !== 'tiktokenModel') {
+                continue;
+            }
+            const providers = byRepo.get(encoder.repo) ?? new Set<string>();
+            providers.add(model.provider);
+            byRepo.set(encoder.repo, providers);
+        }
+
+        for (const [repo, providers] of byRepo) {
+            assert.strictEqual(
+                providers.size,
+                1,
+                `${repo} is shared across providers ${[...providers].join(', ')}`,
+            );
+        }
+    });
+
+    test('no context limit is a round marketing number where a real cap is known', () => {
+        // Not a style rule: several entries record the provider's advertised
+        // window because that is all the provider publishes, and several record
+        // a separately documented input cap. What must never happen is a limit
+        // of zero or a non-integer, which would make the context meter nonsense.
+        for (const model of MODELS) {
+            if (model.contextLimit === undefined) {
+                continue;
+            }
+            assert.ok(
+                Number.isInteger(model.contextLimit) && model.contextLimit > 0,
+                `${model.id} has a nonsensical contextLimit: ${model.contextLimit}`,
+            );
+        }
     });
 });

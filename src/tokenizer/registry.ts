@@ -8,7 +8,7 @@
  */
 
 import type { EncoderSpec } from './encoders';
-import { MODELS, MODEL_ALIASES } from './models';
+import { MODELS, MODEL_ALIASES, DEFAULT_MODEL_ID } from './models';
 
 export interface ModelInfo {
     /** Stable id. Also what gets persisted in settings and global state. */
@@ -22,7 +22,7 @@ export interface ModelInfo {
     contextLimit?: number;
 }
 
-export { MODELS, MODEL_ALIASES };
+export { MODELS, MODEL_ALIASES, DEFAULT_MODEL_ID };
 
 const BY_ID = new Map(MODELS.map(model => [model.id, model]));
 
@@ -37,9 +37,16 @@ export function findModel(id: string): ModelInfo | undefined {
     return alias ? BY_ID.get(alias) : undefined;
 }
 
-/** The model used when nothing has been chosen, or the choice no longer exists. */
+/**
+ * The model used when nothing has been chosen, or the choice no longer exists.
+ *
+ * Resolved from `DEFAULT_MODEL_ID` rather than being `MODELS[0]`, which is the
+ * newest model and not necessarily one that can be counted exactly. The same
+ * constant is written into the manifest's `defaultModel` setting, and an
+ * invariant test asserts the two agree.
+ */
 export function defaultModel(): ModelInfo {
-    return MODELS[0];
+    return BY_ID.get(DEFAULT_MODEL_ID) ?? MODELS[0];
 }
 
 /** Providers in registry order, for grouping the picker. */

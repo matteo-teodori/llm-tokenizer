@@ -143,7 +143,10 @@ suite('extension', () => {
         const manifest = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON as {
             contributes: {
                 configuration: {
-                    properties: Record<string, { enum?: string[]; enumItemLabels?: string[] }>;
+                    properties: Record<
+                        string,
+                        { enum?: string[]; enumItemLabels?: string[]; enumDescriptions?: string[] }
+                    >;
                 };
             };
         };
@@ -151,6 +154,82 @@ suite('extension', () => {
         const setting = manifest.contributes.configuration.properties[`${CONFIG}.defaultModel`];
         assert.deepStrictEqual(setting.enum, MODELS.map(m => m.id));
         assert.deepStrictEqual(setting.enumItemLabels, MODELS.map(m => m.label));
+
+        // enumDescriptions was the one array nothing compared, and it is the one
+        // that carries the accuracy claim — the sentence telling a user whether
+        // a model is counted exactly or estimated. A registry entry could change
+        // encoder kind and the dropdown would keep making the old promise.
+        const { accuracyOf } = await import('../../src/tokenizer/encoders');
+        const wording = {
+            exact: 'exact',
+            'after-download': 'exact once the tokenizer is downloaded',
+            estimated: 'estimated — no public tokenizer',
+        } as const;
+
+        assert.strictEqual(setting.enumDescriptions?.length, MODELS.length);
+        MODELS.forEach((model, index) => {
+            const description = setting.enumDescriptions?.[index] ?? '';
+            assert.ok(
+                description.startsWith(`${model.provider} · `),
+                `${model.id}: "${description}" does not name its provider`,
+            );
+            assert.ok(
+                description.endsWith(` · ${wording[accuracyOf(model.encoder)]}`),
+                `${model.id}: "${description}" does not match its encoder's accuracy`,
+            );
+        });
+    });
+
+    test('the manifest default and defaultModel() are the same model', async () => {
+        // These were independent: MODELS[0] on one side, a hand-edited manifest
+        // value on the other, corrected only when it named a model that had been
+        // removed. They could therefore point at two different models with
+        // nothing failing — and after GPT-6 Astra was added at the top of the
+        // registry, MODELS[0] stopped being the right default at all.
+        const { defaultModel } = await import('../../src/tokenizer/registry');
+        const manifest = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON as {
+            contributes: {
+                configuration: { properties: Record<string, { default?: string }> };
+            };
+        };
+
+        const setting = manifest.contributes.configuration.properties[`${CONFIG}.defaultModel`];
+        assert.strictEqual(setting.default, defaultModel().id);
+    });
+
+    test('outermost workspace roots cover every file exactly once', async () => {
+        // The nested-root fix shipped in 2.1.0 lived inside refreshProjectCount,
+        // which no test reached: reverting it left all 150 tests green while
+        // every file under a nested root was counted twice in the workspace
+        // total, colouring the badge against a limit the project had not hit.
+        const { outermostFolders } = await import('../../src/extension');
+        const folder = (p: string, index: number): vscode.WorkspaceFolder => ({
+            uri: vscode.Uri.file(p),
+            name: p,
+            index,
+        });
+
+        const names = (folders: readonly vscode.WorkspaceFolder[]): string[] =>
+            outermostFolders(folders).map(f => f.uri.path);
+
+        // A nested root is dropped; its files are covered by the outer walk.
+        assert.deepStrictEqual(
+            names([folder('/repo', 0), folder('/repo/packages/web', 1), folder('/other', 2)]),
+            ['/repo', '/other'],
+        );
+        // The same URI twice contributes one root, not two.
+        assert.deepStrictEqual(names([folder('/repo', 0), folder('/repo', 1)]), ['/repo']);
+        // A shared prefix is not containment: /repo/src does not contain /repo/src-gen.
+        assert.deepStrictEqual(
+            names([folder('/repo/src', 0), folder('/repo/src-gen', 1)]),
+            ['/repo/src', '/repo/src-gen'],
+        );
+        // Order of declaration does not matter.
+        assert.deepStrictEqual(
+            names([folder('/repo/packages/web', 0), folder('/repo', 1)]),
+            ['/repo'],
+        );
+        assert.deepStrictEqual(names([]), []);
     });
 
     test('every downloadable model is reachable from the extension host', async () => {

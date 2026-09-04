@@ -20,8 +20,9 @@ const check = process.argv.includes('--check');
 
 let MODELS;
 let MODEL_ALIASES;
+let DEFAULT_MODEL_ID;
 try {
-    ({ MODELS, MODEL_ALIASES } = require('../.build/models-meta.cjs'));
+    ({ MODELS, MODEL_ALIASES, DEFAULT_MODEL_ID } = require('../.build/models-meta.cjs'));
 } catch (error) {
     console.error('Could not load the compiled registry. Run `npm run compile` first.');
     console.error(error.message);
@@ -104,9 +105,14 @@ setting.enumDescriptions = MODELS.map(m => {
     return `${m.provider} · ${limit} · ${accuracy}`;
 });
 
-if (!setting.enum.includes(setting.default)) {
-    setting.default = MODELS[0].id;
+// The manifest's default comes from the registry too. It used to be edited by
+// hand and only corrected when it named a model that no longer existed, so it
+// could quietly point at a different model from the one `defaultModel()` returns.
+if (!ids.has(DEFAULT_MODEL_ID)) {
+    console.error(`DEFAULT_MODEL_ID is "${DEFAULT_MODEL_ID}", which is not a model.`);
+    process.exit(1);
 }
+setting.default = DEFAULT_MODEL_ID;
 
 const updated = `${JSON.stringify(manifest, null, 2)}\n`;
 
