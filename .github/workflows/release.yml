@@ -48,6 +48,7 @@ jobs:
           fi
 
       - name: Package
+        id: package
         run: npx @vscode/vsce package --no-dependencies --out llm-tokenizer.vsix
 
       - uses: actions/upload-artifact@v4
@@ -55,20 +56,29 @@ jobs:
           name: vsix
           path: llm-tokenizer.vsix
 
+      # The three steps below are deliberately independent of each other's
+      # outcome. A step whose `if` contains no status function is implicitly
+      # gated on `success()`, so a transient failure publishing to one registry
+      # skipped the other and the GitHub release — and re-running the job could
+      # not recover, because the registry that had succeeded now rejected the
+      # duplicate version and failed the job again before reaching the rest.
+      # `!cancelled()` lifts that gate; `steps.package.outcome` keeps it honest,
+      # so a failed verify, test or package still never reaches a publish. Both
+      # publishes take --skip-duplicate, which makes a re-run idempotent.
       - name: Publish to the VS Code Marketplace
-        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+        if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && steps.package.outcome == 'success' }}
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx @vscode/vsce publish --no-dependencies --packagePath llm-tokenizer.vsix
+        run: npx @vscode/vsce publish --no-dependencies --skip-duplicate --packagePath llm-tokenizer.vsix
 
       - name: Publish to Open VSX
-        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+        if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && steps.package.outcome == 'success' }}
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        run: npx ovsx publish llm-tokenizer.vsix
+        run: npx ovsx publish --skip-duplicate llm-tokenizer.vsix
 
       - name: Create the GitHub release
-        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+        if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && steps.package.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" llm-tokenizer.vsix --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" llm-tokenizer.vsix --generate-notes --verify-tag || gh release upload "$GITHUB_REF_NAME" llm-tokenizer.vsix --clobber
