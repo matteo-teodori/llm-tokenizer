@@ -98,7 +98,16 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - **CI's dependency audit actually audits something.** It ran with `--omit=dev`
   against a project whose every dependency is a devDependency — the three
   libraries that ship are compiled into the bundle — so it could only ever
-  report zero.
+  report zero. It now gates on the packages esbuild actually inlines, derived
+  from the same scan that produces the third-party notices, and reports
+  advisories in the build and test tooling without blocking a release on them.
+- **Dependencies moved to current releases**, including gpt-tokenizer 4, which
+  produces every exact OpenAI count. Counts were compared across all three
+  shipped encodings before adopting it — over this project's own sources plus
+  empty, CJK, emoji, whitespace, byte-order-mark and special-token inputs — and
+  are unchanged. `@types/vscode` is pinned to the `engines` floor rather than
+  raised: a caret range let it resolve past the API version the extension
+  declares it supports.
 - The default model is pinned to one constant that the manifest is generated
   from, rather than being whichever model happens to be first in the registry.
   It is deliberately the newest model that can be counted *exactly*.
