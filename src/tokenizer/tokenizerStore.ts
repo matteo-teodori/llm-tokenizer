@@ -44,7 +44,16 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
  */
 export async function writeWhole(dir: vscode.Uri, name: string, contents: string): Promise<void> {
     const target = vscode.Uri.joinPath(dir, name);
-    const partial = vscode.Uri.joinPath(dir, `${name}.part`);
+    // Unique per writer. `globalStorageUri` is shared by every window of the
+    // same install, each with its own extension host and its own store, so a
+    // fixed `${name}.part` meant two windows downloading the same repo wrote to
+    // one path — and `writeFile` truncates, which is the premise this function
+    // is built on. One window could therefore rename the other's half-written
+    // file into place.
+    const partial = vscode.Uri.joinPath(
+        dir,
+        `${name}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.part`,
+    );
 
     await vscode.workspace.fs.writeFile(partial, new TextEncoder().encode(contents));
     try {
@@ -271,6 +280,7 @@ export class TokenizerStore {
         if (body === undefined) {
             throw new TokenizerDownloadError(repo, `${file} was empty`);
         }
+        assertLooksLikeRankTable(repo, file, body);
         return body;
     }
 
@@ -308,6 +318,22 @@ export class TokenizerStore {
             const body = await response.text();
             if (body.length > MAX_TOKENIZER_BYTES) {
                 throw new TokenizerDownloadError(repo, 'file is implausibly large');
+            }
+
+            // A short read is the one corruption nothing downstream can see. The
+            // rank-table parser rejects gaps, because published vocabularies are
+            // dense — but a body truncated at the *end* leaves ranks 0..n intact
+            // and dense, so it parses, is cached, and then counts every file a
+            // little low while still labelled exact. Comparing bytes against the
+            // declared length catches it at the only point where the truth is
+            // still available. (Skipped when the length is absent, as it is under
+            // chunked transfer encoding.)
+            const received = Buffer.byteLength(body, 'utf8');
+            if (declared > 0 && received !== declared) {
+                throw new TokenizerDownloadError(
+                    repo,
+                    `${file} was truncated (${received} of ${declared} bytes)`,
+                );
             }
             return body;
         } catch (error) {
@@ -347,5 +373,25 @@ export class TokenizerStore {
             }
             throw new TokenizerDownloadError(repo, `${file} is not valid JSON`);
         }
+    }
+}
+
+/**
+ * Reject a body that is not a tiktoken rank table.
+ *
+ * The JSON path is validated by `JSON.parse`; this path had nothing. A gateway,
+ * captive portal or Hub incident that answers 200 with an HTML page would be
+ * written to disk as the vocabulary, and every later load would fail against a
+ * file the store believed was good — permanently, since a cached file is never
+ * re-fetched. One line of shape-checking is enough: the format is
+ * `<base64> <rank>` per line.
+ */
+function assertLooksLikeRankTable(repo: string, file: string, body: string): void {
+    const firstLine = body.split('\n', 1)[0]?.trim() ?? '';
+    if (!/^[A-Za-z0-9+/]+={0,2} \d+$/.test(firstLine)) {
+        throw new TokenizerDownloadError(
+            repo,
+            `${file} is not a tiktoken rank table (got "${firstLine.slice(0, 40)}")`,
+        );
     }
 }

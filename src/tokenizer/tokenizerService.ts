@@ -61,6 +61,19 @@ export class TokenizerService implements vscode.Disposable {
      */
     private readonly unavailable = new Set<string>();
 
+    /**
+     * Bumped whenever every loaded vocabulary is disowned.
+     *
+     * `TokenizerStore.clear()` already refuses to write a download that finished
+     * after the user cleared the cache; this is the same guard one layer up. A
+     * download still in flight when "Clear Downloaded Tokenizers" ran would
+     * otherwise complete, be posted to the worker, recorded as loaded and
+     * announced as an accuracy change — repopulating the very thing the user was
+     * just told had been emptied. `forgetLoaded` could not prevent it, because
+     * it iterates `loadedRepos`, which the in-flight load had not joined yet.
+     */
+    private loadGeneration = 0;
+
     private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
     /** Fires when a tokenizer finishes downloading, so counts can be refreshed. */
     public readonly onDidChangeAccuracy = this.onDidChangeEmitter.event;
@@ -99,7 +112,12 @@ export class TokenizerService implements vscode.Disposable {
         // on every debounced keystroke. Above the cap the count degrades to the
         // same estimate used when the worker is unavailable, which the UI
         // already presents as "≈".
-        if (text.length > MAX_TOKENIZED_FILE_BYTES) {
+        // `Buffer.byteLength`, not `text.length`: the cap is a byte budget (the
+        // scan applies it to the stat's size) but this compared UTF-16 code
+        // units, and UTF-8 CJK is three bytes per unit — so a 25 MB CJK file
+        // measured 8 M here and sailed past the guard the constant exists to
+        // enforce, which is the allocation profile that took the host down.
+        if (Buffer.byteLength(text, 'utf8') > MAX_TOKENIZED_FILE_BYTES) {
             return { count: estimate(text, model), exact: false };
         }
 
@@ -151,7 +169,16 @@ export class TokenizerService implements vscode.Disposable {
             return;
         }
 
-        if (!(await this.ensureExact(model))) {
+        // `unavailable` means "this vocabulary cannot be used", which is a
+        // statement about the file, not about the worker. A worker crash mid-load
+        // rejects the pending request, and `handleWorkerExit` clears the set so
+        // the restarted worker can be re-sent everything — but this `add` ran
+        // *after* that clear and put the repo straight back, permanently
+        // degrading the model to an estimate for the rest of the session. Only
+        // record the failure if the worker we were talking to is still the one
+        // in use.
+        const worker = this.worker;
+        if (!(await this.ensureExact(model)) && this.worker === worker) {
             this.unavailable.add(repo);
         }
     }
@@ -185,6 +212,7 @@ export class TokenizerService implements vscode.Disposable {
      */
     public async forgetLoaded(): Promise<void> {
         const repos = [...this.loadedRepos];
+        this.loadGeneration++;
         this.loadedRepos.clear();
         this.unavailable.clear();
 
@@ -245,12 +273,26 @@ export class TokenizerService implements vscode.Disposable {
         kind: AssetKind,
         token?: vscode.CancellationToken,
     ): Promise<boolean> {
+        const generation = this.loadGeneration;
+
         try {
             const asset = await this.store.fetch(repo, kind, token);
             const response = await this.send({ type: 'loadTokenizer', id: 0, repo, asset });
 
             if (response.type === 'error') {
                 this.log.error(`Could not load the tokenizer for ${repo}: ${response.message}`);
+                return false;
+            }
+
+            // Disowned while we were downloading: undo the load rather than
+            // announce it, or the cache the user just cleared comes back.
+            if (generation !== this.loadGeneration) {
+                this.log.info(`Discarding ${repo}: the cache was cleared while it was loading`);
+                try {
+                    await this.send({ type: 'evict', id: 0, repo });
+                } catch (error) {
+                    this.log.debug(`Could not evict ${repo}: ${describe(error)}`);
+                }
                 return false;
             }
 
