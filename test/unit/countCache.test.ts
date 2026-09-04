@@ -1,10 +1,27 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 
-import { CountCache } from '../../src/countCache';
+import {
+    CountCache,
+    isBinaryOutcome,
+    type CachedCount,
+    type CachedOutcome,
+} from '../../src/countCache';
 
 const A = vscode.Uri.file('/repo/src/a.ts');
 const B = vscode.Uri.file('/repo/src/b.ts');
+
+/**
+ * Read back a cached count, asserting it is a count and not a binary verdict.
+ *
+ * `get` returns a union now that the cache also remembers "this file is
+ * binary"; these tests are all about the count arm.
+ */
+function counted(outcome: CachedOutcome | undefined): CachedCount {
+    assert.ok(outcome, 'nothing was cached');
+    assert.ok(!isBinaryOutcome(outcome), 'expected a count, got a binary verdict');
+    return outcome;
+}
 
 suite('count cache', () => {
     let cache: CountCache;
@@ -24,7 +41,7 @@ suite('count cache', () => {
         // it dropped the marker while the number stayed a guess. This is the
         // whole reason the cache is its own module.
         cache.set('claude-opus-5', A, 100, { count: 42, exact: false });
-        assert.strictEqual(cache.get('claude-opus-5', A, 100)?.exact, false);
+        assert.strictEqual(counted(cache.get('claude-opus-5', A, 100)).exact, false);
     });
 
     test('a different model does not read another model\'s count', () => {
@@ -74,7 +91,7 @@ suite('count cache', () => {
         cache.set('a', vscode.Uri.file('/b'), 1, { count: 111, exact: true });
         cache.set('a\nfile:///b', vscode.Uri.file('/c'), 1, { count: 222, exact: true });
 
-        assert.strictEqual(cache.get('a', vscode.Uri.file('/b'), 1)?.count, 111);
+        assert.strictEqual(counted(cache.get('a', vscode.Uri.file('/b'), 1)).count, 111);
     });
 
     test('clear empties it', () => {
@@ -93,5 +110,46 @@ suite('count cache', () => {
         const src = vscode.Uri.joinPath(here, '..', '..', '..', 'src', 'extension.ts');
         const bytes = await vscode.workspace.fs.readFile(src);
         assert.ok(!bytes.includes(0), 'src/extension.ts must not contain a NUL byte');
+    });
+});
+
+suite('count cache: binary verdicts', () => {
+    let cache: CountCache;
+
+    setup(() => {
+        cache = new CountCache();
+    });
+
+    test('a binary verdict is remembered and read back as one', () => {
+        // Reaching the verdict costs a full read of the file — up to the 10 MB
+        // cap — and BINARY_EXTENSIONS cannot list every binary format, so
+        // .wasm, .parquet, .pt and friends were re-read end to end on every
+        // project scan, which re-runs seconds after every save.
+        cache.set('gpt-5.6-sol', A, 100, { binary: true });
+
+        const outcome = cache.get('gpt-5.6-sol', A, 100);
+        assert.ok(outcome);
+        assert.ok(isBinaryOutcome(outcome), 'a binary verdict came back as a count');
+    });
+
+    test('a binary verdict expires with the mtime, like a count', () => {
+        cache.set('gpt-5.6-sol', A, 100, { binary: true });
+        assert.strictEqual(cache.get('gpt-5.6-sol', A, 101), undefined);
+    });
+
+    test('a binary verdict does not leak across models', () => {
+        cache.set('gpt-5.6-sol', A, 100, { binary: true });
+        assert.strictEqual(cache.get('claude-opus-5', A, 100), undefined);
+    });
+
+    test('a file that stops being binary is recounted', () => {
+        // Overwriting a placeholder with real text keeps the path and changes
+        // the mtime; the stale verdict must not survive.
+        cache.set('gpt-5.6-sol', A, 100, { binary: true });
+        cache.set('gpt-5.6-sol', A, 200, { count: 12, exact: true });
+
+        const outcome = cache.get('gpt-5.6-sol', A, 200);
+        assert.ok(outcome && !isBinaryOutcome(outcome));
+        assert.strictEqual(outcome.count, 12);
     });
 });

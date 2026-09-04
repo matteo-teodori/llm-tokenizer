@@ -18,9 +18,23 @@ export interface CachedCount {
     exact: boolean;
 }
 
-interface Entry extends CachedCount {
-    mtime: number;
+/**
+ * What a previous pass concluded about a file: a count, or that it is binary.
+ *
+ * The binary verdict is cached too, and that is not a micro-optimisation.
+ * `BINARY_EXTENSIONS` cannot cover everything — .wasm, .jar, .node, .parquet,
+ * .npy, .pkl, .pt and friends all reach the content sniff — and the verdict was
+ * reached by reading the file *whole*, up to the 10 MB cap. Without this the
+ * project scan re-read every one of them end to end, and it re-runs a couple of
+ * seconds after every save.
+ */
+export type CachedOutcome = CachedCount | { binary: true };
+
+export function isBinaryOutcome(outcome: CachedOutcome): outcome is { binary: true } {
+    return 'binary' in outcome;
 }
+
+type Entry = { mtime: number } & CachedOutcome;
 
 export class CountCache {
     private readonly entries = new Map<string, Entry>();
@@ -37,16 +51,18 @@ export class CountCache {
         return `${modelId}\n${uri.toString()}`;
     }
 
-    /** The cached count, if one was stored for this exact file revision. */
-    public get(modelId: string, uri: Uri, mtime: number): CachedCount | undefined {
+    /** What was stored for this exact file revision, if anything. */
+    public get(modelId: string, uri: Uri, mtime: number): CachedOutcome | undefined {
         const entry = this.entries.get(CountCache.key(modelId, uri));
         if (!entry || entry.mtime !== mtime) {
             return undefined;
         }
-        return { count: entry.count, exact: entry.exact };
+        return isBinaryOutcome(entry)
+            ? { binary: true }
+            : { count: entry.count, exact: entry.exact };
     }
 
-    public set(modelId: string, uri: Uri, mtime: number, value: CachedCount): void {
+    public set(modelId: string, uri: Uri, mtime: number, value: CachedOutcome): void {
         this.entries.set(CountCache.key(modelId, uri), { ...value, mtime });
     }
 

@@ -26,7 +26,7 @@ import {
     type SkipReason,
 } from './scan';
 import { accuracyOf, isDownloadable } from './tokenizer/encoders';
-import { CountCache } from './countCache';
+import { CountCache, isBinaryOutcome } from './countCache';
 import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 
 const CONFIG_SECTION = 'llm-tokenizer';
@@ -663,7 +663,7 @@ async function countFile(
         const stat = await vscode.workspace.fs.stat(uri);
         const cached = countCache.get(model.id, uri, stat.mtime);
         if (cached) {
-            return cached;
+            return isBinaryOutcome(cached) ? { skip: 'binary' } : cached;
         }
 
         // Reading bytes rather than `openTextDocument`: opening a TextDocument
@@ -672,13 +672,26 @@ async function countFile(
         // 70k lifecycle events flooding tsserver, ESLint and friends.
         const bytes = await vscode.workspace.fs.readFile(uri);
         if (looksBinary(bytes)) {
+            // Cached under the same key as a count. The verdict cost a full read
+            // and the answer cannot change without the mtime changing.
+            if (stillValid()) {
+                countCache.set(model.id, uri, stat.mtime, { binary: true });
+            }
             return { skip: 'binary' };
         }
 
         const text = new TextDecoder().decode(bytes);
         const { count, exact } = await tokenizer.count(text, model);
 
-        if (stillValid()) {
+        // A non-exact result is only cacheable when the estimate *is* this
+        // model's answer. For every other kind it means the count degraded — the
+        // worker crashed, timed out, or errored — and caching that pins the file
+        // to a guess. A downloadable model recovers when the download fires
+        // `onDidChangeAccuracy`, but a bundled tiktoken model emits no such
+        // event, so the wrong number would survive for the rest of the session.
+        // Recomputing an estimate costs one division, so nothing is lost.
+        const cacheable = exact || accuracyOf(model.encoder) === 'estimated';
+        if (stillValid() && cacheable) {
             countCache.set(model.id, uri, stat.mtime, { count, exact });
         }
         return { count, exact };
