@@ -35,3 +35,6 @@ Thumbs.db
 # (The fixture's own .gitignore uses *.tmp and vendor/ so its rules cannot
 # collide with the ones above.)
 !test/fixtures/**
+
+# Working notes, not part of the extension
+.notes/
