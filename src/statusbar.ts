@@ -29,6 +29,16 @@ export class StatusBarManager {
     private readonly projectItem: vscode.StatusBarItem;
     private hasFileCount = false;
     private hasProjectCount = false;
+    /**
+     * Remembered so the `clear*` methods can re-derive visibility.
+     *
+     * They used to hide their own item directly, which is not the same thing:
+     * `applyDisplayMode` shows the file item in `project` mode when there is no
+     * project count, so the identical state rendered one way when reached
+     * through `applyDisplayMode` and as an empty status bar when reached through
+     * `clearProjectCount`.
+     */
+    private projectScanEnabled = true;
 
     constructor(context: vscode.ExtensionContext) {
         this.fileItem = vscode.window.createStatusBarItem('llm-tokenizer.file', vscode.StatusBarAlignment.Right, 100);
@@ -56,7 +66,7 @@ export class StatusBarManager {
 
     public clearFileCount(): void {
         this.hasFileCount = false;
-        this.fileItem.hide();
+        this.applyDisplayMode(this.projectScanEnabled);
     }
 
     public showProjectCount(display: CountDisplay): void {
@@ -72,7 +82,7 @@ export class StatusBarManager {
 
     public clearProjectCount(): void {
         this.hasProjectCount = false;
-        this.projectItem.hide();
+        this.applyDisplayMode(this.projectScanEnabled);
     }
 
     /**
@@ -82,6 +92,8 @@ export class StatusBarManager {
      * naive reading hides both items and makes the extension look uninstalled.
      */
     public applyDisplayMode(projectScanEnabled: boolean): void {
+        this.projectScanEnabled = projectScanEnabled;
+
         const configured = vscode.workspace
             .getConfiguration('llm-tokenizer')
             .get<string>('statusBarDisplay', DEFAULT_DISPLAY_MODE);

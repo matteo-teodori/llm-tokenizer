@@ -7,10 +7,16 @@ import { findModel, defaultModel, MODELS, MODEL_ALIASES, type ModelInfo } from '
 import { StatusBarManager } from './statusbar';
 import { showMultiFileSummary } from './webview';
 import { formatNumber } from './utils';
-import { STORAGE_KEY, DEBOUNCE_DELAY_MS, PROJECT_UPDATE_DELAY_MS } from './constants';
+import {
+    STORAGE_KEY,
+    DEBOUNCE_DELAY_MS,
+    PROJECT_UPDATE_DELAY_MS,
+    PROJECT_SCAN_MAX_DELAY_MS,
+} from './constants';
 import {
     FolderContext,
     buildExcludeGlob,
+    couldAffectCount,
     dedupeSelection,
     describeSkipReason,
     collectFiles,
@@ -36,6 +42,26 @@ let currentModel: ModelInfo;
 
 let statusBarTimer: NodeJS.Timeout | undefined;
 let projectScanTimer: NodeJS.Timeout | undefined;
+/**
+ * The latest a debounced project scan may be deferred to, as a timestamp.
+ *
+ * The debounce re-armed on every event, so a workspace under continuous churn —
+ * an agent writing a file a second, a dev server rewriting a log — pushed the
+ * scan out indefinitely and the total simply stopped updating. The window still
+ * collapses a burst into one scan; it can no longer postpone one forever.
+ */
+let projectScanDeadline = 0;
+
+/**
+ * Incremented whenever a file count is superseded.
+ *
+ * `refreshFileStatusBar` re-checked the active editor but not the ordering, and
+ * the two counting paths are not FIFO: an empty or oversized document returns
+ * without reaching the worker, and a model whose vocabulary still has to be read
+ * from disk and built blocks for seconds first. So a refresh started earlier
+ * could resolve later and overwrite a newer count, which then stayed on screen.
+ */
+let fileCountGeneration = 0;
 
 /** Per-file counts, keyed by model and file revision. See src/countCache.ts. */
 const countCache = new CountCache();
@@ -103,7 +129,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
     clearTimeout(statusBarTimer);
-    clearTimeout(projectScanTimer);
+    cancelProjectScan();
     scanGeneration++;
     countCache.clear();
 }
@@ -220,8 +246,12 @@ async function setModel(context: vscode.ExtensionContext, modelId: string): Prom
     await context.globalState.update(STORAGE_KEY, model.id);
 
     // Counts are model-specific; keeping them would show the previous model's
-    // numbers under the new model's name.
+    // numbers under the new model's name. The project item is cleared as well
+    // as invalidated: a cold rescan takes seconds on a large repo, and until it
+    // finished the bar kept showing the old model's total, metered and coloured
+    // against the old model's context limit under the new model's name.
     invalidateCounts();
+    statusBar.clearProjectCount();
     log.info(`Model set to ${model.id}`);
 
     void refreshFileStatusBar(vscode.window.activeTextEditor);
@@ -356,7 +386,17 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => debounceStatusBar(editor)),
 
-        vscode.window.onDidChangeTextEditorSelection(e => debounceStatusBar(e.textEditor)),
+        // Filtered to the active editor, as the document listener below already
+        // is. This event fires for *any* visible editor whose selection moves —
+        // including the other half of a split showing the same document — and an
+        // update armed for a non-active editor is dropped by the guard inside
+        // `refreshFileStatusBar`, so it cancelled the real update rather than
+        // delaying it.
+        vscode.window.onDidChangeTextEditorSelection(e => {
+            if (e.textEditor === vscode.window.activeTextEditor) {
+                debounceStatusBar(e.textEditor);
+            }
+        }),
 
         vscode.workspace.onDidChangeTextDocument(e => {
             // Only real files, and only the one on screen. v1.3.0 also rescanned
@@ -380,8 +420,9 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
         vscode.workspace.onDidCreateFiles(() => debounceProjectScan()),
 
         vscode.workspace.onDidDeleteFiles(e => {
-            // The event names exactly which files went, so a branch switch no
-            // longer forces a cold re-tokenisation of the entire workspace.
+            // Explorer and applyEdit deletions only. A `git checkout` or an rm
+            // from a terminal fires nothing here — see the watcher below, which
+            // is what actually covers a branch switch.
             for (const uri of e.files) {
                 countCache.deleteFile(uri);
             }
@@ -439,10 +480,56 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
                 // Stop the in-flight scan; otherwise it completes minutes later
                 // and writes a total into a bar the user just turned off.
                 scanGeneration++;
-                clearTimeout(projectScanTimer);
+                cancelProjectScan();
                 statusBar.clearProjectCount();
             }
         }),
+    );
+
+    registerFileWatcher(context);
+}
+
+/**
+ * Watch the workspace for changes made outside the editor.
+ *
+ * Every listener above is driven by an editor gesture. `vscode.d.ts` is explicit
+ * that `onDidCreateFiles`, `onDidDeleteFiles` and `onDidRenameFiles` are "*not*
+ * fired when files change on disk, e.g triggered by another application, or when
+ * using the workspace.fs-api", and a save event needs VS Code to have done the
+ * saving. So none of them see a coding agent writing files, a `git checkout`, an
+ * `npm install`, or a formatter run from a terminal — and the workspace total
+ * went stale and stayed stale until some unrelated save happened to trigger a
+ * rescan. A FileSystemWatcher is the only API that reports these.
+ *
+ * The per-file count is unaffected: VS Code reloads an open document when its
+ * file changes underneath it, which does fire `onDidChangeTextDocument`.
+ */
+function registerFileWatcher(context: vscode.ExtensionContext): void {
+    // A plain string pattern watches every workspace folder, follows folders as
+    // they are added or removed, and — unlike a RelativePattern — is served by
+    // the recursive watcher VS Code already runs, so it honours the user's
+    // `files.watcherExclude` and costs nothing extra.
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*');
+
+    const changed = (uri: vscode.Uri): void => {
+        if (!couldAffectCount(uri)) {
+            return;
+        }
+        // The cache is keyed by mtime, so a changed file re-counts on its own;
+        // this only stops entries accumulating for paths that are now gone.
+        countCache.deleteFile(uri);
+        debounceProjectScan();
+    };
+
+    context.subscriptions.push(
+        watcher,
+        watcher.onDidCreate(uri => {
+            if (couldAffectCount(uri)) {
+                debounceProjectScan();
+            }
+        }),
+        watcher.onDidChange(changed),
+        watcher.onDidDelete(changed),
     );
 }
 
@@ -451,9 +538,31 @@ function debounceStatusBar(editor: vscode.TextEditor | undefined): void {
     statusBarTimer = setTimeout(() => void refreshFileStatusBar(editor), DEBOUNCE_DELAY_MS);
 }
 
+/**
+ * Schedule a project scan, coalescing a burst of changes into one run.
+ *
+ * Bounded by `PROJECT_SCAN_MAX_DELAY_MS`: without a ceiling the timer restarted
+ * on every event, so steady churn starved the scan completely.
+ */
 function debounceProjectScan(): void {
+    const now = Date.now();
+    if (projectScanTimer === undefined) {
+        projectScanDeadline = now + PROJECT_SCAN_MAX_DELAY_MS;
+    }
+
     clearTimeout(projectScanTimer);
-    projectScanTimer = setTimeout(() => void refreshProjectCount(), PROJECT_UPDATE_DELAY_MS);
+    const delay = Math.max(0, Math.min(PROJECT_UPDATE_DELAY_MS, projectScanDeadline - now));
+    projectScanTimer = setTimeout(() => {
+        projectScanTimer = undefined;
+        void refreshProjectCount();
+    }, delay);
+}
+
+/** Cancel a pending scan and reset its deadline, so the next burst starts fresh. */
+function cancelProjectScan(): void {
+    clearTimeout(projectScanTimer);
+    projectScanTimer = undefined;
+    projectScanDeadline = 0;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -478,18 +587,27 @@ async function refreshFileStatusBar(editor: vscode.TextEditor | undefined): Prom
     const hasSelection = !editor.selection.isEmpty;
     const text = hasSelection ? document.getText(editor.selection) : document.getText();
 
-    const { count, exact } = await tokenizer.count(text, currentModel);
+    // Snapshotted for the whole operation, as countSelection already does. Read
+    // twice — once to count, once to display — a model switch mid-count rendered
+    // model A's number under model B's name, limit and exact/estimated wording:
+    // an estimate could lose its ≈, and the context meter metered the wrong limit.
+    const model = currentModel;
+    const generation = ++fileCountGeneration;
+
+    const { count, exact } = await tokenizer.count(text, model);
 
     // The editor may have changed while we were counting; writing the result
-    // now would show file A's count while file B is on screen.
-    if (vscode.window.activeTextEditor !== editor || document.isClosed) {
+    // now would show file A's count while file B is on screen. The generation
+    // check covers the other direction: a newer count that already landed must
+    // not be overwritten by an older one that took longer to arrive.
+    if (generation !== fileCountGeneration || vscode.window.activeTextEditor !== editor || document.isClosed) {
         return;
     }
 
     statusBar.showFileCount({
         count,
         exact,
-        model: currentModel,
+        model,
         isSelection: hasSelection,
         projectScanEnabled: isProjectScanEnabled(),
     });

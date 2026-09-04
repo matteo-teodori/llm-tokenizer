@@ -11,6 +11,15 @@ export const DEBOUNCE_DELAY_MS = 300;
 /** Debounce delay for project-wide token count updates (ms) */
 export const PROJECT_UPDATE_DELAY_MS = 2000;
 
+/**
+ * Longest a project scan may be deferred while changes keep arriving (ms).
+ *
+ * The debounce above restarts on every change, which is right for a burst — an
+ * agent rewriting twenty files — but wrong for a workspace that never goes
+ * quiet for two seconds. Without a ceiling the total simply stopped updating.
+ */
+export const PROJECT_SCAN_MAX_DELAY_MS = 10_000;
+
 /** Context limit warning threshold (percentage) */
 export const CONTEXT_WARNING_THRESHOLD = 80;
 

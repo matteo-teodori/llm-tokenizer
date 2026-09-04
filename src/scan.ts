@@ -165,6 +165,27 @@ export function describeSkipReason(reason: SkipReason): string {
  * traversal — and loose git objects have no extension, so they sailed past the
  * binary check and got tokenized as compressed text.
  */
+/**
+ * Whether a path could contribute to a count, judged from the path alone.
+ *
+ * Used to filter file-watcher events before they re-arm a scan. It has to be
+ * allocation-free and synchronous: a `git checkout` or an `npm install`
+ * delivers thousands of these, and the whole point of the filter is that
+ * `.git/`, `node_modules/` and build output must not keep a scan re-arming
+ * forever. Deliberately conservative — it never consults `.gitignore`, so a
+ * gitignored file still triggers a scan that then ignores it, which costs one
+ * rescan rather than a wrong total.
+ */
+export function couldAffectCount(uri: vscode.Uri): boolean {
+    if (uri.scheme !== 'file') {
+        return false;
+    }
+    if (BINARY_EXTENSIONS.has(path.extname(uri.path).toLowerCase())) {
+        return false;
+    }
+    return !uri.path.split('/').some(segment => IGNORED_DIRECTORIES.has(segment));
+}
+
 export function buildExcludeGlob(): string {
     return `{${[...IGNORED_DIRECTORIES].map(dir => `**/${dir}/**`).join(',')}}`;
 }
