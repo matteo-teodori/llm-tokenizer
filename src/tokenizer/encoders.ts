@@ -116,7 +116,26 @@ export interface Encoder {
  * all five costs ~250 ms and ~200 MB of heap. Loading only the active model's
  * encoding costs ~70 ms and ~30 MB.
  */
-type GptTokenizerModule = { countTokens(text: string): number };
+type GptTokenizerModule = {
+    countTokens(text: string, options?: { disallowedSpecial?: ReadonlySet<string> }): number;
+};
+
+/**
+ * Passed as `disallowedSpecial` so special-token literals are encoded as text.
+ *
+ * `gpt-tokenizer` disallows every special token by default and *throws* on
+ * input containing one, rather than encoding it. A file holding the literal
+ * `<|endoftext|>` — a prompt template, a tokenizer_config.json, a fine-tuning
+ * dataset, this project's own tests — therefore failed to count, and the
+ * failure was invisible: the worker reported an error, the service fell back to
+ * `length / 3.8`, and because the scan folds `exact &&=` across every file, one
+ * such file relabelled an entire exact workspace as an estimate.
+ *
+ * An empty set restores the behaviour the other two backends already have and
+ * the one the comments argue for: special tokens belong to chat templating, not
+ * to the contents of a file. Shared and frozen — it is read on every count.
+ */
+const ENCODE_LITERALLY: ReadonlySet<string> = new Set<string>();
 
 const tiktokenCache = new Map<TiktokenEncoding, Encoder>();
 
@@ -141,7 +160,7 @@ function tiktokenEncoder(encoding: TiktokenEncoding): Encoder {
         exact: true,
         // `countTokens` counts without materialising the token array, which
         // matters when walking a whole workspace.
-        count: text => mod.countTokens(text),
+        count: text => mod.countTokens(text, { disallowedSpecial: ENCODE_LITERALLY }),
     };
 
     tiktokenCache.set(encoding, encoder);

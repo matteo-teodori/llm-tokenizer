@@ -82,6 +82,68 @@ suite('tokenizer service', () => {
         }
     });
 
+    test('every tiktoken encoding the registry names is actually shipped', async () => {
+        // build.mjs writes one file per encoding into out/encodings/ and
+        // encoders.ts requires them by path at runtime. The two lists are
+        // maintained by hand in different files — the TiktokenEncoding union
+        // says "must stay in sync with ENCODINGS in build.mjs" and nothing
+        // checked it. A registry entry naming an encoding that was not built
+        // throws MODULE_NOT_FOUND inside the worker, which the service catches
+        // and turns into a silent estimate for every OpenAI model.
+        const { MODELS } = await import('../../src/tokenizer/registry');
+        const encodings = new Set(
+            MODELS.map(m => m.encoder).flatMap(e => (e.kind === 'tiktoken' ? [e.encoding] : [])),
+        );
+        assert.ok(encodings.size > 0, 'no model uses a bundled encoding');
+
+        const dir = vscode.Uri.file(path.join(__dirname, '..', '..', '..', 'out', 'encodings'));
+        const built = new Set(
+            (await vscode.workspace.fs.readDirectory(dir))
+                .filter(([, type]) => type === vscode.FileType.File)
+                .map(([name]) => name.replace(/\.js$/, '')),
+        );
+
+        for (const encoding of encodings) {
+            assert.ok(built.has(encoding), `${encoding} is in the registry but was not built`);
+        }
+    });
+
+    test('a file containing a special-token literal still counts exactly', async () => {
+        // gpt-tokenizer disallows every special token by default and *throws* on
+        // input containing one. A prompt template, a tokenizer_config.json or a
+        // fine-tuning dataset holding the literal `<|endoftext|>` therefore
+        // failed to count, and failed invisibly: the service swallowed the error
+        // and returned a character estimate. Worse, the project scan folds
+        // `exact &&=` across files, so one such file relabelled an entire exact
+        // workspace as estimated.
+        //
+        // Entered through TokenizerService rather than the encoding module, so
+        // the whole chain — worker, protocol, error path — is under test. Both
+        // shipped OpenAI encodings are covered because their special-token sets
+        // differ (Harmony adds <|start|>, <|message|>, <|channel|> and friends).
+        const cases: [string, string][] = [
+            ['gpt-5.6-sol', '<|endoftext|>'],
+            ['gpt-4-turbo', '<|endoftext|>'],
+            ['gpt-oss-120b', '<|start|>system<|message|>hi<|end|>'],
+        ];
+
+        for (const [id, literal] of cases) {
+            const target = model(id);
+            const text = `prefix ${literal} suffix`;
+
+            const result = await tokenizer.count(text, target);
+
+            assert.ok(result.exact, `${id} degraded to an estimate on ${literal}`);
+            // The literal must be encoded as text, so it costs more than one
+            // token — a special token would be exactly one.
+            const plain = await tokenizer.count('prefix  suffix', target);
+            assert.ok(
+                result.count > plain.count + 1,
+                `${id} counted ${literal} as ${result.count - plain.count} token(s); it should be encoded as text`,
+            );
+        }
+    });
+
     test('counts OpenAI models exactly, with known values', async () => {
         // Golden values from tiktoken itself. A change here means the encoding
         // tables shifted, which would silently move every OpenAI count.
