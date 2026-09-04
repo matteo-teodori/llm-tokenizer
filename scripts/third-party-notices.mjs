@@ -10,58 +10,23 @@
  *   node scripts/third-party-notices.mjs           rewrite the notices
  *   node scripts/third-party-notices.mjs --check   fail if out of date (CI)
  *
- * The package list is derived from esbuild metafiles rather than from
- * package.json, so a dependency that stops being bundled drops out and a new
- * one cannot be forgotten. Run `npm run build` first — the entry points are
- * read from source, but the encodings list comes from the built output.
+ * The package list comes from `bundled-packages.mjs`, which derives it from
+ * esbuild's metafile rather than from package.json, so a dependency that stops
+ * being bundled drops out and a new one cannot be forgotten. Run `npm run
+ * build` first — the entry points are read from source, but the encodings list
+ * comes from the built output.
  */
 
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import * as esbuild from 'esbuild';
+import { bundledPackages } from './bundled-packages.mjs';
 
 const check = process.argv.includes('--check');
 const root = new URL('..', import.meta.url);
 const noticesPath = new URL('THIRD-PARTY-NOTICES.md', root);
 
-// The same three bundles build.mjs produces. Only one encoding is scanned:
-// they are all entry points into the same package.
-const BUNDLES = [
-    { entryPoints: ['src/extension.ts'], external: ['vscode'] },
-    { entryPoints: ['src/worker.ts'], external: ['vscode'] },
-    { entryPoints: ['gpt-tokenizer/encoding/o200k_base'], external: [] },
-];
-
-const bundled = new Set();
-
-for (const { entryPoints, external } of BUNDLES) {
-    const result = await esbuild.build({
-        entryPoints,
-        external,
-        bundle: true,
-        platform: 'node',
-        format: 'cjs',
-        target: 'node20',
-        write: false,
-        metafile: true,
-        logLevel: 'silent',
-        absWorkingDir: fileURLToPath(new URL('.', root)),
-    });
-
-    for (const input of Object.keys(result.metafile.inputs)) {
-        const at = input.lastIndexOf('node_modules/');
-        if (at < 0) {
-            continue;
-        }
-        const parts = input.slice(at + 'node_modules/'.length).split('/');
-        bundled.add(parts[0].startsWith('@') ? `${parts[0]}/${parts[1]}` : parts[0]);
-    }
-}
-
-if (bundled.size === 0) {
-    console.error('No bundled dependencies found — the metafile scan is broken.');
-    process.exit(1);
-}
+// Shared with the dependency audit, so the packages attributed here and the
+// packages gated there can never be two different lists.
+const bundled = await bundledPackages(root);
 
 const sections = [...bundled].sort().map(name => {
     const dir = new URL(`node_modules/${name}/`, root);

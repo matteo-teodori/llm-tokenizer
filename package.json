@@ -407,6 +407,7 @@
     "package": "npm run check-types && node build.mjs --production && node scripts/sync-manifest.mjs --check && node scripts/third-party-notices.mjs --check",
     "sync-manifest": "npm run build && node scripts/sync-manifest.mjs",
     "notices": "node scripts/third-party-notices.mjs",
+    "audit-bundled": "node scripts/audit-bundled.mjs",
     "lint": "eslint .",
     "pretest": "npm run compile-tests && npm run build",
     "test": "vscode-test",
