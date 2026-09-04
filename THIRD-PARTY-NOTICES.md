@@ -214,7 +214,7 @@ Apache License
    See the License for the specific language governing permissions and
    limitations under the License.
 ```
-## gpt-tokenizer 3.4.0
+## gpt-tokenizer 4.0.0
 
 MIT · https://github.com/niieani/gpt-tokenizer#readme
 
@@ -241,7 +241,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-## ignore 7.0.6
+## ignore 7.0.8
 
 MIT · https://www.npmjs.com/package/ignore
 
