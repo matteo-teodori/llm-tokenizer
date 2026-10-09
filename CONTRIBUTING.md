@@ -18,16 +18,25 @@ than a real repository.
 ## Layout
 
 ```
-src/            extension source, bundled by esbuild into out/
-  tokenizer/    the tokenizer engine: registry, encoders, worker protocol
-  scan.ts       workspace traversal, gitignore handling, file eligibility
-  extension.ts  activation, commands, event wiring
+src/              extension source, bundled by esbuild into out/
+  extension.ts    activation, commands, event wiring
+  tokenizer/      the tokenizer engine: registry, encoders, store, worker protocol
+  worker.ts       the tokenizer worker thread
+  workerHost.ts   starting a worker, correlating its requests, surviving its crashes
+  scan.ts         workspace traversal, gitignore handling, file eligibility
+  countCache.ts   per-file counts, keyed on model and file version
+  statusbar.ts    the file and project items, and their context-limit colouring
+  webview.ts      the summary panel and the messages it handles
+  summary/        the summary page: aggregation, languages, rendering
+  html.ts         escaping, the webview CSP, and the text helpers a page script runs
+  charts.ts       the theme tokens, meter and ranked bars the pages share
 test/
-  unit/         logic that does not need a real workspace
-  integration/  drives the extension host and the bundled worker
-  fixtures/     a deliberately awkward workspace the tests assert against
-scripts/        build-time tooling
-build.mjs       the bundler
+  unit/           logic that does not need a real workspace
+  integration/    drives the extension host and the bundled worker
+  fixtures/       a deliberately awkward workspace the tests assert against, the
+                  crashing workers, and a stand-in for ~/.claude
+scripts/          build-time tooling; bundles.mjs lists the bundles that ship
+build.mjs         the bundler
 ```
 
 `out/` holds the shipped bundles. `.test-out/` holds compiled tests and is never
@@ -41,9 +50,19 @@ packaged.
 | `npm run watch` | Rebuild on change |
 | `npm run check-types` | Type-check without emitting |
 | `npm run lint` | ESLint, type-aware |
-| `npm test` | Compile the tests and run them in VS Code |
+| `npm test` | Compile the tests and run them in the current VS Code |
+| `npm run test:floor` | The same suite on VS Code 1.105.0, the oldest `package.json` accepts |
 | `npm run sync-manifest` | Regenerate the settings dropdown from the registry |
-| `npm run package` | Everything a release needs, without publishing |
+| `npm run notices` | Regenerate `THIRD-PARTY-NOTICES.md` from the packages the bundles inline |
+| `npm run audit-bundled` | Audit only the packages the bundles inline, which is what ships |
+| `npm run package` | Type-check, production build, and the manifest and notices checks |
+| `npm run release` | `package`, then the VSIX itself; nothing is published |
+
+To debug a test, use the **Extension Tests** launch configuration. Like
+`npm test`, it runs in a profile of its own, without the login shell's
+environment, and with `CLAUDE_CONFIG_DIR` pointed at a fixture; its entry
+point refuses to run if that points anywhere else, so no test can read your own
+Claude Code data.
 
 ## Adding or changing a model
 
@@ -86,8 +105,11 @@ provider's billing are worse than no counts.
 
 - Keep the change focused; separate mechanical refactors from behaviour changes.
 - Add a test that fails without your fix.
-- Run `npm run lint && npm test` before pushing.
-- Add a `CHANGELOG.md` entry under `## [Unreleased]`. Leave `version` in
-  `package.json` alone — releases set it.
+- Run `npm run lint && npm test` before pushing; CI also runs
+  `npm run test:floor`.
+- Add a `CHANGELOG.md` entry under the release in progress: a dated section,
+  `## [x.y.z] - YYYY-MM-DD`, opened by the first change that needs an entry,
+  whose date is set again when it is tagged. Leave `version` in `package.json`
+  alone — releases set it.
 
 Commit messages explain *why*, not what. The diff already says what.

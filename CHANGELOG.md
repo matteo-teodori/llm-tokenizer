@@ -32,6 +32,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - The suite also runs on VS Code 1.105.0, the oldest version
   `package.json` accepts: `npm run test:floor` locally, and on Linux in CI
   and before every release.
+- CONTRIBUTING's layout and commands cover what exists now, and its
+  changelog rule matches the dated sections this file uses.
 
 ## [2.1.2] - 2026-10-09
 
