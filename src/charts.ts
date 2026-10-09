@@ -101,13 +101,22 @@ export const RANKED_BARS_CSS = `/* ── Ranked bars ────────�
 /**
  * A meter: one ratio against a limit. The fill is clamped to the track, so a
  * value far over the limit cannot spill out of the panel; `figure` and
- * `caption` sit beside it.
+ * `caption` sit beside it, and `name` is what a screen reader calls it.
  */
-export function meter(share: number, severity: Severity, figure: string, caption: string): string {
+export function meter(
+    share: number,
+    severity: Severity,
+    figure: string,
+    caption: string,
+    name: string,
+): string {
     const filled = Math.min(share, 1) * 100;
 
+    // A meter role, so assistive technology announces a value rather than
+    // two bare boxes. aria-valuenow must stay inside its range, so it is
+    // clamped like the fill, and aria-valuetext carries the real figure.
     return `
-    <div class="meter" data-severity="${severity}">
+    <div class="meter" data-severity="${severity}" role="meter" aria-label="${escapeHtml(name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(filled)}" aria-valuetext="${escapeHtml(`${figure} ${caption}`)}">
         <div class="meter-track"><div class="meter-fill" style="width: ${filled.toFixed(2)}%"></div></div>
         <div class="meter-caption"><strong>${escapeHtml(figure)}</strong> ${escapeHtml(caption)}</div>
     </div>`;

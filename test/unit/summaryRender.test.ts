@@ -118,6 +118,25 @@ suite('summary page', () => {
         assert.deepStrictEqual(widths, [100, 25]);
     });
 
+    test('sorting, opening a file and the meter work from the keyboard', () => {
+        // Sorting and opening a file were click handlers on a <th> and on an
+        // <a> with no href, neither of which the keyboard can reach, and the
+        // meter was two bare boxes that announced nothing.
+        const html = render({ totalTokens: 2_500, contextLimit: 10_000 });
+
+        assert.ok(html.includes('<th aria-sort="none"><button type="button" data-sort="path">'), 'Path');
+        assert.ok(
+            html.includes('<th aria-sort="descending" class="num"><button type="button" data-sort="tokens">'),
+            'Tokens, the initial sort, largest first',
+        );
+        assert.ok(!/<th[^>]*data-sort/.test(html), 'a header cell is still the click target');
+
+        assert.ok(html.includes(`'<tr><td><button type="button" class="file-link"`), 'rows open files from a button');
+        assert.ok(!html.includes('<a class="file-link"'));
+
+        assert.ok(/role="meter"[^>]*aria-valuenow="25"/.test(html), 'the meter has no value for assistive technology');
+    });
+
     test('discloses files counted but not listed', () => {
         assert.ok(render({ filesNotListed: 1_500 }).includes('1,500'));
         assert.ok(!render({ filesNotListed: 0 }).includes('not listed'));

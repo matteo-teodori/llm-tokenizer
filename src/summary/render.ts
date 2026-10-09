@@ -83,7 +83,7 @@ function contextMeter(view: SummaryView): string {
                 ? `Approaching the ${formatNumber(view.contextLimit)} token limit`
                 : `of ${formatNumber(view.contextLimit)} tokens`;
 
-    return meter(share, severity, `${percent}%`, verdict);
+    return meter(share, severity, `${percent}%`, verdict, 'Context window used');
 }
 
 function statRow(view: SummaryView): string {
@@ -275,16 +275,38 @@ thead th {
     color: var(--ink-muted);
     padding: 4px 8px;
     border-bottom: 1px solid var(--hairline);
+}
+thead th.num { text-align: right; }
+/* Real buttons, so sorting works from the keyboard; styled as the header. */
+thead th button {
+    font: inherit;
+    color: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
     cursor: pointer;
     user-select: none;
 }
-thead th.num { text-align: right; }
 tbody td { padding: 3px 8px; }
 tbody tr:hover { background: var(--vscode-list-hoverBackground); }
 td.num { text-align: right; font-variant-numeric: tabular-nums; width: 96px; }
 td.share { text-align: right; color: var(--ink-muted); width: 60px; font-variant-numeric: tabular-nums; font-size: .9em; }
-.file-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
+/* A button that looks like a link: it opens a file, it does not navigate. */
+.file-link {
+    color: var(--vscode-textLink-foreground);
+    cursor: pointer;
+    text-decoration: none;
+    font: inherit;
+    text-align: left;
+    background: none;
+    border: 0;
+    padding: 0;
+}
 .file-link:hover { text-decoration: underline; }
+thead th button:focus-visible,
+.file-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .note, .empty { color: var(--ink-muted); font-size: 0.9em; margin: 10px 0 0; }
 .truncation {
     color: var(--ink-muted);
@@ -329,8 +351,8 @@ ${breakdown('By language', view.byLanguage, 'Everything is one language.')}
     <table>
         <thead>
             <tr>
-                <th data-sort="path">Path</th>
-                <th data-sort="tokens" class="num">Tokens</th>
+                <th aria-sort="none"><button type="button" data-sort="path">Path</button></th>
+                <th aria-sort="descending" class="num"><button type="button" data-sort="tokens">Tokens</button></th>
                 <th class="num">Share</th>
             </tr>
         </thead>
@@ -393,9 +415,9 @@ ${PAGE_TEXT_HELPERS}
         // thousand rows.
         tbody.innerHTML = visible
             .map((f, i) =>
-                '<tr><td><a class="file-link" data-i="' + i + '">' +
+                '<tr><td><button type="button" class="file-link" data-i="' + i + '">' +
                 escapeText(f.display) +
-                '</a></td><td class="num">' +
+                '</button></td><td class="num">' +
                 f.tokens.toLocaleString('en-US') +
                 '</td><td class="share">' + share(f.tokens) + '</td></tr>')
             .join('');
@@ -405,11 +427,22 @@ ${PAGE_TEXT_HELPERS}
 
     filter.addEventListener('input', render);
 
-    document.querySelectorAll('th[data-sort]').forEach(th => {
-        th.addEventListener('click', () => {
-            const key = th.dataset.sort;
+    // Sorting was a click handler on the header cell, which the keyboard
+    // cannot reach; the cells now hold buttons. aria-sort sits on the cells,
+    // so a screen reader says which column the rows follow, and which way.
+    const sortButtons = document.querySelectorAll('button[data-sort]');
+    function showSort() {
+        sortButtons.forEach(button => {
+            const state = button.dataset.sort !== sortKey ? 'none' : ascending ? 'ascending' : 'descending';
+            button.parentElement.setAttribute('aria-sort', state);
+        });
+    }
+    sortButtons.forEach(button => {
+        button.addEventListener('click', () => {
+            const key = button.dataset.sort;
             ascending = key === sortKey ? !ascending : key === 'path';
             sortKey = key;
+            showSort();
             render();
         });
     });
@@ -441,6 +474,7 @@ ${PAGE_TEXT_HELPERS}
         });
     });
 
+    showSort();
     render();
 })();
 </script>

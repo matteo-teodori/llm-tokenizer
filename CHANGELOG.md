@@ -14,6 +14,10 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   four settings that change a count or the display do that now, and turning
   downloads on starts the current model's download straight away rather
   than at the next reload.
+- **The summary page works from the keyboard.** Sorting a column and
+  opening a file took a mouse. The column headers and the file names are
+  buttons now, the sorted column tells a screen reader which way it is
+  sorted, and the context meter announces its value.
 
 ### Internal
 - The bundles that ship are listed once, in `scripts/bundles.mjs`, which
