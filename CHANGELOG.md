@@ -48,6 +48,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
     vocabulary's ratio, so their estimates drop by about 5%.
   - GLM-5-Turbo uses the GLM-5 vocabulary's ratio, the MiniMax M3.1 Flash
     preview M3's, and the Mistral Large 4 preview Tekken's.
+  - Claude Opus 4.6, Sonnet 4.6 and earlier now use 3.3 characters a token
+    instead of 3.4, so their estimates rise by about 3%. Against the newer
+    tokenizer's 2.5, 3.4 implied a gap of 36% in token count, past the 35%
+    Anthropic gives as the most; 3.3 puts it at 32%, near Anthropic's
+    typical 30%.
 
   The downloadable Gemini, Gemma and Qwen models show the same estimates
   until their vocabulary arrives.

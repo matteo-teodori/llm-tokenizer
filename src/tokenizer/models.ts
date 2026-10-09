@@ -37,11 +37,13 @@ import type { ModelInfo } from './registry';
 const CLAUDE_CURRENT = 2.5;
 
 /**
- * Claude up to and including the 4.6 generation. Also Anthropic's figure, by
- * way of words: 1M tokens held "about 750k words" before 4.7, against 555k
- * words (2.5M characters) now, which comes to about 3.4 characters a token.
+ * Claude up to and including the 4.6 generation. Anthropic's own figures put
+ * it between 3.25 (the newer tokenizer's 2.5 with its typical 30% more tokens)
+ * and 3.38 (1M tokens held "about 750k words" before 4.7, against 555k words,
+ * or 2.5M characters, now), and 3.3 lies between. 3.4, the figure before
+ * 2.1.2, implied a 36% gap: past the 35% Anthropic gives as the most.
  */
-const CLAUDE_LEGACY = 3.4;
+const CLAUDE_LEGACY = 3.3;
 
 /**
  * Grok. Uncalibrated: xAI publishes no tokenizer for any current model
