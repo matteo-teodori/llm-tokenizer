@@ -56,7 +56,8 @@ const shared = {
     bundle: true,
     platform: 'node',
     format: 'cjs',
-    // VS Code 1.104 ships Electron 34 / Node 20.
+    // Deliberately conservative. The engines floor, VS Code 1.105, ships
+    // Electron 37.6 / Node 22.19, and current builds Node 24.
     target: 'node20',
     minify: production,
     sourcemap: production ? false : 'linked',

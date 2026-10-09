@@ -262,8 +262,10 @@ export function hfEncoder(repo: string, files: HfTokenizerFiles): Encoder {
      * a beginning-of-sequence token — Mistral's does, so every file came back
      * one token heavy, and it was labelled exact. Those tokens belong to chat
      * templating, not to the contents of a file, so the constant is measured
-     * once here and subtracted. Llama, Qwen and DeepSeek use a plain ByteLevel
-     * post-processor and measure zero, so they are unaffected.
+     * once here and subtracted. Measured: Mistral Large 3 and Llama 3.3 add
+     * one token to the empty string (Llama's ByteLevel is followed by a
+     * TemplateProcessing step); Qwen 3.6 and DeepSeek V4 use a plain ByteLevel
+     * post-processor and add none.
      */
     const specialTokenBaseline = tokenizer.encode('').ids.length;
 
