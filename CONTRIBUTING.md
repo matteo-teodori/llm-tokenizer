@@ -69,7 +69,8 @@ For the encoder:
   their `tokenizer.json` files are byte-identical: compare sha256 hashes, never
   sizes.
 - **`heuristic`** if no tokenizer is public. Say so in a comment, and give a
-  ratio you have actually measured.
+  ratio you have actually measured: on a published relative's vocabulary if
+  there is one, rounded down so the estimate errs high.
 
 Never present an estimate as exact. Counts that quietly disagree with the
 provider's billing are worse than no counts.

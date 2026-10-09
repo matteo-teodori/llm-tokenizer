@@ -139,17 +139,20 @@ and both are read.
 |------|----------|--------|--------|
 | **Exact, offline** | `12,340` | OpenAI's own BPE, bundled | Every OpenAI model tiktoken maps (all but GPT-6) |
 | **Exact after one download** | `≈` → `12,340` | The model's published vocabulary (~2–28 MB, cached) | Llama, Muse Glimmer, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hy, Kimi |
-| **Estimated** | `≈12,340` | Calibrated characters per token | Claude, Grok, GPT-6, closed Qwen, recent Gemini, GLM-5-Turbo, the Mistral Large 4 and MiniMax M3.1 previews |
+| **Estimated** | `≈12,340` | A per-family characters-per-token ratio | Claude, Grok, GPT-6, closed Qwen, recent Gemini, GLM-5-Turbo, the Mistral Large 4 and MiniMax M3.1 previews |
 
 **Why some models are only estimated.** Anthropic and xAI do not publish a
 tokenizer for any current model, and Anthropic explicitly advises against
 approximating Claude with OpenAI's tokenizer. An honest estimate is better than
 a confident wrong number, so those models are marked rather than dressed up.
 
-The per-family ratios are measured against real corpora where a tokenizer
-exists to measure against. Grok is the exception: no Grok tokenizer has ever
-been published, so its ratio is inferred rather than measured, and it is the
-least reliable number here.
+Where a related tokenizer is published, the ratio is measured on it and rounded
+down, so the estimate errs high: o200k_base for GPT-6, Gemma's vocabulary for
+recent Gemini, the open Qwen3.6 vocabulary for closed Qwen, and the family's
+published vocabulary for GLM-5-Turbo and the two previews. Claude's two ratios
+come from Anthropic's own figures for its two tokenizers. Grok is the
+exception: no Grok tokenizer has ever been published, so its ratio is inferred
+rather than measured, and it is the least reliable number here.
 
 One limitation worth stating plainly: the ratios are calibrated on English prose
 and code and are applied per UTF-16 code unit, so an estimate for CJK text reads

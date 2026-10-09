@@ -28,7 +28,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   tokens on it. The new GPT-6 models are estimated for the same reason as
   GPT-6 Astra: OpenAI has published no encoding for them. The Mistral
   Large 4 and MiniMax M3.1 previews have no published tokenizer, so they
-  stay estimated until one ships.
+  are estimated, with their family's measured ratio, until one ships.
 
 ### Changed
 - **MiniMax model ids now use the capitalisation the API documents.**
@@ -37,6 +37,20 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   without a notice, since the model has not changed. An old id in the
   `defaultModel` setting keeps working, though VS Code flags it until it is
   updated.
+- **Estimates use a measured ratio wherever a related tokenizer exists.**
+  Each is the related vocabulary's characters per token on this
+  repository's own code and docs, rounded down so the estimate errs high.
+  - Gemini 3.8, 3.7 and 3.6 Flash and 3.5 Flash-Lite now use Gemma's
+    ratio, so their estimates rise by about 11%. The old figure had never
+    been measured and undercounted by about 9%, which is the direction that
+    says a prompt fits when it does not.
+  - Qwen3.7-Max, Plus and Flash and Qwen3.6-Plus now use the open Qwen3.6
+    vocabulary's ratio, so their estimates drop by about 5%.
+  - GLM-5-Turbo uses the GLM-5 vocabulary's ratio, the MiniMax M3.1 Flash
+    preview M3's, and the Mistral Large 4 preview Tekken's.
+
+  The downloadable Gemini, Gemma and Qwen models show the same estimates
+  until their vocabulary arrives.
 - **DeepSeek V4 Flash has been replaced by V4.1 Flash.** DeepSeek retired
   V4 Flash on 10 September and routes its id to V4.1 Flash
   (`deepseek-flash`), which has a tokenizer file of its own. A saved V4

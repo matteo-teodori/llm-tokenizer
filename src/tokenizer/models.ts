@@ -45,9 +45,6 @@ const CLAUDE_LEGACY = 3.4;
  */
 const GROK = 3.7;
 
-/** Gemini releases that Google's SDK does not yet map to a Gemma vocabulary. */
-const GEMINI_UNMAPPED = 4.0;
-
 /**
  * The GPT-6 models. Estimated, deliberately, even though every other OpenAI
  * model here is exact.
@@ -66,8 +63,41 @@ const GEMINI_UNMAPPED = 4.0;
  */
 const GPT6_UNMAPPED = 4.1;
 
-/** Qwen's closed-weight API models, proxied through the open Qwen3.6 vocab. */
-const QWEN_CLOSED = 3.6;
+// The next five stand in for models that publish no tokenizer but have a close
+// relative that does. Each is that relative's ratio, measured with the bundled
+// @huggingface/tokenizers on the same kind of corpus as GPT6_UNMAPPED — this
+// repository's own TypeScript, JSON, YAML, .mjs and Markdown at e706b82, 51
+// files and 433,335 UTF-16 units, on which o200k_base gives 4.132 — and
+// rounded down, so the estimate errs high.
+
+/**
+ * Gemini releases that Google's SDK does not yet map to a Gemma vocabulary.
+ * Every release it does map uses one, and Gemma 4's measures 3.652 (Gemma 3's
+ * 3.655).
+ */
+const GEMINI_UNMAPPED = 3.6;
+
+/**
+ * Qwen's API models with no open counterpart (3.7 and 3.6-Plus): the open
+ * Qwen3.6 vocabulary, which 3.8 keeps, measures 3.803. Also the estimate every
+ * downloadable Qwen model shows until its vocabulary arrives.
+ */
+const QWEN_CLOSED = 3.8;
+
+/** GLM-5-Turbo: the vocabulary every published GLM-5 model shares measures 4.128. */
+const GLM_UNPUBLISHED = 4.1;
+
+/**
+ * MiniMax M3.1 Flash: M3's vocabulary measures 4.114, and M2's encodes the
+ * corpus to identical ids, so the family has kept one vocabulary so far.
+ */
+const MINIMAX_UNPUBLISHED = 4.1;
+
+/**
+ * Mistral Large 4, until its weights ship: Tekken measures 3.855 with Large
+ * 3's file and 3.856 with Medium 3.5's.
+ */
+const MISTRAL_UNPUBLISHED = 3.8;
 
 /** Only used until Kimi's rank table has been downloaded. */
 const KIMI = 3.6;
@@ -318,8 +348,9 @@ export const MODELS: ModelInfo[] = [
     //
     // Large 4 is a public preview whose open weights are announced but not yet
     // published (its Hugging Face repo is a placeholder that returns 401), so
-    // it is estimated with the Tekken fallback, and its "1M" is taken literally
-    // until a config says otherwise. Revisit both when the weights ship.
+    // it is estimated with Tekken's measured ratio, MISTRAL_UNPUBLISHED, and its
+    // "1M" is taken literally until a config says otherwise. Revisit both when
+    // the weights ship.
     //
     // Large 3 has its own file; Medium 3.5 and Small 4 share another. The two
     // vocabularies differ only in reserved slots 36 and 37, so ordinary text
@@ -327,7 +358,7 @@ export const MODELS: ModelInfo[] = [
     // `[MODEL_SETTINGS]` is 1 token under Medium 3.5's own file and 6 under
     // Large 3's. Large 3's tokenizer also prepends a BOS token, which
     // `hfEncoder` already measures and subtracts.
-    { id: 'mistral-large-4-0', label: 'Mistral Large 4 (preview)', provider: 'Mistral', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: 3.0 } },
+    { id: 'mistral-large-4-0', label: 'Mistral Large 4 (preview)', provider: 'Mistral', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: MISTRAL_UNPUBLISHED } },
     { id: 'mistral-large-2512', label: 'Mistral Large 3', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistral, 3.0) },
     { id: 'mistral-medium-3-5', label: 'Mistral Medium 3.5', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistralMedium35, 3.0) },
     { id: 'mistral-small-2603', label: 'Mistral Small 4', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistralMedium35, 3.0) },
@@ -366,17 +397,18 @@ export const MODELS: ModelInfo[] = [
     // one model code line, "text parameters consistent with GLM-5.3", so it
     // takes Flash's vocabulary and window. GLM-5-Turbo is the reverse case:
     // Zhipu calls it separately optimised from the training phase, names no
-    // shared base, and publishes no tokenizer to hash, so it is estimated —
-    // even though every published GLM-5 file is byte-identical and a shared
-    // vocabulary is likely. Zhipu's /paas/v4/tokenizer endpoint accepts it, so
-    // with an API key the ratio could be calibrated.
+    // shared base, and publishes no tokenizer to hash, so it is estimated with
+    // the GLM-5 vocabulary's measured ratio, GLM_UNPUBLISHED. Every published
+    // GLM-5 file is byte-identical, so a shared vocabulary is likely, but
+    // likely is not exact. Zhipu's /paas/v4/tokenizer endpoint accepts it, so
+    // with an API key the ratio could be checked against the model itself.
     { id: 'glm-5.3', label: 'GLM-5.3', provider: 'Zhipu', contextLimit: 1_048_576, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5.3-flash', label: 'GLM-5.3-Flash', provider: 'Zhipu', contextLimit: 1_048_576, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5.3-flashx', label: 'GLM-5.3-FlashX', provider: 'Zhipu', contextLimit: 1_048_576, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5.2', label: 'GLM-5.2', provider: 'Zhipu', contextLimit: 1_048_576, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5.1', label: 'GLM-5.1', provider: 'Zhipu', contextLimit: 200_000, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5', label: 'GLM-5', provider: 'Zhipu', contextLimit: 200_000, encoder: hf(HF.glm, 3.6) },
-    { id: 'glm-5-turbo', label: 'GLM-5-Turbo', provider: 'Zhipu', contextLimit: 200_000, encoder: { kind: 'heuristic', charsPerToken: 3.6 } },
+    { id: 'glm-5-turbo', label: 'GLM-5-Turbo', provider: 'Zhipu', contextLimit: 200_000, encoder: { kind: 'heuristic', charsPerToken: GLM_UNPUBLISHED } },
 
     // ─────────────────────────────────────────────────────────────────────────
     // MiniMax — exact, except the M3.1 Flash preview.
@@ -389,9 +421,10 @@ export const MODELS: ModelInfo[] = [
     // M3.1 Flash is a closed preview (M Plan and MiniMax Code only, a public
     // subscription rather than an approval programme) with no published
     // tokenizer, and nothing first-party says it reuses M3's, so it is
-    // estimated with the family's ratio — the Grok situation, since MiniMax's
-    // server-side /v1/responses/input_tokens accepts it.
-    { id: 'MiniMax-M3.1-Flash-Preview', label: 'MiniMax M3.1 Flash (preview)', provider: 'MiniMax', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: 3.6 } },
+    // estimated with M3's measured ratio, MINIMAX_UNPUBLISHED. As with Grok,
+    // only the server counts it exactly: MiniMax's /v1/responses/input_tokens
+    // accepts it.
+    { id: 'MiniMax-M3.1-Flash-Preview', label: 'MiniMax M3.1 Flash (preview)', provider: 'MiniMax', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: MINIMAX_UNPUBLISHED } },
     { id: 'MiniMax-M3', label: 'MiniMax M3', provider: 'MiniMax', contextLimit: 1_000_000, encoder: hf(HF.minimax, 3.6) },
     { id: 'MiniMax-M2.7', label: 'MiniMax M2.7', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
     { id: 'MiniMax-M2.5', label: 'MiniMax M2.5', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
