@@ -82,6 +82,11 @@
         "category": "LLM Tokenizer"
       },
       {
+        "command": "llm-tokenizer.showClaudeCodeUsage",
+        "title": "Show Claude Code Usage",
+        "category": "LLM Tokenizer"
+      },
+      {
         "command": "llm-tokenizer.refreshClaudeCodeUsage",
         "title": "Refresh Claude Code Usage",
         "category": "LLM Tokenizer"

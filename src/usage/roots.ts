@@ -48,6 +48,11 @@ export interface ResolvedRoots {
     roots: RootCandidate[];
     /** Candidates outside `confineTo`, never read. */
     refused: RootCandidate[];
+    /**
+     * CLAUDE_CODE_SKIP_PROMPT_HISTORY is set where Claude Code would see it:
+     * then it keeps no transcripts, and there is nothing to read.
+     */
+    historyDisabled: boolean;
 }
 
 /**
@@ -104,7 +109,35 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
             roots.push(candidate);
         }
     }
-    return { candidates, roots, refused };
+    const disabled = [inputs.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, editorVariable(inputs.editorEnvironment, inputs.platform, 'CLAUDE_CODE_SKIP_PROMPT_HISTORY')];
+    return { candidates, roots, refused, historyDisabled: disabled.some(value => isTruthy(value)) };
+}
+
+/** What chose a root, in words, for the diagnostics. */
+export function sourceLabel(source: RootSource): string {
+    switch (source) {
+        case 'setting':
+            return 'the Claude Code Data Directory setting';
+        case 'editor-environment':
+            return "CLAUDE_CONFIG_DIR in Claude Code's environmentVariables setting";
+        case 'process-environment':
+            return 'CLAUDE_CONFIG_DIR';
+        case 'claude-settings':
+            return 'env.CLAUDE_CONFIG_DIR in ~/.claude/settings.json';
+        case 'default':
+            return 'the default';
+    }
+}
+
+/** `p` with the home folder shown as `~`, for display only. */
+export function tildePath(p: string, home: string = os.homedir()): string {
+    const relative = path.relative(home, p);
+    return relative === '' ? '~' : relative.startsWith('..') || path.isAbsolute(relative) ? p : `~${path.sep}${relative}`;
+}
+
+/** A flag counts as set when it is 1, true, yes or on, ignoring case: only a hint, for an empty state. */
+function isTruthy(value: string | undefined | null): boolean {
+    return typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
 }
 
 /**
@@ -114,11 +147,21 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
  * is kept.
  */
 function editorConfigDir(setting: unknown, platform: NodeJS.Platform): string | null {
+    return editorVariable(setting, platform, 'CLAUDE_CONFIG_DIR', v => path.isAbsolute(v));
+}
+
+/** The last value of `variable` in `claudeCode.environmentVariables` that `accept` takes. */
+function editorVariable(
+    setting: unknown,
+    platform: NodeJS.Platform,
+    variable: string,
+    accept: (value: string) => boolean = () => true,
+): string | null {
     const wanted = (name: unknown) =>
-        typeof name === 'string' && (platform === 'win32' ? name.toUpperCase() : name) === 'CLAUDE_CONFIG_DIR';
+        typeof name === 'string' && (platform === 'win32' ? name.toUpperCase() : name) === variable;
     let found: string | null = null;
     const consider = (value: unknown) => {
-        if (typeof value === 'string' && path.isAbsolute(value)) {
+        if (typeof value === 'string' && accept(value)) {
             found = value;
         }
     };

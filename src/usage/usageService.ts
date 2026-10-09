@@ -21,6 +21,7 @@ import * as vscode from 'vscode';
 
 import { WorkerHost, WorkerHostError } from '../workerHost';
 import type { ImportSummary } from './importer';
+import { UsagePanel } from './panel';
 import type { UsageWorkerRequest, UsageWorkerResponse } from './protocol';
 import type { RangeKey, UsageReport } from './report';
 import { machineRootInputs, resolveRoots, type ResolvedRoots, type RootInputs } from './roots';
@@ -434,7 +435,7 @@ export class UsageService implements vscode.Disposable {
 }
 
 /**
- * The service as the extension runs it, with its two commands. In the test
+ * The service as the extension runs it, with its three commands. In the test
  * host, roots are confined to the fixtures; see `machineRootInputs`.
  */
 export function registerClaudeCodeUsage(
@@ -484,6 +485,8 @@ export function registerClaudeCodeUsage(
                 service.settingsChanged();
             }
         }),
+        // Always registered: while the feature is off, the panel says what turning it on does.
+        vscode.commands.registerCommand('llm-tokenizer.showClaudeCodeUsage', () => UsagePanel.show(context, service, log)),
         vscode.commands.registerCommand('llm-tokenizer.refreshClaudeCodeUsage', () => refreshCommand(service)),
         vscode.commands.registerCommand('llm-tokenizer.clearClaudeCodeUsageHistory', () => clearCommand(service)),
     );

@@ -5,7 +5,7 @@ import * as path from 'path';
 
 import { byDay, rollup, totalsOf } from '../../src/usage/aggregate';
 import { importRoots, importUnderLease } from '../../src/usage/importer';
-import { resolveRoots } from '../../src/usage/roots';
+import { machineRootInputs, resolveRoots } from '../../src/usage/roots';
 import { UsageStore, loadSqlite, type OpenOptions } from '../../src/usage/store';
 import { MAX_LINE_BYTES, PARSER_VERSION, newerVersion, readTranscript, walkProjects, type TranscriptFile } from '../../src/usage/transcripts';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
@@ -599,6 +599,15 @@ suite('usage roots', () => {
         assert.deepStrictEqual(lower.roots.map(r => r.source), ['editor-environment']);
         const unix = resolveRoots({ setting: '', editorEnvironment: { claude_config_dir: fromEditor }, env: {}, home, platform: 'linux' });
         assert.deepStrictEqual(unix.roots.map(r => r.source), []);
+    });
+
+    test("in the test host, the fixtures are the only root, and the real ~/.claude is never a candidate", () => {
+        // test/index.ts points CLAUDE_CONFIG_DIR at the fixtures before any test runs.
+        const fixtures = path.join(__dirname, '..', '..', '..', 'test', 'fixtures');
+        const resolved = resolveRoots({ ...machineRootInputs({ fixtures }), setting: '', editorEnvironment: undefined });
+        assert.deepStrictEqual(resolved.roots.map(r => fs.realpathSync(r.path)), [fs.realpathSync(FIXTURE_ROOT)]);
+        const realDefault = path.join(os.homedir(), '.claude');
+        assert.ok(!resolved.candidates.some(c => c.path === realDefault), 'the real ~/.claude was considered');
     });
 
     test('under test, a root outside the allowed folders is refused', () => {
