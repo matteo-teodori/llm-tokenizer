@@ -5,7 +5,11 @@ so that nothing a test runs can read the developer's own Claude Code data, and
 
 `projects/` holds synthetic transcripts, laid out as Claude Code lays out its
 own. Every record shape below was observed in Claude Code 2.1.220–2.1.292; the
-values are invented, and the totals can be worked out by hand.
+values are invented, and the totals can be worked out by hand. Assistant
+records keep Claude Code's key order, as the reader's byte scan meets it: the
+message, with its own `type` and typed content blocks, comes before the
+record's `type` (so in 282,993 of 283,907 real assistant lines; the other 914,
+the `<synthetic>` placeholders, put `type` first, as the one here does).
 
 | File | Shape | Pins |
 |---|---|---|

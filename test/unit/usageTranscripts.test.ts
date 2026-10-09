@@ -19,20 +19,28 @@ function line(record: object): string {
     return JSON.stringify(record) + '\n';
 }
 
+/**
+ * An assistant record in Claude Code's own key order: the message, with its
+ * own `type` and typed content blocks, before the record's `type`.
+ */
 function assistant(id: string, output: number, extra: Record<string, unknown> = {}): object {
     return {
+        parentUuid: null,
+        isSidechain: false,
+        message: {
+            model: 'claude-opus-5-5',
+            id,
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Done.' }],
+            usage: { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: 3, output_tokens: output },
+        },
         type: 'assistant',
         uuid: `u-${id}-${output}`,
         timestamp: '2026-10-09T12:00:00.000Z',
+        cwd: '/work',
         sessionId: 's1',
         version: '2.1.292',
-        cwd: '/work',
-        isSidechain: false,
-        message: {
-            id,
-            model: 'claude-opus-5-5',
-            usage: { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: 3, output_tokens: output },
-        },
         ...extra,
     };
 }
@@ -171,10 +179,11 @@ suite('usage transcripts', () => {
         fs.writeFileSync(file, a);
         assert.strictEqual(readTranscript(mainFile(file), grown.checkpoint).restarted, 'truncated');
 
-        // Rewritten in place, same length: the 64 bytes before the checkpoint
-        // differ. (A change further back is not looked for; this is one small
-        // read, for filesystems whose inodes cannot be trusted.)
-        fs.writeFileSync(file, a + b + line(assistant('m3', 8)));
+        // Rewritten in place, same length: one of the 64 bytes before the
+        // checkpoint differs, here the version at the end of the last record.
+        // (A change further back is not looked for; this is one small read,
+        // for filesystems whose inodes cannot be trusted.)
+        fs.writeFileSync(file, a + b + line(assistant('m3', 9, { version: '2.1.293' })));
         assert.strictEqual(readTranscript(mainFile(file), { ...grown.checkpoint, size: -1 }).restarted, 'rewritten');
 
         // Rewritten so that the checkpoint no longer falls after a newline.
@@ -209,7 +218,7 @@ suite('usage transcripts', () => {
         const file = path.join(tmp, 'projects', 'p', 's1.jsonl');
         fs.mkdirSync(path.dirname(file), { recursive: true });
         const bad = (id: string, usage: Record<string, unknown>) =>
-            line({ ...assistant(id, 0), message: { id, model: 'claude-opus-5-5', usage } });
+            line({ ...assistant(id, 0), message: { model: 'claude-opus-5-5', id, type: 'message', role: 'assistant', content: [], usage } });
         fs.writeFileSync(
             file,
             bad('neg', { input_tokens: -1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 }) +
@@ -217,6 +226,7 @@ suite('usage transcripts', () => {
                 bad('str', { input_tokens: '7', cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 }) +
                 bad('big', { input_tokens: 2 ** 53, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 }) +
                 `{"type":"assistant","token":"${sentinel}", broken\n` +
+                `{"type":"type":"assistant", broken\n` +
                 `[{"type":"assistant","token":"${sentinel}"}]\n` +
                 line(assistant('ok', 3)),
         );
@@ -231,7 +241,7 @@ suite('usage transcripts', () => {
             ['ok', 1],
             ['str', null],
         ]);
-        assert.deepStrictEqual(summary.malformed, { 'bad-field:input_tokens': 4, 'json-syntax': 1, 'not-object': 1 });
+        assert.deepStrictEqual(summary.malformed, { 'bad-field:input_tokens': 4, 'json-syntax': 2, 'not-object': 1 });
         assert.strictEqual(totalsOf(requests).provenance, 'partial');
         assert.ok(!JSON.stringify(summary).includes(sentinel), 'the summary quoted a record');
         for (const r of requests) {
