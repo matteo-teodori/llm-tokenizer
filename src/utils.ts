@@ -6,7 +6,11 @@
 export function formatNumber(num: number): string {
     // Thresholds are nudged below the round number because the unit used to be
     // chosen before rounding: 999,990 is under 1,000,000, so it took the K
-    // branch, and `toFixed(1)` then rendered it as "1000.0K".
+    // branch, and `toFixed(1)` then rendered it as "1000.0K". There was also no
+    // unit above M, so a billion rendered as "1000.0M".
+    if (num >= 999_950_000) {
+        return `${(num / 1_000_000_000).toFixed(1)}B`;
+    }
     if (num >= 999_950) {
         return `${(num / 1_000_000).toFixed(1)}M`;
     }
