@@ -64,10 +64,14 @@ For the encoder:
 
 - **`tiktoken`** if it is an OpenAI model.
 - **`hf`** if a `tokenizer.json` is downloadable **anonymously**. Check first —
-  Meta's repositories and Google's Gemma 3 ones return 401 without an account,
-  so the registry points at ungated mirrors. Models may share a repo only when
-  their `tokenizer.json` files are byte-identical: compare sha256 hashes, never
-  sizes.
+  Meta's Llama repositories (`meta-llama/`) and Google's Gemma 3 ones return
+  401 without an account, so the registry points at ungated mirrors for those.
+  Models may share a repo only when their `tokenizer.json` files are
+  byte-identical: compare sha256 hashes, never sizes. An API model that
+  publishes no tokenizer of its own may use an open checkpoint's repo only when
+  the provider says first-hand that it is, or is based on, that checkpoint:
+  Qwen's "official version based on", Zhipu documenting FlashX under Flash's
+  model code, Google's SDK mapping a Gemini model to a Gemma vocabulary.
 - **`heuristic`** if no tokenizer is public. Say so in a comment, and give a
   ratio you have actually measured: on a published relative's vocabulary if
   there is one, rounded down so the estimate errs high.

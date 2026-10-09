@@ -89,7 +89,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   wrong type and a default outside its own enum. 172 tests.
 - Working notes in `.notes/` are no longer linted. Three comments that
   described the runtime and Llama's special-token baseline wrongly are
-  corrected.
+  corrected, and so are those on which Meta repositories are gated, on
+  vocabulary sizes, on DeepSeek V4.1's added tokens and on which Claude
+  models use the newer tokenizer.
+- CONTRIBUTING now says when an API model may use an open checkpoint's
+  vocabulary, and how a heuristic ratio is measured.
 
 ## [2.1.1] - 2026-09-04
 

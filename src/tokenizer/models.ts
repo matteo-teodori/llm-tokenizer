@@ -26,16 +26,21 @@ import type { ModelInfo } from './registry';
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Claude from Opus 4.7 onward. Anthropic switched tokenizer at that release:
- * the same text costs roughly 1.35× what it did before, which is why this and
- * CLAUDE_LEGACY differ so much.
- *
- * Do not infer the tokenizer from the version number — Sonnet 4.6 shipped
- * after Opus 4.7 and still uses the old one.
+ * Claude 4.7 and later, Haiku 5.5 included. Anthropic changed tokenizer with
+ * Opus 4.7, and its rule goes by generation: "Claude 4.7 and later models … use
+ * a newer tokenizer", while "Claude Sonnet 4.6 and earlier models use the
+ * previous tokenizer". The same text comes to about 30% more tokens on the
+ * newer one, up to 35% depending on content, which is why this and
+ * CLAUDE_LEGACY differ so much. 2.5 is Anthropic's own figure: 1M tokens is
+ * "roughly 555k words or 2.5M Unicode characters on the current tokenizer".
  */
 const CLAUDE_CURRENT = 2.5;
 
-/** Claude up to and including the 4.6 generation. */
+/**
+ * Claude up to and including the 4.6 generation. Also Anthropic's figure, by
+ * way of words: 1M tokens held "about 750k words" before 4.7, against 555k
+ * words (2.5M characters) now, which comes to about 3.4 characters a token.
+ */
 const CLAUDE_LEGACY = 3.4;
 
 /**
@@ -105,10 +110,11 @@ const KIMI = 3.6;
 // ─────────────────────────────────────────────────────────────────────────────
 // Hugging Face tokenizer sources
 //
-// Meta's repos and Google's Gemma 3 repos are gated (HTTP 401 without an
-// account), so ungated mirrors are used. Google's Gemma 4 repos are not gated,
-// which is why HF.gemma4 points at google/ directly. Every repo below was
-// checked to serve tokenizer.json anonymously.
+// Meta's Llama repos (meta-llama/) and Google's Gemma 3 repos are gated (HTTP
+// 401 without an account), so ungated mirrors are used. Meta's meta-models org
+// and Google's Gemma 4 repos are not gated, which is why HF.museGlimmer and
+// HF.gemma4 point at them directly. Every repo below was checked to serve
+// tokenizer.json anonymously.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HF = {
@@ -124,9 +130,10 @@ const HF = {
      */
     deepseek: 'deepseek-ai/DeepSeek-V4-Flash',
     /**
-     * V4.1 Flash keeps V4's vocabulary and merges but adds special tokens
-     * (`<｜System｜>` is one token here and five under V4), so its file differs
-     * (sha256 c90dfa01…) and it cannot share V4 Pro's repo.
+     * V4.1 Flash keeps V4's vocabulary and merges but repurposes nine of its
+     * added-token slots: it gains `<｜System｜>` (one token here, five under V4)
+     * and loses V4's image and table tokens. So its file differs (sha256
+     * c90dfa01…) and it cannot share V4 Pro's repo.
      */
     deepseek41: 'deepseek-ai/DeepSeek-V4.1-Flash',
     qwen: 'Qwen/Qwen3.6-27B',
@@ -172,9 +179,9 @@ const HF = {
     hunyuan: 'tencent/Hy3',
     hunyuan4: 'tencent/Hy4-preview',
     /**
-     * Meta's current open-weight model. At 28 MB this is the largest
-     * tokenizer.json in the registry; the Llama fallback ratio is right for it
-     * (measured 4.207 chars/token against Llama 3.3's 4.225 on identical text).
+     * Meta's current open-weight model. The Llama fallback ratio is right for
+     * it (measured 4.207 chars/token against Llama 3.3's 4.225 on identical
+     * text).
      */
     museGlimmer: 'meta-models/Muse-Glimmer-30B',
     /**
@@ -214,10 +221,10 @@ export const MODELS: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────────────────
     // The GPT-6 models are the OpenAI entries that are *not* exact — see
     // GPT6_UNMAPPED.
-    { id: 'gpt-6-astra', label: 'GPT-6 Astra', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
     { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
     { id: 'gpt-6-sol', label: 'GPT-6 Sol', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
     { id: 'gpt-6-luna', label: 'GPT-6 Luna', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
+    { id: 'gpt-6-astra', label: 'GPT-6 Astra', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
     { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
@@ -236,7 +243,8 @@ export const MODELS: ModelInfo[] = [
     // Scheduled shutdowns, still live today: o4-mini on 2026-10-23 (OpenAI's
     // replacement is gpt-5.6-terra), gpt-5 and o3 on 2026-12-11 (gpt-5.6-sol),
     // gpt-5.1 and gpt-5.3-codex on 2027-04-01 (gpt-6-sol). Remove each, with an
-    // alias to its replacement, at the first refresh after its date.
+    // alias to its replacement, at the first refresh after its date. The two
+    // legacy models at the end of this block go on 2026-10-23 as well.
     { id: 'gpt-5', label: 'GPT-5', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-4.1', label: 'GPT-4.1', provider: 'OpenAI', contextLimit: 1_047_576, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-4o', label: 'GPT-4o', provider: 'OpenAI', contextLimit: 128_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
@@ -247,24 +255,31 @@ export const MODELS: ModelInfo[] = [
     // special tokens on top of o200k.
     { id: 'gpt-oss-120b', label: 'gpt-oss-120b', provider: 'OpenAI', contextLimit: 131_072, encoder: { kind: 'tiktoken', encoding: 'o200k_harmony' } },
     { id: 'gpt-oss-20b', label: 'gpt-oss-20b', provider: 'OpenAI', contextLimit: 131_072, encoder: { kind: 'tiktoken', encoding: 'o200k_harmony' } },
-    // Kept because Azure OpenAI retires on its own schedule and these
-    // deployments are still widespread in enterprises.
+    // OpenAI shuts both down on 2026-10-23 (replacements gpt-5.6-sol and
+    // gpt-5.6-terra). They are kept for Azure OpenAI, which retires models on
+    // its own schedule, but that is unconfirmed: Azure's retirement schedule
+    // (updated 2026-09-21) and its retired-models page list neither as retired
+    // or due to retire. Check again at the first refresh after the 23rd, and
+    // if gpt-4-turbo goes, re-point the `gpt-4` alias with it.
     { id: 'gpt-4-turbo', label: 'GPT-4 Turbo (legacy)', provider: 'OpenAI', contextLimit: 128_000, encoder: { kind: 'tiktoken', encoding: 'cl100k_base' } },
     { id: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo (legacy)', provider: 'OpenAI', contextLimit: 16_385, encoder: { kind: 'tiktoken', encoding: 'cl100k_base' } },
 
     // ─────────────────────────────────────────────────────────────────────────
     // Anthropic — estimated. No Claude tokenizer has ever been published, and
-    // Anthropic's own guidance is not to approximate Claude with tiktoken: it
-    // undercounts by 15-20% on prose and more on code. The only exact route is
-    // their /v1/messages/count_tokens endpoint, which needs an API key.
+    // Anthropic's own guidance, in the claude-api skill it publishes
+    // (github.com/anthropics/skills, skills/claude-api/shared/token-counting.md),
+    // is not to use tiktoken, which "undercounts Claude tokens by ~15-20% on
+    // typical text, and by much more on code or non-English input". The only
+    // exact route is their /v1/messages/count_tokens endpoint, which needs an
+    // API key.
     // ─────────────────────────────────────────────────────────────────────────
-    { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
-    { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
-    { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     // Haiku 5.5 moved to the current tokenizer — Anthropic's model page says the
     // same text counts ~30% more than on Haiku 4.5 — so it shares CLAUDE_CURRENT
     // with the 4.7-and-later models rather than Haiku 4.5's ratio.
     { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
+    { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
+    { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
+    { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-opus-5', label: 'Claude Opus 5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-fable-5', label: 'Claude Fable 5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
@@ -415,8 +430,9 @@ export const MODELS: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────────────────
     // The ids are mixed case because MiniMax's API documents only that form —
     // its OpenAPI enum, its list-models example and every `model=` in its docs
-    // say `MiniMax-M3`; lowercase appears only in an SGLang parser flag. The
-    // lowercase ids this registry used since 1.0 alias forward.
+    // say `MiniMax-M3`. Lowercase appears only in a tool-call parser flag, a
+    // container name and URLs, never as a model value. The lowercase ids this
+    // registry used since 1.0 alias forward.
     //
     // M3.1 Flash is a closed preview (M Plan and MiniMax Code only, a public
     // subscription rather than an approval programme) with no published
@@ -463,14 +479,18 @@ export const MODELS: ModelInfo[] = [
 ];
 
 /**
- * Ids that no longer exist — from v1.x and from later refreshes — mapped to
- * the nearest live model.
+ * Ids the registry no longer lists — from v1.x and from later refreshes —
+ * mapped to the nearest model it does.
  *
- * Some were renamed (the whole Anthropic block, the MiniMax case), some were
- * retired by their provider, and some never existed at all. Users get migrated
- * on first run with a one-time notice rather than silently reset to the
- * default. `findModel` follows a single hop, so when a target is itself
- * retired, every alias pointing at it is re-pointed in the same change.
+ * Most no longer exist: some were renamed (the whole Anthropic block, the
+ * MiniMax case), some were retired by their provider, and some never existed
+ * at all. A few are still served but were curated out as an older generation
+ * or a superseded variant: gemini-2.5-flash-lite, the GLM-4 models, and
+ * OpenAI's gpt-4, o1, o3-mini and o3-pro ahead of their shutdowns. A saved
+ * choice is migrated on first run rather than silently reset to the default,
+ * with a one-time notice unless only the case changed. `findModel` follows a
+ * single hop, so when a target is itself retired, every alias pointing at it
+ * is re-pointed in the same change.
  */
 export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     // Anthropic: v1.3.0 invented a `claude-<major>.<minor>-<tier>` format.

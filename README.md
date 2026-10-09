@@ -72,8 +72,8 @@ the marketing names — Mistral Large 3 is `mistral-large-2512`, MiniMax M3 is
 | Provider   | Models | Accuracy |
 |------------|--------|----------|
 | OpenAI     | GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 (+mini), GPT-5.3 Codex, GPT-5.2, GPT-5.1, GPT-5, GPT-4.1, GPT-4o (+mini), o3, o4-mini, gpt-oss 120b/20b, GPT-4 Turbo, GPT-3.5 Turbo | Exact |
-| OpenAI     | GPT-6 Astra, GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna | Estimated³ |
-| Anthropic  | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5, Opus 5, Sonnet 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
+| OpenAI     | GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, GPT-6 Astra | Estimated³ |
+| Anthropic  | Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1, Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
 | Google     | Gemini 3.5 Flash, 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
 | Google     | Gemini 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.5 Flash-Lite | Estimated² |
 | xAI        | Grok 4.7, 4.6, 4.5, 4.3, 4.20, Grok Build 0.1 | Estimated |
@@ -138,13 +138,15 @@ and both are read.
 | Tier | Shown as | Method | Models |
 |------|----------|--------|--------|
 | **Exact, offline** | `12,340` | OpenAI's own BPE, bundled | Every OpenAI model tiktoken maps (all but GPT-6) |
-| **Exact after one download** | `≈` → `12,340` | The model's published vocabulary (~2–28 MB, cached) | Llama, Muse Glimmer, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hy, Kimi |
+| **Exact after one download** | `≈` → `12,340` | The model's published vocabulary (~3–35 MB, cached) | Llama, Muse Glimmer, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hy, Kimi |
 | **Estimated** | `≈12,340` | A per-family characters-per-token ratio | Claude, Grok, GPT-6, closed Qwen, recent Gemini, GLM-5-Turbo, the Mistral Large 4 and MiniMax M3.1 previews |
 
 **Why some models are only estimated.** Anthropic and xAI do not publish a
-tokenizer for any current model, and Anthropic explicitly advises against
-approximating Claude with OpenAI's tokenizer. An honest estimate is better than
-a confident wrong number, so those models are marked rather than dressed up.
+tokenizer for any current model, and Anthropic's own guidance is not to
+approximate Claude with OpenAI's tokenizer, which
+[it says](https://github.com/anthropics/skills/blob/main/skills/claude-api/shared/token-counting.md)
+undercounts Claude by about 15–20%. An honest estimate is better than a
+confident wrong number, so those models are marked rather than dressed up.
 
 Where a related tokenizer is published, the ratio is measured on it and rounded
 down, so the estimate errs high: o200k_base for GPT-6, Gemma's vocabulary for
