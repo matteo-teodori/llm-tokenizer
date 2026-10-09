@@ -32,6 +32,13 @@ export const SHIPPED_BUNDLES = [
         external: ['vscode'],
     },
     {
+        // Built only from node: built-ins, so it inlines no package.
+        // node:sqlite is required at run time, never bundled.
+        entryPoints: ['src/usageWorker.ts'],
+        outfile: 'out/usageWorker.js',
+        external: ['vscode', 'node:sqlite'],
+    },
+    {
         entryPoints: Object.fromEntries(
             ENCODINGS.map(name => [name, `gpt-tokenizer/encoding/${name}`]),
         ),

@@ -168,7 +168,7 @@ suite('usage history store', () => {
         assert.deepStrictEqual([...store.requests()].map(r => r.messageId), ['msg_1b']);
     });
 
-    test('a checkpoint reads back as written', () => {
+    test('a checkpoint reads back as written, a 64-bit file id included', () => {
         const store = ready(open());
         const checkpoint: FileCheckpoint = {
             provider: 'claude-code',
@@ -179,15 +179,15 @@ suite('usage history store', () => {
             runId: null,
             agentId: null,
             projectDir: 'p',
-            dev: 16777220,
-            ino: 123456,
+            dev: '16777220',
+            // Past 2^63: as a number, SQLite refused it, and anything past
+            // 2^53 could not be read back.
+            ino: '18446744073709551557',
             size: 2048,
             mtimeMs: 1_791_000_000_000,
             offset: 2000,
             tailHash: 'abc123',
             parserVersion: 1,
-            inProgress: false,
-            crashCount: 0,
             oversizeLines: 1,
             malformedLines: 2,
             newestVersion: '2.1.292',
@@ -204,13 +204,15 @@ suite('usage history store', () => {
             store.putFile({
                 provider: 'claude-code', path: '/f', root: '/r', kind: 'main', sessionId: 's', runId: null, agentId: null,
                 projectDir: 'p', dev: null, ino: null, size: 1, mtimeMs: 1, offset: 1, tailHash: null, parserVersion: 1,
-                inProgress: false, crashCount: 0, oversizeLines: 0, malformedLines: 0, newestVersion: null,
+                oversizeLines: 0, malformedLines: 0, newestVersion: null,
             });
+            store.putReadGuard({ provider: 'claude-code', path: '/f', inProgress: true, crashCount: 1, lastCrash: 1 });
         });
         const id = store.storeId();
         store.clear();
         assert.strictEqual([...store.requests()].length, 0);
         assert.strictEqual(store.getFile('claude-code', '/f'), undefined);
+        assert.strictEqual(store.getReadGuard('claude-code', '/f'), undefined);
         assert.strictEqual(store.generation(), 1);
         assert.strictEqual(store.storeId(), id, 'Clear made a new store rather than emptying this one');
         assert.ok(fs.existsSync(file), 'the database file was removed');

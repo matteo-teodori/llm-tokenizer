@@ -72,3 +72,37 @@ export interface UsageRequest extends TokenCounts {
     /** The parser that produced the row; a newer one always wins. */
     parserVersion: number;
 }
+
+/** A context compaction: how many tokens a session held before and after it. */
+export interface Compaction {
+    uuid: string;
+    sessionId: string;
+    timestamp: number;
+    trigger: string | null;
+    preTokens: number | null;
+    postTokens: number | null;
+}
+
+/**
+ * A request Claude Code was refused because a usage limit was reached. A log
+ * of hits, not a gauge of how much of an allowance is used.
+ */
+export interface LimitHit {
+    uuid: string;
+    sessionId: string;
+    timestamp: number;
+    limitType: string;
+    resetsAt: number | null;
+}
+
+/** What one import learnt about a session, merged into what is stored. */
+export interface SessionSighting {
+    sessionId: string;
+    root: string;
+    /** The first cwd of its main transcript, when this import read it. */
+    cwd: string | null;
+    projectDir: string;
+    firstTs: number | null;
+    lastTs: number | null;
+}
+

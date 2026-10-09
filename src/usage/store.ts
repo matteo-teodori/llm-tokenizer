@@ -22,7 +22,7 @@ import * as path from 'path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 import { isComplete } from './provenance';
-import type { TranscriptKind, UsageProvider, UsageRequest } from './types';
+import type { Compaction, LimitHit, SessionSighting, TranscriptKind, UsageProvider, UsageRequest } from './types';
 
 /** `PRAGMA user_version` of the schema this code writes. */
 export const SCHEMA_VERSION = 1;
@@ -103,8 +103,9 @@ export interface FileCheckpoint {
     runId: string | null;
     agentId: string | null;
     projectDir: string;
-    dev: number | null;
-    ino: number | null;
+    /** Decimal text: an NTFS file id passes 2^53 (see `FileState`). */
+    dev: string | null;
+    ino: string | null;
     size: number;
     mtimeMs: number;
     /** The byte after the last newline read. */
@@ -112,11 +113,22 @@ export interface FileCheckpoint {
     /** A hash of the 64 bytes before `offset`, to notice a rewritten file. */
     tailHash: string | null;
     parserVersion: number;
-    inProgress: boolean;
-    crashCount: number;
     oversizeLines: number;
     malformedLines: number;
     newestVersion: string | null;
+}
+
+/**
+ * A large file's read in progress, and how often reading it never finished.
+ * Kept apart from its checkpoint, which only a finished read writes.
+ */
+export interface ReadGuard {
+    provider: UsageProvider;
+    path: string;
+    inProgress: boolean;
+    crashCount: number;
+    /** Wall-clock milliseconds of the last crash counted. */
+    lastCrash: number | null;
 }
 
 const SCHEMA = `
@@ -134,18 +146,25 @@ CREATE TABLE files (
     run_id TEXT,
     agent_id TEXT,
     project_dir TEXT NOT NULL,
-    dev INTEGER,
-    ino INTEGER,
+    dev TEXT,
+    ino TEXT,
     size INTEGER NOT NULL,
     mtime_ms INTEGER NOT NULL,
     offset INTEGER NOT NULL,
     tail_hash TEXT,
     parser_version INTEGER NOT NULL,
-    in_progress INTEGER NOT NULL DEFAULT 0,
-    crash_count INTEGER NOT NULL DEFAULT 0,
     oversize_lines INTEGER NOT NULL DEFAULT 0,
     malformed_lines INTEGER NOT NULL DEFAULT 0,
     newest_version TEXT,
+    PRIMARY KEY (provider, path)
+) STRICT;
+
+CREATE TABLE read_guards (
+    provider TEXT NOT NULL DEFAULT 'claude-code',
+    path TEXT NOT NULL,
+    in_progress INTEGER NOT NULL,
+    crash_count INTEGER NOT NULL,
+    last_crash INTEGER,
     PRIMARY KEY (provider, path)
 ) STRICT;
 
@@ -187,6 +206,7 @@ CREATE TABLE sessions (
     provider TEXT NOT NULL DEFAULT 'claude-code',
     session_id TEXT NOT NULL,
     root TEXT NOT NULL,
+    cwd TEXT,
     session_root TEXT,
     display_name TEXT,
     project_dir TEXT NOT NULL,
@@ -225,8 +245,8 @@ CREATE TABLE lease (
 ) STRICT;
 `;
 
-/** Tables that hold history: everything Clear empties. */
-const DATA_TABLES = ['files', 'requests', 'sessions', 'compactions', 'limit_hits'];
+/** Tables that hold history, and the bookkeeping of reading it: everything Clear empties. */
+const DATA_TABLES = ['files', 'read_guards', 'requests', 'sessions', 'compactions', 'limit_hits'];
 
 /**
  * Migrations by the version they produce. Forward-only and additive, each in
@@ -445,6 +465,93 @@ export class UsageStore {
         }
     }
 
+    /** Store compactions; each is one record, so a second sighting changes nothing. */
+    insertCompactions(provider: UsageProvider, compactions: Iterable<Compaction>): void {
+        this.assertWritable();
+        const insert = this.db.prepare(
+            `INSERT OR IGNORE INTO compactions (provider, uuid, session_id, ts, trigger, pre_tokens, post_tokens)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        );
+        for (const c of compactions) {
+            insert.run(provider, c.uuid, c.sessionId, c.timestamp, c.trigger, c.preTokens, c.postTokens);
+        }
+    }
+
+    /** Store limit hits; each is one record, so a second sighting changes nothing. */
+    insertLimitHits(provider: UsageProvider, hits: Iterable<LimitHit>): void {
+        this.assertWritable();
+        const insert = this.db.prepare(
+            `INSERT OR IGNORE INTO limit_hits (provider, uuid, session_id, ts, limit_type, resets_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+        );
+        for (const h of hits) {
+            insert.run(provider, h.uuid, h.sessionId, h.timestamp, h.limitType, h.resetsAt);
+        }
+    }
+
+    /**
+     * Merge what an import saw of a session. Its first main-transcript cwd is
+     * kept once known, and its span only ever widens.
+     */
+    upsertSession(provider: UsageProvider, s: SessionSighting): void {
+        this.assertWritable();
+        this.db
+            .prepare(
+                `INSERT INTO sessions (provider, session_id, root, cwd, project_dir, first_ts, last_ts)
+                 VALUES (:provider, :sessionId, :root, :cwd, :projectDir, :firstTs, :lastTs)
+                 ON CONFLICT (provider, session_id) DO UPDATE SET
+                     cwd = coalesce(sessions.cwd, excluded.cwd),
+                     first_ts = CASE WHEN sessions.first_ts IS NULL OR excluded.first_ts < sessions.first_ts
+                                     THEN coalesce(excluded.first_ts, sessions.first_ts) ELSE sessions.first_ts END,
+                     last_ts = CASE WHEN sessions.last_ts IS NULL OR excluded.last_ts > sessions.last_ts
+                                    THEN coalesce(excluded.last_ts, sessions.last_ts) ELSE sessions.last_ts END`,
+            )
+            .run({ provider, ...s });
+    }
+
+    /** Every stored session, for the queries and the tests. */
+    sessions(): (SessionSighting & { provider: UsageProvider })[] {
+        return this.db
+            .prepare('SELECT provider, session_id, root, cwd, project_dir, first_ts, last_ts FROM sessions ORDER BY session_id')
+            .all()
+            .map(row => ({
+                provider: row.provider as UsageProvider,
+                sessionId: row.session_id as string,
+                root: row.root as string,
+                cwd: row.cwd as string | null,
+                projectDir: row.project_dir as string,
+                firstTs: row.first_ts as number | null,
+                lastTs: row.last_ts as number | null,
+            }));
+    }
+
+    compactions(): Compaction[] {
+        return this.db
+            .prepare('SELECT uuid, session_id, ts, trigger, pre_tokens, post_tokens FROM compactions ORDER BY ts, uuid')
+            .all()
+            .map(row => ({
+                uuid: row.uuid as string,
+                sessionId: row.session_id as string,
+                timestamp: row.ts as number,
+                trigger: row.trigger as string | null,
+                preTokens: row.pre_tokens as number | null,
+                postTokens: row.post_tokens as number | null,
+            }));
+    }
+
+    limitHits(): LimitHit[] {
+        return this.db
+            .prepare('SELECT uuid, session_id, ts, limit_type, resets_at FROM limit_hits ORDER BY ts, uuid')
+            .all()
+            .map(row => ({
+                uuid: row.uuid as string,
+                sessionId: row.session_id as string,
+                timestamp: row.ts as number,
+                limitType: row.limit_type as string,
+                resetsAt: row.resets_at as number | null,
+            }));
+    }
+
     /**
      * Drop the rows read from `file` before re-reading it with a newer parser,
      * so that a change of key cannot leave its old rows behind as doubles.
@@ -473,18 +580,43 @@ export class UsageStore {
             .prepare(
                 `INSERT OR REPLACE INTO files (
                     provider, path, root, kind, session_id, run_id, agent_id, project_dir, dev, ino,
-                    size, mtime_ms, offset, tail_hash, parser_version, in_progress, crash_count,
-                    oversize_lines, malformed_lines, newest_version
+                    size, mtime_ms, offset, tail_hash, parser_version, oversize_lines, malformed_lines,
+                    newest_version
                 ) VALUES (
                     :provider, :path, :root, :kind, :sessionId, :runId, :agentId, :projectDir, :dev, :ino,
-                    :size, :mtimeMs, :offset, :tailHash, :parserVersion, :inProgress, :crashCount,
-                    :oversizeLines, :malformedLines, :newestVersion
+                    :size, :mtimeMs, :offset, :tailHash, :parserVersion, :oversizeLines, :malformedLines,
+                    :newestVersion
                 )`,
             )
-            .run({
-                ...checkpoint,
-                inProgress: checkpoint.inProgress ? 1 : 0,
-            });
+            .run({ ...checkpoint });
+    }
+
+    getReadGuard(provider: UsageProvider, filePath: string): ReadGuard | undefined {
+        const row = this.db.prepare('SELECT * FROM read_guards WHERE provider = ? AND path = ?').get(provider, filePath);
+        return row
+            ? {
+                  provider: row.provider as UsageProvider,
+                  path: row.path as string,
+                  inProgress: row.in_progress === 1,
+                  crashCount: row.crash_count as number,
+                  lastCrash: row.last_crash as number | null,
+              }
+            : undefined;
+    }
+
+    putReadGuard(guard: ReadGuard): void {
+        this.assertWritable();
+        this.db
+            .prepare(
+                `INSERT OR REPLACE INTO read_guards (provider, path, in_progress, crash_count, last_crash)
+                 VALUES (:provider, :path, :inProgress, :crashCount, :lastCrash)`,
+            )
+            .run({ ...guard, inProgress: guard.inProgress ? 1 : 0 });
+    }
+
+    deleteReadGuard(provider: UsageProvider, filePath: string): void {
+        this.assertWritable();
+        this.db.prepare('DELETE FROM read_guards WHERE provider = ? AND path = ?').run(provider, filePath);
     }
 
     /** Bumped by every Clear, so a worker holding caches knows to drop them. */
@@ -604,15 +736,13 @@ function toCheckpoint(row: Record<string, unknown>): FileCheckpoint {
         runId: row.run_id as string | null,
         agentId: row.agent_id as string | null,
         projectDir: row.project_dir as string,
-        dev: row.dev as number | null,
-        ino: row.ino as number | null,
+        dev: row.dev as string | null,
+        ino: row.ino as string | null,
         size: row.size as number,
         mtimeMs: row.mtime_ms as number,
         offset: row.offset as number,
         tailHash: row.tail_hash as string | null,
         parserVersion: row.parser_version as number,
-        inProgress: row.in_progress === 1,
-        crashCount: row.crash_count as number,
         oversizeLines: row.oversize_lines as number,
         malformedLines: row.malformed_lines as number,
         newestVersion: row.newest_version as string | null,

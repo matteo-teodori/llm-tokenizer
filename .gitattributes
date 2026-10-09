@@ -1,0 +1,4 @@
+# The fixtures stand in for Claude Code's session records byte for byte, as
+# observed with LF endings; a Windows checkout must not convert them. CRLF
+# input has its own test.
+test/fixtures/claude-config/projects/** text eol=lf
