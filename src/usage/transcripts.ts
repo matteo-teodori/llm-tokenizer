@@ -223,8 +223,9 @@ export interface ReadResult {
     requests: UsageRequest[];
     compactions: Compaction[];
     limitHits: LimitHit[];
-    /** The first cwd of a main transcript, when this read reached it. */
+    /** The first cwd of a main transcript, when this read reached it, and its record's time. */
     firstCwd: string | null;
+    firstCwdTs: number | null;
     /** The session id the records gave, for files whose path does not. */
     sessionId: string | null;
     newestVersion: string | null;
@@ -257,6 +258,7 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
             compactions: [],
             limitHits: [],
             firstCwd: null,
+            firstCwdTs: null,
             sessionId: null,
             newestVersion: null,
             synthetic: 0,
@@ -440,7 +442,9 @@ function useLine(line: Buffer, offset: number, file: TranscriptFile, result: Rea
     if (needCwd) {
         const cwd = boundedString(r.cwd, MAX_CWD);
         if (cwd) {
+            const ts = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN;
             result.firstCwd = cwd;
+            result.firstCwdTs = Number.isFinite(ts) ? ts : null;
             needCwd = false;
         }
     }

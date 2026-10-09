@@ -295,21 +295,32 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     store.insertCompactions(PROVIDER, result.compactions);
     store.insertLimitHits(PROVIDER, result.limitHits);
 
+    // Every session the file's requests name is sighted, not only the file's
+    // own: a resumed or forked transcript can hold records copied from an
+    // earlier session, and each request needs its session's row.
     const sessionId = file.sessionId ?? result.sessionId;
+    const spans = new Map<string, { firstTs: number | null; lastTs: number | null }>();
     if (sessionId) {
-        let firstTs: number | null = null;
-        let lastTs: number | null = null;
-        for (const r of requests) {
-            firstTs = firstTs === null ? r.timestamp : Math.min(firstTs, r.timestamp);
-            lastTs = lastTs === null ? r.timestamp : Math.max(lastTs, r.timestamp);
-        }
+        spans.set(sessionId, { firstTs: null, lastTs: null });
+    }
+    for (const r of requests) {
+        const span = spans.get(r.sessionId) ?? { firstTs: null, lastTs: null };
+        spans.set(r.sessionId, {
+            firstTs: span.firstTs === null ? r.timestamp : Math.min(span.firstTs, r.timestamp),
+            lastTs: span.lastTs === null ? r.timestamp : Math.max(span.lastTs, r.timestamp),
+        });
+    }
+    for (const [id, span] of spans) {
+        // The cwd is the file's own session's, and only a main transcript
+        // says where a session started.
+        const own = id === sessionId && file.kind === 'main';
         const sighting: SessionSighting = {
-            sessionId,
+            sessionId: id,
             root: file.root,
-            cwd: file.kind === 'main' ? result.firstCwd : null,
+            cwd: own ? result.firstCwd : null,
+            cwdTs: own ? result.firstCwdTs : null,
             projectDir: file.projectDir,
-            firstTs,
-            lastTs,
+            ...span,
         };
         store.upsertSession(PROVIDER, sighting);
     }

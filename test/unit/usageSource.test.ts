@@ -13,7 +13,7 @@ function sources(): { name: string; text: string }[] {
 }
 
 /** The modules whose rules must hold without a file system or an editor. */
-const CORE = ['types.ts', 'provenance.ts', 'modelIds.ts', 'accounting.ts', 'aggregate.ts'];
+const CORE = ['types.ts', 'provenance.ts', 'modelIds.ts', 'accounting.ts', 'aggregate.ts', 'projects.ts', 'report.ts'];
 
 suite('usage source invariants', () => {
     test('usage never goes through the tokenizer side of the registry', () => {

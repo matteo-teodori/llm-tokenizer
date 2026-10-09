@@ -21,8 +21,18 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
+import { BUCKET_MS } from './aggregate';
 import { isComplete } from './provenance';
-import type { Compaction, LimitHit, SessionSighting, TranscriptKind, UsageProvider, UsageRequest } from './types';
+import type {
+    BucketSums,
+    Compaction,
+    LimitHit,
+    SessionSighting,
+    StoreCoverage,
+    TranscriptKind,
+    UsageProvider,
+    UsageRequest,
+} from './types';
 
 /** `PRAGMA user_version` of the schema this code writes. */
 export const SCHEMA_VERSION = 1;
@@ -207,8 +217,7 @@ CREATE TABLE sessions (
     session_id TEXT NOT NULL,
     root TEXT NOT NULL,
     cwd TEXT,
-    session_root TEXT,
-    display_name TEXT,
+    cwd_ts INTEGER,
     project_dir TEXT NOT NULL,
     first_ts INTEGER,
     last_ts INTEGER,
@@ -490,17 +499,22 @@ export class UsageStore {
     }
 
     /**
-     * Merge what an import saw of a session. Its first main-transcript cwd is
-     * kept once known, and its span only ever widens.
+     * Merge what an import saw of a session. Its cwd is the earliest one seen,
+     * by record time and then by text, so the order files are read in never
+     * matters; its span only ever widens.
      */
     upsertSession(provider: UsageProvider, s: SessionSighting): void {
         this.assertWritable();
+        const earlier = `excluded.cwd IS NOT NULL AND (sessions.cwd IS NULL
+            OR (excluded.cwd_ts IS NOT NULL AND (sessions.cwd_ts IS NULL OR excluded.cwd_ts < sessions.cwd_ts))
+            OR (excluded.cwd_ts IS sessions.cwd_ts AND excluded.cwd < sessions.cwd))`;
         this.db
             .prepare(
-                `INSERT INTO sessions (provider, session_id, root, cwd, project_dir, first_ts, last_ts)
-                 VALUES (:provider, :sessionId, :root, :cwd, :projectDir, :firstTs, :lastTs)
+                `INSERT INTO sessions (provider, session_id, root, cwd, cwd_ts, project_dir, first_ts, last_ts)
+                 VALUES (:provider, :sessionId, :root, :cwd, :cwdTs, :projectDir, :firstTs, :lastTs)
                  ON CONFLICT (provider, session_id) DO UPDATE SET
-                     cwd = coalesce(sessions.cwd, excluded.cwd),
+                     cwd = CASE WHEN ${earlier} THEN excluded.cwd ELSE sessions.cwd END,
+                     cwd_ts = CASE WHEN ${earlier} THEN excluded.cwd_ts ELSE sessions.cwd_ts END,
                      first_ts = CASE WHEN sessions.first_ts IS NULL OR excluded.first_ts < sessions.first_ts
                                      THEN coalesce(excluded.first_ts, sessions.first_ts) ELSE sessions.first_ts END,
                      last_ts = CASE WHEN sessions.last_ts IS NULL OR excluded.last_ts > sessions.last_ts
@@ -512,23 +526,88 @@ export class UsageStore {
     /** Every stored session, for the queries and the tests. */
     sessions(): (SessionSighting & { provider: UsageProvider })[] {
         return this.db
-            .prepare('SELECT provider, session_id, root, cwd, project_dir, first_ts, last_ts FROM sessions ORDER BY session_id')
+            .prepare('SELECT provider, session_id, root, cwd, cwd_ts, project_dir, first_ts, last_ts FROM sessions ORDER BY session_id')
             .all()
             .map(row => ({
                 provider: row.provider as UsageProvider,
                 sessionId: row.session_id as string,
                 root: row.root as string,
                 cwd: row.cwd as string | null,
+                cwdTs: row.cwd_ts as number | null,
                 projectDir: row.project_dir as string,
                 firstTs: row.first_ts as number | null,
                 lastTs: row.last_ts as number | null,
             }));
     }
 
-    compactions(): Compaction[] {
+    /**
+     * Request sums by 15-minute UTC bucket, session, model, variant, kind and
+     * effort, from `sinceMs` on. Every current UTC offset is a multiple of 15
+     * minutes, so no bucket straddles a local midnight, and the caller folds
+     * them into days in any zone exactly.
+     */
+    bucketSums(sinceMs: number): BucketSums[] {
         return this.db
-            .prepare('SELECT uuid, session_id, ts, trigger, pre_tokens, post_tokens FROM compactions ORDER BY ts, uuid')
-            .all()
+            .prepare(
+                `SELECT ts / ${BUCKET_MS} AS bucket, session_id, model, variant, kind, effort,
+                        count(*) AS requests, sum(complete) AS complete, min(ts) AS first_ts, max(ts) AS last_ts,
+                        coalesce(sum(input), 0) AS input, coalesce(sum(cache_creation), 0) AS cache_creation,
+                        coalesce(sum(cache_read), 0) AS cache_read, coalesce(sum(output), 0) AS output,
+                        coalesce(sum(cache_5m), 0) AS cache_5m, coalesce(sum(cache_1h), 0) AS cache_1h,
+                        coalesce(sum(thinking), 0) AS thinking, coalesce(sum(web_search), 0) AS web_search,
+                        coalesce(sum(web_fetch), 0) AS web_fetch
+                 FROM requests
+                 WHERE ts >= ?
+                 GROUP BY bucket, session_id, model, variant, kind, effort`,
+            )
+            .all(sinceMs)
+            .map(row => ({
+                bucket: row.bucket as number,
+                sessionId: row.session_id as string,
+                model: row.model as string,
+                variant: row.variant as string | null,
+                kind: row.kind as TranscriptKind,
+                effort: row.effort as string | null,
+                requests: row.requests as number,
+                completeRequests: row.complete as number,
+                firstTs: row.first_ts as number,
+                lastTs: row.last_ts as number,
+                input: row.input as number,
+                cacheCreation: row.cache_creation as number,
+                cacheRead: row.cache_read as number,
+                output: row.output as number,
+                cacheWrite5m: row.cache_5m as number,
+                cacheWrite1h: row.cache_1h as number,
+                thinking: row.thinking as number,
+                webSearchRequests: row.web_search as number,
+                webFetchRequests: row.web_fetch as number,
+            }));
+    }
+
+    /** The span and size of the whole history, whatever range is shown. */
+    coverage(): StoreCoverage {
+        const requests = this.db.prepare('SELECT min(ts) AS start, max(ts) AS newest, count(*) AS n FROM requests').get() as {
+            start: number | null;
+            newest: number | null;
+            n: number;
+        };
+        const files = this.db
+            .prepare('SELECT count(*) AS n, coalesce(sum(oversize_lines), 0) AS oversize, coalesce(sum(malformed_lines), 0) AS malformed FROM files')
+            .get() as { n: number; oversize: number; malformed: number };
+        return {
+            start: requests.start,
+            newest: requests.newest,
+            requests: requests.n,
+            files: files.n,
+            oversizeLines: files.oversize,
+            malformedLines: files.malformed,
+        };
+    }
+
+    compactions(sinceMs = 0): Compaction[] {
+        return this.db
+            .prepare('SELECT uuid, session_id, ts, trigger, pre_tokens, post_tokens FROM compactions WHERE ts >= ? ORDER BY ts, uuid')
+            .all(sinceMs)
             .map(row => ({
                 uuid: row.uuid as string,
                 sessionId: row.session_id as string,
@@ -539,10 +618,10 @@ export class UsageStore {
             }));
     }
 
-    limitHits(): LimitHit[] {
+    limitHits(sinceMs = 0): LimitHit[] {
         return this.db
-            .prepare('SELECT uuid, session_id, ts, limit_type, resets_at FROM limit_hits ORDER BY ts, uuid')
-            .all()
+            .prepare('SELECT uuid, session_id, ts, limit_type, resets_at FROM limit_hits WHERE ts >= ? ORDER BY ts, uuid')
+            .all(sinceMs)
             .map(row => ({
                 uuid: row.uuid as string,
                 sessionId: row.session_id as string,

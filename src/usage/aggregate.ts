@@ -19,6 +19,13 @@ import {
 } from './provenance';
 import type { UsageRequest } from './types';
 
+/**
+ * The width of the store's time buckets: 15 minutes. Every current UTC offset
+ * is a multiple of it, so no bucket straddles a local midnight, and buckets
+ * fold into days in any zone exactly.
+ */
+export const BUCKET_MS = 15 * 60 * 1000;
+
 /** Sums over a set of requests. A missing counter adds nothing. */
 export interface UsageTotals {
     input: number;
@@ -29,6 +36,9 @@ export interface UsageTotals {
     cacheWrite1h: number;
     /** A breakdown of `output`, never added to it. */
     thinking: number;
+    /** Server tool requests, which a hand-made cost calculation also needs. */
+    webSearchRequests: number;
+    webFetchRequests: number;
     /** input + cacheCreation + cacheRead + output: what was processed. */
     processed: number;
     /** `partial` as soon as one request in it was missing a counter. */
@@ -45,6 +55,8 @@ export function emptyTotals(): UsageTotals {
         cacheWrite5m: 0,
         cacheWrite1h: 0,
         thinking: 0,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
         processed: 0,
         provenance: 'reported',
         coverage: { ...EMPTY_COVERAGE },
@@ -65,6 +77,8 @@ export function addRequest(totals: UsageTotals, request: UsageRequest): void {
     totals.cacheWrite5m += request.cacheWrite5m ?? 0;
     totals.cacheWrite1h += request.cacheWrite1h ?? 0;
     totals.thinking += request.thinking ?? 0;
+    totals.webSearchRequests += request.webSearchRequests ?? 0;
+    totals.webFetchRequests += request.webFetchRequests ?? 0;
     totals.processed += input + cacheCreation + cacheRead + output;
     totals.provenance = addProvenance(totals.provenance, requestProvenance(request));
     totals.coverage = extendCoverage(totals.coverage, request.timestamp, isComplete(request));
@@ -80,6 +94,8 @@ export function mergeTotals(a: UsageTotals, b: UsageTotals): UsageTotals {
         cacheWrite5m: a.cacheWrite5m + b.cacheWrite5m,
         cacheWrite1h: a.cacheWrite1h + b.cacheWrite1h,
         thinking: a.thinking + b.thinking,
+        webSearchRequests: a.webSearchRequests + b.webSearchRequests,
+        webFetchRequests: a.webFetchRequests + b.webFetchRequests,
         processed: a.processed + b.processed,
         provenance: addProvenance(a.provenance, b.provenance),
         coverage: {

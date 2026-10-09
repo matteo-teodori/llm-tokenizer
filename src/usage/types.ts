@@ -99,10 +99,50 @@ export interface LimitHit {
 export interface SessionSighting {
     sessionId: string;
     root: string;
-    /** The first cwd of its main transcript, when this import read it. */
+    /**
+     * The first cwd this import read in one of its main transcripts, and the
+     * time of the record that carried it. The earliest one seen is kept,
+     * whatever order the files are read in: `/cd` and EnterWorktree move a
+     * session's main transcript to another project folder.
+     */
     cwd: string | null;
+    cwdTs: number | null;
     projectDir: string;
     firstTs: number | null;
     lastTs: number | null;
 }
 
+/** One group of the store's bucket sums: counters summed, a missing one adding nothing. */
+export interface BucketSums {
+    /** `floor(ts / BUCKET_MS)`. */
+    bucket: number;
+    sessionId: string;
+    model: string;
+    variant: string | null;
+    kind: TranscriptKind;
+    effort: string | null;
+    requests: number;
+    /** Requests that reported all four counters. */
+    completeRequests: number;
+    firstTs: number;
+    lastTs: number;
+    input: number;
+    cacheCreation: number;
+    cacheRead: number;
+    output: number;
+    cacheWrite5m: number;
+    cacheWrite1h: number;
+    thinking: number;
+    webSearchRequests: number;
+    webFetchRequests: number;
+}
+
+export interface StoreCoverage {
+    /** The oldest and newest request held, of any range. */
+    start: number | null;
+    newest: number | null;
+    requests: number;
+    files: number;
+    oversizeLines: number;
+    malformedLines: number;
+}

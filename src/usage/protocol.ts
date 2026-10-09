@@ -8,18 +8,22 @@
  */
 
 import type { ImportSummary } from './importer';
+import type { RangeKey, UsageReport } from './report';
 
 export type UsageWorkerRequest =
     | { type: 'import'; id: number; storeFile: string; roots: string[] }
+    /** `workspaceFolders` null reports every project. */
+    | { type: 'query'; id: number; storeFile: string; range: RangeKey; zone: string; workspaceFolders: string[] | null }
     | { type: 'clear'; id: number; storeFile: string }
     | { type: 'close'; id: number };
 
 /** Why the worker could not do what it was asked, as fixed strings. */
-export type UsageFailure = 'store-busy' | 'store-io' | 'store-read-only' | 'import-failed' | 'unknown';
+export type UsageFailure = 'store-busy' | 'store-io' | 'store-read-only' | 'import-failed' | 'bad-request' | 'unknown';
 
 export type UsageWorkerResponse =
     | { type: 'imported'; id: number; summary: ImportSummary; leaseHeldElsewhere: false }
     | { type: 'imported'; id: number; summary: null; leaseHeldElsewhere: true }
+    | { type: 'report'; id: number; report: UsageReport }
     | { type: 'cleared'; id: number; generation: number }
     | { type: 'closed'; id: number }
     /** This runtime has no `node:sqlite` binding. */
