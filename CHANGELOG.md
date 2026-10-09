@@ -4,6 +4,76 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.1.2] - 2026-10-09
+
+### Added
+- **Fifteen models released, or found missing, since the September registry
+  check.**
+  - Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5.
+  - GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna.
+  - Grok 4.7.
+  - Gemma 4 26B A4B.
+  - DeepSeek V4.1 Flash.
+  - Mistral Large 4 (preview).
+  - Qwen3.7-Flash.
+  - GLM-5.3-FlashX.
+  - MiniMax M3.1 Flash (preview).
+  - MiMo V2.6 Pro and V2.6 Flash.
+
+  That makes 99 models across the same 13 providers, 64 of them counted
+  with the model's own tokenizer.
+
+  Haiku 5.5 is estimated with Claude's current-tokenizer ratio rather than
+  Haiku 4.5's, because Anthropic says the same text counts about 30% more
+  tokens on it. The new GPT-6 models are estimated for the same reason as
+  GPT-6 Astra: OpenAI has published no encoding for them. The Mistral
+  Large 4 and MiniMax M3.1 previews have no published tokenizer, so they
+  stay estimated until one ships.
+
+### Changed
+- **MiniMax model ids now use the capitalisation the API documents.**
+  `minimax-m3` is now `MiniMax-M3`, and so on, because that is the only
+  form MiniMax's own documentation uses. A saved choice migrates by itself.
+- **DeepSeek V4 Flash has been replaced by V4.1 Flash.** DeepSeek retired
+  V4 Flash on 10 September and routes its id to V4.1 Flash
+  (`deepseek-flash`), which has a tokenizer file of its own. A saved V4
+  Flash choice migrates to it. V4 Pro's limit is now 1,048,576, the
+  figure in DeepSeek's API reference.
+- **Mistral Medium 3.5 and Small 4 download their own tokenizer.** They had
+  shared Large 3's. That file counts ordinary text the same way, but it
+  counts Mistral's control strings differently: `[MODEL_SETTINGS]` came to
+  6 tokens instead of 1. One extra download of about 17 MB covers both
+  models.
+- **Qwen3.8-Max is now counted exactly, and GLM-5-Turbo is now estimated.**
+  - Qwen documents Max as the official version of its open Qwen3.8
+    checkpoint, whose tokenizer the registry already used for Qwen3.8-Flash.
+  - Zhipu publishes no tokenizer for GLM-5-Turbo and says nothing about
+    which vocabulary it shares, so calling it exact was an assumption.
+
+### Fixed
+- **A crashed tokenizer worker could take its replacement down with it.**
+  When the worker died, its exit arrived after the next count had already
+  started a replacement, and the extension threw the replacement away. That
+  count came back as an estimate. The replacement thread was left running,
+  outside anything the extension could stop. It held whatever vocabulary
+  it had loaded, and a rank table is about 150 MB.
+- **A worker that failed as it started was restarted for every file.** A
+  scan of 50 files started it 50 times, and each attempt ended in an
+  estimate anyway. After three failures within a minute, counts now go
+  straight to the estimate until the worker can be restarted. A scan no
+  longer logs one error per file.
+- **Counts in the billions read as thousands of millions.** A billion tokens
+  showed as "1000.0M". They now read "1.0B".
+
+### Internal
+- The checks that every contributed command is registered, and that every
+  setting reads back with its declared type, now take the manifest as their
+  list instead of a hand-written one. They also catch a default of the
+  wrong type and a default outside its own enum. 170 tests.
+- Working notes in `.notes/` are no longer linted. Three comments that
+  described the runtime and Llama's special-token baseline wrongly are
+  corrected.
+
 ## [2.1.1] - 2026-09-04
 
 ### Added
