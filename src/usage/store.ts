@@ -1,0 +1,673 @@
+/**
+ * The usage history: one SQLite database, through `node:sqlite`, owned by the
+ * usage worker.
+ *
+ * It is the only long-term copy of the history: Claude Code deletes its own
+ * session records after `cleanupPeriodDays` (30 by default), so nothing here
+ * may be treated as a cache that can be thrown away and rebuilt. Hence
+ * forward-only migrations with a backup before each, a read-only mode for a
+ * database a newer version created, and, for a corrupt file, a rename rather
+ * than a delete.
+ *
+ * Measured, on the stand-in schema: a full import of about 4 GB of records in
+ * 6.49 s on the engines floor's runtime, a 9.5 MB database for about 133,000
+ * requests, a day-by-model GROUP BY in 65 ms.
+ *
+ * Only the API of Node 22.19, the floor's runtime, is used: no `limits`,
+ * `serialize`, `createTagStore`, `enableDefensive` or `setAuthorizer`.
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
+
+import { isComplete } from './provenance';
+import type { TranscriptKind, UsageProvider, UsageRequest } from './types';
+
+/** `PRAGMA user_version` of the schema this code writes. */
+export const SCHEMA_VERSION = 1;
+
+/** How old a lease's heartbeat must be before another window may take it. */
+export const LEASE_TAKEOVER_MS = 20_000;
+
+type Sqlite = typeof import('node:sqlite');
+
+/** SQLite's primary result codes this module tells apart. */
+const SQLITE_BUSY = 5;
+const SQLITE_READONLY = 8;
+const SQLITE_CORRUPT = 11;
+const SQLITE_NOTADB = 26;
+
+/**
+ * `node:sqlite`, or undefined when this runtime has no binding for it.
+ *
+ * Required here, never at the top level of a bundle: esbuild leaves it
+ * external, and a host without it would fail to load the whole worker.
+ */
+export function loadSqlite(): Sqlite | undefined {
+    installSqliteWarningFilter();
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        return require('node:sqlite') as Sqlite;
+    } catch {
+        return undefined;
+    }
+}
+
+let filtering = false;
+
+/**
+ * Drop the ExperimentalWarning that `node:sqlite` emits on Node 22, once per
+ * worker, and nothing else: on the floor's runtime three sequential workers
+ * printed it three times.
+ */
+export function installSqliteWarningFilter(): void {
+    if (filtering) {
+        return;
+    }
+    filtering = true;
+    const emit = process.emitWarning.bind(process) as (...args: unknown[]) => void;
+    process.emitWarning = ((warning: unknown, ...rest: unknown[]) => {
+        const type = typeof rest[0] === 'string' ? rest[0] : (rest[0] as { type?: string } | undefined)?.type;
+        const name = warning instanceof Error ? warning.name : type;
+        const text = warning instanceof Error ? warning.message : String(warning);
+        if (name === 'ExperimentalWarning' && /sqlite/i.test(text)) {
+            return;
+        }
+        emit(warning, ...rest);
+    });
+}
+
+/** What opening the history gave. */
+export type OpenResult =
+    | { status: 'ready'; store: UsageStore; journal: 'wal' | 'delete'; recoveredFrom?: string }
+    | { status: 'read-only'; store: UsageStore; reason: 'newer-schema'; schema: number }
+    | { status: 'failed'; category: 'busy' | 'io' | 'unknown' };
+
+export interface OpenOptions {
+    /** The wall clock, for lease heartbeats shared between windows. */
+    now?: () => number;
+    /** Attempts at opening and initialising before giving up on SQLITE_BUSY. */
+    attempts?: number;
+    /** Treat the file as being on a network filesystem (tests). */
+    forceRollbackJournal?: boolean;
+}
+
+/** A file's checkpoint: how far it has been read, and what it was. */
+export interface FileCheckpoint {
+    provider: UsageProvider;
+    path: string;
+    root: string;
+    kind: TranscriptKind;
+    sessionId: string | null;
+    runId: string | null;
+    agentId: string | null;
+    projectDir: string;
+    dev: number | null;
+    ino: number | null;
+    size: number;
+    mtimeMs: number;
+    /** The byte after the last newline read. */
+    offset: number;
+    /** A hash of the 64 bytes before `offset`, to notice a rewritten file. */
+    tailHash: string | null;
+    parserVersion: number;
+    inProgress: boolean;
+    crashCount: number;
+    oversizeLines: number;
+    malformedLines: number;
+    newestVersion: string | null;
+}
+
+const SCHEMA = `
+CREATE TABLE meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE files (
+    provider TEXT NOT NULL DEFAULT 'claude-code',
+    path TEXT NOT NULL,
+    root TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    session_id TEXT,
+    run_id TEXT,
+    agent_id TEXT,
+    project_dir TEXT NOT NULL,
+    dev INTEGER,
+    ino INTEGER,
+    size INTEGER NOT NULL,
+    mtime_ms INTEGER NOT NULL,
+    offset INTEGER NOT NULL,
+    tail_hash TEXT,
+    parser_version INTEGER NOT NULL,
+    in_progress INTEGER NOT NULL DEFAULT 0,
+    crash_count INTEGER NOT NULL DEFAULT 0,
+    oversize_lines INTEGER NOT NULL DEFAULT 0,
+    malformed_lines INTEGER NOT NULL DEFAULT 0,
+    newest_version TEXT,
+    PRIMARY KEY (provider, path)
+) STRICT;
+
+CREATE TABLE requests (
+    provider TEXT NOT NULL DEFAULT 'claude-code',
+    message_id TEXT NOT NULL,
+    parser_version INTEGER NOT NULL,
+    file TEXT NOT NULL,
+    byte_offset INTEGER NOT NULL,
+    is_main INTEGER NOT NULL,
+    complete INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    model TEXT NOT NULL,
+    variant TEXT,
+    input INTEGER,
+    cache_creation INTEGER,
+    cache_read INTEGER,
+    output INTEGER,
+    cache_5m INTEGER,
+    cache_1h INTEGER,
+    thinking INTEGER,
+    effort TEXT,
+    web_search INTEGER,
+    web_fetch INTEGER,
+    request_id TEXT,
+    claude_code_version TEXT,
+    agent_id TEXT,
+    run_id TEXT,
+    PRIMARY KEY (provider, message_id)
+) STRICT;
+CREATE INDEX requests_ts ON requests (ts);
+CREATE INDEX requests_session ON requests (session_id);
+CREATE INDEX requests_request_id ON requests (request_id);
+CREATE INDEX requests_file ON requests (file);
+
+CREATE TABLE sessions (
+    provider TEXT NOT NULL DEFAULT 'claude-code',
+    session_id TEXT NOT NULL,
+    root TEXT NOT NULL,
+    session_root TEXT,
+    display_name TEXT,
+    project_dir TEXT NOT NULL,
+    first_ts INTEGER,
+    last_ts INTEGER,
+    PRIMARY KEY (provider, session_id)
+) STRICT;
+
+CREATE TABLE compactions (
+    provider TEXT NOT NULL DEFAULT 'claude-code',
+    uuid TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    trigger TEXT,
+    pre_tokens INTEGER,
+    post_tokens INTEGER,
+    PRIMARY KEY (provider, uuid)
+) STRICT;
+
+CREATE TABLE limit_hits (
+    provider TEXT NOT NULL DEFAULT 'claude-code',
+    uuid TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    limit_type TEXT NOT NULL,
+    resets_at INTEGER,
+    PRIMARY KEY (provider, uuid)
+) STRICT;
+
+CREATE TABLE lease (
+    role TEXT PRIMARY KEY,
+    holder TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    parser_version INTEGER NOT NULL,
+    heartbeat INTEGER NOT NULL
+) STRICT;
+`;
+
+/** Tables that hold history: everything Clear empties. */
+const DATA_TABLES = ['files', 'requests', 'sessions', 'compactions', 'limit_hits'];
+
+/**
+ * Migrations by the version they produce. Forward-only and additive, each in
+ * one transaction after a backup. Version 1 creates the schema.
+ */
+const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
+    1: db => db.exec(SCHEMA),
+};
+
+/**
+ * The comparator of `accounting.ts`, as the upsert's condition: the incoming
+ * record replaces the stored one only when it would represent the request
+ * instead. Text compares as UTF-8 bytes (BINARY collation), as the
+ * JavaScript side does.
+ */
+const UPSERT_REQUEST = `
+INSERT INTO requests (
+    provider, message_id, parser_version, file, byte_offset, is_main, complete, ts,
+    session_id, kind, model, variant, input, cache_creation, cache_read, output,
+    cache_5m, cache_1h, thinking, effort, web_search, web_fetch, request_id,
+    claude_code_version, agent_id, run_id
+) VALUES (
+    :provider, :messageId, :parserVersion, :file, :byteOffset, :isMain, :complete, :ts,
+    :sessionId, :kind, :model, :variant, :input, :cacheCreation, :cacheRead, :output,
+    :cache5m, :cache1h, :thinking, :effort, :webSearch, :webFetch, :requestId,
+    :claudeCodeVersion, :agentId, :runId
+)
+ON CONFLICT (provider, message_id) DO UPDATE SET
+    (parser_version, file, byte_offset, is_main, complete, ts, session_id, kind, model,
+     variant, input, cache_creation, cache_read, output, cache_5m, cache_1h, thinking,
+     effort, web_search, web_fetch, request_id, claude_code_version, agent_id, run_id)
+  = (excluded.parser_version, excluded.file, excluded.byte_offset, excluded.is_main,
+     excluded.complete, excluded.ts, excluded.session_id, excluded.kind, excluded.model,
+     excluded.variant, excluded.input, excluded.cache_creation, excluded.cache_read,
+     excluded.output, excluded.cache_5m, excluded.cache_1h, excluded.thinking,
+     excluded.effort, excluded.web_search, excluded.web_fetch, excluded.request_id,
+     excluded.claude_code_version, excluded.agent_id, excluded.run_id)
+WHERE excluded.parser_version > requests.parser_version
+   OR (excluded.parser_version = requests.parser_version AND (
+        (excluded.is_main, excluded.complete, coalesce(excluded.output, -1))
+          > (requests.is_main, requests.complete, coalesce(requests.output, -1))
+     OR ((excluded.is_main, excluded.complete, coalesce(excluded.output, -1))
+          = (requests.is_main, requests.complete, coalesce(requests.output, -1))
+         AND (excluded.file, excluded.byte_offset) < (requests.file, requests.byte_offset))))
+`;
+
+export class UsageStore {
+    private readonly upsertStatement: StatementSync;
+
+    private constructor(
+        private readonly db: DatabaseSync,
+        readonly file: string,
+        readonly readOnly: boolean,
+        private readonly now: () => number,
+    ) {
+        this.upsertStatement = db.prepare(UPSERT_REQUEST);
+    }
+
+    /**
+     * Open, or create, the history at `file`, through `sqlite`.
+     *
+     * Retries on SQLITE_BUSY, because two windows initialising one new store
+     * at once hit it in 2 of 8 trials even with a 5 s busy timeout.
+     */
+    static open(sqlite: Sqlite, file: string, options: OpenOptions = {}): OpenResult {
+        const now = options.now ?? Date.now;
+        const attempts = options.attempts ?? 10;
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+
+        for (let attempt = 1; ; attempt++) {
+            try {
+                return UsageStore.openOnce(sqlite, file, now, options);
+            } catch (error) {
+                const code = primaryCode(error);
+                if (code === SQLITE_BUSY && attempt < attempts) {
+                    sleep(25 * attempt);
+                    continue;
+                }
+                if (code === SQLITE_CORRUPT || code === SQLITE_NOTADB) {
+                    const renamed = setAside(file, now());
+                    const reopened = UsageStore.openOnce(sqlite, file, now, options);
+                    return reopened.status === 'ready' ? { ...reopened, recoveredFrom: renamed } : reopened;
+                }
+                return { status: 'failed', category: code === SQLITE_BUSY ? 'busy' : code === undefined ? 'unknown' : 'io' };
+            }
+        }
+    }
+
+    private static openOnce(sqlite: Sqlite, file: string, now: () => number, options: OpenOptions): OpenResult {
+        let db = new sqlite.DatabaseSync(file);
+        try {
+            db.exec('PRAGMA busy_timeout = 5000');
+            const schema = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+
+            // A newer extension created it: read it, never write or migrate it.
+            if (schema > SCHEMA_VERSION) {
+                db.close();
+                db = new sqlite.DatabaseSync(file, { readOnly: true });
+                db.exec('PRAGMA busy_timeout = 5000');
+                return { status: 'read-only', store: new UsageStore(db, file, true, now), reason: 'newer-schema', schema };
+            }
+
+            if (schema > 0) {
+                const check = (db.prepare('PRAGMA quick_check').get() as { quick_check: string }).quick_check;
+                if (check !== 'ok') {
+                    throw Object.assign(new Error('quick_check failed'), { errcode: SQLITE_CORRUPT });
+                }
+            }
+
+            const journal = UsageStore.configure(db, file, options);
+            UsageStore.migrate(db, file, schema);
+            return { status: 'ready', store: new UsageStore(db, file, false, now), journal };
+        } catch (error) {
+            db.close();
+            throw error;
+        }
+    }
+
+    /**
+     * Pragmas, all set explicitly: a worker's resourceLimits cap the V8 heap
+     * only, not SQLite's own memory or a memory-mapped file.
+     */
+    private static configure(db: DatabaseSync, file: string, options: OpenOptions): 'wal' | 'delete' {
+        db.exec('PRAGMA synchronous = NORMAL; PRAGMA cache_size = -8192; PRAGMA mmap_size = 0');
+        // WAL needs shared memory that network filesystems do not provide;
+        // there, one window writes (the lease holder) under a rollback journal.
+        if (options.forceRollbackJournal || onNetworkFilesystem(path.dirname(file))) {
+            db.exec('PRAGMA journal_mode = DELETE');
+            return 'delete';
+        }
+        const mode = (db.prepare('PRAGMA journal_mode = WAL').get() as { journal_mode: string }).journal_mode;
+        if (mode !== 'wal') {
+            db.exec('PRAGMA journal_mode = DELETE');
+            return 'delete';
+        }
+        return 'wal';
+    }
+
+    private static migrate(db: DatabaseSync, file: string, from: number): void {
+        for (let version = from + 1; version <= SCHEMA_VERSION; version++) {
+            // The first migration creates the schema; there is nothing to keep.
+            if (from > 0) {
+                db.exec(`VACUUM INTO ${sqlString(`${file}.bak-v${version - 1}`)}`);
+            }
+            db.exec('BEGIN IMMEDIATE');
+            try {
+                MIGRATIONS[version](db);
+                if (version === 1) {
+                    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+                    db.prepare("INSERT INTO meta (key, value) VALUES ('store_id', ?), ('store_generation', '0')").run(id);
+                }
+                db.exec(`PRAGMA user_version = ${version}`);
+                db.exec('COMMIT');
+            } catch (error) {
+                db.exec('ROLLBACK');
+                throw error;
+            }
+        }
+    }
+
+    close(): void {
+        this.db.close();
+    }
+
+    /** Run `work` in one write transaction, rolled back if it throws. */
+    transaction<T>(work: () => T): T {
+        this.assertWritable();
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+            const result = work();
+            this.db.exec('COMMIT');
+            return result;
+        } catch (error) {
+            if (this.db.isTransaction) {
+                this.db.exec('ROLLBACK');
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Store `requests`, each replacing the stored row for its `messageId`
+     * only when the comparator prefers it. Call inside `transaction`.
+     */
+    upsertRequests(requests: Iterable<UsageRequest>): void {
+        this.assertWritable();
+        for (const r of requests) {
+            this.upsertStatement.run({
+                provider: r.provider,
+                messageId: r.messageId,
+                parserVersion: r.parserVersion,
+                file: r.file,
+                byteOffset: r.byteOffset,
+                isMain: r.isMain ? 1 : 0,
+                complete: isComplete(r) ? 1 : 0,
+                ts: r.timestamp,
+                sessionId: r.sessionId,
+                kind: r.kind,
+                model: r.model,
+                variant: r.variant,
+                input: r.input,
+                cacheCreation: r.cacheCreation,
+                cacheRead: r.cacheRead,
+                output: r.output,
+                cache5m: r.cacheWrite5m,
+                cache1h: r.cacheWrite1h,
+                thinking: r.thinking,
+                effort: r.effort,
+                webSearch: r.webSearchRequests,
+                webFetch: r.webFetchRequests,
+                requestId: r.requestId,
+                claudeCodeVersion: r.claudeCodeVersion,
+                agentId: r.agentId,
+                runId: r.runId,
+            });
+        }
+    }
+
+    /**
+     * Drop the rows read from `file` before re-reading it with a newer parser,
+     * so that a change of key cannot leave its old rows behind as doubles.
+     */
+    deleteRequestsFromFile(provider: UsageProvider, file: string): void {
+        this.assertWritable();
+        this.db.prepare('DELETE FROM requests WHERE provider = ? AND file = ?').run(provider, file);
+    }
+
+    /** Every stored request, for the queries and the tests. */
+    *requests(): IterableIterator<UsageRequest> {
+        for (const row of this.db.prepare('SELECT * FROM requests ORDER BY provider, message_id').iterate()) {
+            yield toRequest(row);
+        }
+    }
+
+    getFile(provider: UsageProvider, filePath: string): FileCheckpoint | undefined {
+        const row = this.db.prepare('SELECT * FROM files WHERE provider = ? AND path = ?').get(provider, filePath);
+        return row ? toCheckpoint(row) : undefined;
+    }
+
+    /** Record how far `checkpoint.path` was read. Call in the same transaction as its rows. */
+    putFile(checkpoint: FileCheckpoint): void {
+        this.assertWritable();
+        this.db
+            .prepare(
+                `INSERT OR REPLACE INTO files (
+                    provider, path, root, kind, session_id, run_id, agent_id, project_dir, dev, ino,
+                    size, mtime_ms, offset, tail_hash, parser_version, in_progress, crash_count,
+                    oversize_lines, malformed_lines, newest_version
+                ) VALUES (
+                    :provider, :path, :root, :kind, :sessionId, :runId, :agentId, :projectDir, :dev, :ino,
+                    :size, :mtimeMs, :offset, :tailHash, :parserVersion, :inProgress, :crashCount,
+                    :oversizeLines, :malformedLines, :newestVersion
+                )`,
+            )
+            .run({
+                ...checkpoint,
+                inProgress: checkpoint.inProgress ? 1 : 0,
+            });
+    }
+
+    /** Bumped by every Clear, so a worker holding caches knows to drop them. */
+    generation(): number {
+        const row = this.db.prepare("SELECT value FROM meta WHERE key = 'store_generation'").get() as { value: string } | undefined;
+        return row ? Number(row.value) : 0;
+    }
+
+    storeId(): string {
+        return (this.db.prepare("SELECT value FROM meta WHERE key = 'store_id'").get() as { value: string }).value;
+    }
+
+    /**
+     * Delete the history, in SQL on the connection every window shares.
+     *
+     * The file itself is never unlinked: on POSIX another window would go on
+     * writing to the unlinked file, and Windows refuses to delete one that is
+     * open. VACUUM afterwards returns the space, and is skipped if another
+     * window is busy with the database.
+     */
+    clear(): void {
+        this.transaction(() => {
+            for (const table of DATA_TABLES) {
+                this.db.exec(`DELETE FROM ${table}`);
+            }
+            this.db.exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
+        });
+        try {
+            this.db.exec('VACUUM');
+        } catch (error) {
+            if (primaryCode(error) !== SQLITE_BUSY) {
+                throw error;
+            }
+        }
+    }
+
+    /**
+     * Hold `role` (one importing window at a time), or keep holding it.
+     *
+     * Taken when it is free, when its heartbeat is older than
+     * LEASE_TAKEOVER_MS, or when its holder runs an older parser: a window
+     * that was not reloaded after an update must not write rows the newer
+     * parser would replace.
+     *
+     * @returns whether `holder` now holds it.
+     */
+    acquireLease(role: string, holder: string, parserVersion: number): boolean {
+        return this.transaction(() => {
+            const now = this.now();
+            const current = this.db.prepare('SELECT holder, parser_version, heartbeat FROM lease WHERE role = ?').get(role) as
+                | { holder: string; parser_version: number; heartbeat: number }
+                | undefined;
+            const mine = current?.holder === holder;
+            const free = !current || now - current.heartbeat > LEASE_TAKEOVER_MS || current.parser_version < parserVersion;
+            if (!mine && !free) {
+                return false;
+            }
+            this.db
+                .prepare('INSERT OR REPLACE INTO lease (role, holder, pid, parser_version, heartbeat) VALUES (?, ?, ?, ?, ?)')
+                .run(role, holder, process.pid, parserVersion, now);
+            return true;
+        });
+    }
+
+    releaseLease(role: string, holder: string): void {
+        this.transaction(() => {
+            this.db.prepare('DELETE FROM lease WHERE role = ? AND holder = ?').run(role, holder);
+        });
+    }
+
+    private assertWritable(): void {
+        if (this.readOnly) {
+            throw Object.assign(new Error('The usage history was created by a newer LLM Tokenizer and is read-only here'), {
+                errcode: SQLITE_READONLY,
+            });
+        }
+    }
+}
+
+function toRequest(row: Record<string, unknown>): UsageRequest {
+    return {
+        provider: row.provider as UsageProvider,
+        messageId: row.message_id as string,
+        requestId: row.request_id as string | null,
+        sessionId: row.session_id as string,
+        kind: row.kind as TranscriptKind,
+        isMain: row.is_main === 1,
+        timestamp: row.ts as number,
+        model: row.model as string,
+        variant: row.variant as string | null,
+        input: row.input as number | null,
+        cacheCreation: row.cache_creation as number | null,
+        cacheRead: row.cache_read as number | null,
+        output: row.output as number | null,
+        cacheWrite5m: row.cache_5m as number | null,
+        cacheWrite1h: row.cache_1h as number | null,
+        thinking: row.thinking as number | null,
+        effort: row.effort as string | null,
+        webSearchRequests: row.web_search as number | null,
+        webFetchRequests: row.web_fetch as number | null,
+        claudeCodeVersion: row.claude_code_version as string | null,
+        agentId: row.agent_id as string | null,
+        runId: row.run_id as string | null,
+        file: row.file as string,
+        byteOffset: row.byte_offset as number,
+        parserVersion: row.parser_version as number,
+    };
+}
+
+function toCheckpoint(row: Record<string, unknown>): FileCheckpoint {
+    return {
+        provider: row.provider as UsageProvider,
+        path: row.path as string,
+        root: row.root as string,
+        kind: row.kind as TranscriptKind,
+        sessionId: row.session_id as string | null,
+        runId: row.run_id as string | null,
+        agentId: row.agent_id as string | null,
+        projectDir: row.project_dir as string,
+        dev: row.dev as number | null,
+        ino: row.ino as number | null,
+        size: row.size as number,
+        mtimeMs: row.mtime_ms as number,
+        offset: row.offset as number,
+        tailHash: row.tail_hash as string | null,
+        parserVersion: row.parser_version as number,
+        inProgress: row.in_progress === 1,
+        crashCount: row.crash_count as number,
+        oversizeLines: row.oversize_lines as number,
+        malformedLines: row.malformed_lines as number,
+        newestVersion: row.newest_version as string | null,
+    };
+}
+
+/** SQLite's primary result code from an error `node:sqlite` threw, if any. */
+function primaryCode(error: unknown): number | undefined {
+    const code = (error as { errcode?: unknown } | null)?.errcode;
+    return typeof code === 'number' ? code & 0xff : undefined;
+}
+
+/**
+ * Move a corrupt history aside, with its journal files, and say where. It is
+ * renamed rather than deleted: it is the only copy of whatever the session
+ * records on disk no longer hold.
+ */
+function setAside(file: string, now: number): string {
+    const target = `${file}.corrupt-${now}`;
+    for (const suffix of ['', '-wal', '-shm']) {
+        try {
+            fs.renameSync(file + suffix, target + suffix);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                throw error;
+            }
+        }
+    }
+    return target;
+}
+
+/** Linux's magic numbers for the filesystems WAL cannot be trusted on. */
+const NETWORK_FILESYSTEMS = new Set([
+    0x6969, // NFS
+    0x517b, // SMB
+    0xff534d42, // CIFS
+    0xfe534d42, // SMB2
+]);
+
+function onNetworkFilesystem(directory: string): boolean {
+    if (process.platform !== 'linux') {
+        return false;
+    }
+    try {
+        return NETWORK_FILESYSTEMS.has(fs.statfsSync(directory).type);
+    } catch {
+        return false;
+    }
+}
+
+function sqlString(value: string): string {
+    return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** A short synchronous wait, which a worker thread may afford. */
+function sleep(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
