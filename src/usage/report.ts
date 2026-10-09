@@ -228,7 +228,8 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
 
     for (const c of input.compactions) {
         const s = sessions.get(c.sessionId);
-        if (s && inRange(localDate(c.timestamp, zone))) {
+        // The main conversation's: a subagent compacts its own context.
+        if (s && c.kind === 'main' && inRange(localDate(c.timestamp, zone))) {
             s.row.compactions.push(c);
         }
     }

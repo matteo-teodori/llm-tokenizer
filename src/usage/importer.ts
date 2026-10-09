@@ -18,7 +18,7 @@ import * as fs from 'fs';
 
 import { dedupe } from './accounting';
 import {
-    LARGE_FILE_BYTES,
+    GUARDED_READ_BYTES,
     PARSER_VERSION,
     fileState,
     isUnchanged,
@@ -70,10 +70,17 @@ export interface ImportOptions {
     filesPerYield?: number;
     pause?: () => Promise<void>;
     isCancelled?: () => boolean;
-    /** Files over this are guarded while read (tests). */
-    largeFileBytes?: number;
+    /** Reads of more new bytes than this are guarded (tests). */
+    guardedReadBytes?: number;
     /** The wall clock, for when a crash was counted. */
     now?: () => number;
+    /**
+     * Whether a guarded read left unfinished counts as a crash: true only
+     * when this window saw its worker crash. A worker its window stopped, or
+     * a window reloaded mid-read, leaves the same trace, and two of those
+     * must not keep one of the largest sessions out for a day.
+     */
+    countCrashes?: boolean;
 }
 
 /**
@@ -134,7 +141,8 @@ async function runImport(
     const filesPerTransaction = options.filesPerTransaction ?? 100;
     const filesPerYield = options.filesPerYield ?? 50;
     const pause = options.pause ?? yieldToEvents;
-    const largeFileBytes = options.largeFileBytes ?? LARGE_FILE_BYTES;
+    const guardedReadBytes = options.guardedReadBytes ?? GUARDED_READ_BYTES;
+    const countCrashes = options.countCrashes ?? true;
     const now = options.now ?? Date.now;
     const summary: ImportSummary = {
         roots: rootCount,
@@ -224,9 +232,9 @@ async function runImport(
             }
 
             let guard: ReadGuard | undefined;
-            if (state.size > largeFileBytes) {
+            if (unreadBytes(previous, state) > guardedReadBytes) {
                 flush();
-                guard = guardRead(store, file.path, now(), writeIfCurrent);
+                guard = guardRead(store, file.path, now(), writeIfCurrent, countCrashes);
                 if (!guard) {
                     increment(summary.skipped, 'crashed');
                     continue;
@@ -332,10 +340,12 @@ function guardRead(
     filePath: string,
     now: number,
     writeIfCurrent: (work: () => void) => boolean,
+    countCrashes: boolean,
 ): ReadGuard | undefined {
     const previous = store.getReadGuard(PROVIDER, filePath);
-    // A read that never finished counts as a crash of this file.
-    const crashed = previous?.inProgress === true;
+    // A read that never finished counts as a crash of this file, when the
+    // window saw a crash; otherwise it was only interrupted.
+    const crashed = previous?.inProgress === true && countCrashes;
     const guard: ReadGuard = {
         provider: PROVIDER,
         path: filePath,
@@ -350,6 +360,20 @@ function guardRead(
         return undefined;
     }
     return writeIfCurrent(() => store.putReadGuard(guard)) ? guard : undefined;
+}
+
+/**
+ * How many bytes reading `state` will take: from the checkpoint, or the whole
+ * file where it is new, replaced, truncated or due for a newer parser. A
+ * rewrite in place is only found by reading, so it is not foreseen here.
+ */
+function unreadBytes(previous: FileCheckpoint | undefined, state: FileState): number {
+    const restarts =
+        !previous ||
+        previous.parserVersion < PARSER_VERSION ||
+        state.size < previous.offset ||
+        (previous.ino !== null && state.ino !== null && (state.ino !== previous.ino || state.dev !== previous.dev));
+    return restarts ? state.size : state.size - previous.offset;
 }
 
 /** Record that a guarded read ended without crashing, keeping its count. */
@@ -442,6 +466,9 @@ function skipReason(error: unknown): SkipReason {
             return 'unreadable';
         case 'EBUSY':
             return 'busy';
+        // Not a regular file: refused by the reader, never opened blocking.
+        case 'ENOTREG':
+            return 'unreadable';
         default:
             return 'error';
     }

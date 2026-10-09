@@ -90,6 +90,10 @@ class FakeHost implements UsageHost {
     readonly sent: UsageWorkerRequest['type'][] = [];
     /** Each import's named paths, or 'all' for a full pass. */
     readonly imports: (string[] | 'all')[] = [];
+    /** Each import's `crashed` flag. */
+    readonly crashFlags: boolean[] = [];
+    /** What the service gave as its crash callback. */
+    onCrash: () => void = () => undefined;
     stopped = 0;
     running = false;
     /** Answers each request; an import can be held open by the test. */
@@ -100,6 +104,7 @@ class FakeHost implements UsageHost {
         this.sent.push(request.type);
         if (request.type === 'import') {
             this.imports.push(request.paths ? [...request.paths].sort() : 'all');
+            this.crashFlags.push(request.crashed === true);
         }
         return this.answer(request);
     }
@@ -167,8 +172,9 @@ suite('usage service', () => {
                 calls.roots++;
                 return { env: { CLAUDE_CONFIG_DIR: FIXTURE_ROOT }, home: path.join(tmp, 'home'), platform: process.platform };
             },
-            createHost: () => {
+            createHost: onCrash => {
                 calls.hosts++;
+                host.onCrash = onCrash;
                 return host;
             },
             watch: (_folder, onHint) => {
@@ -283,6 +289,17 @@ suite('usage service', () => {
             Promise.resolve(request.type === 'import' ? { type: 'failed', id: request.id, failure: 'outdated', errorName: 'StoreError' } : defaultAnswer(request));
         await settle();
         assert.strictEqual(service.status, 'read-only');
+    });
+
+    test('after a crash the next import says so, and only until one goes through', async () => {
+        // A read the crashed worker left unfinished then counts against that
+        // file; a worker stopped by its window counts against nothing.
+        const { service, host } = make();
+        await settle();
+        host.onCrash();
+        await service.refresh();
+        await service.refresh();
+        assert.deepStrictEqual(host.crashFlags, [false, true, false]);
     });
 
     test('an idle worker is let go after 10 minutes, its history closed first', async () => {

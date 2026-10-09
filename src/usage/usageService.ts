@@ -71,7 +71,8 @@ export interface UsageServiceDeps {
     readSettings(): UsageSettings;
     /** Everything `resolveRoots` needs besides the two settings. */
     rootInputs(): Omit<RootInputs, 'setting' | 'editorEnvironment'>;
-    createHost(): UsageHost;
+    /** `onCrash` runs when a worker dies on its own, never when it is stopped. */
+    createHost(onCrash: () => void): UsageHost;
     /** Watch a `projects` folder for transcript changes; each event is only a hint, naming the file. */
     watch(projectsFolder: string, onHint: (file: string) => void): vscode.Disposable;
     startupSettled: Thenable<unknown>;
@@ -119,6 +120,8 @@ export class UsageService implements vscode.Disposable {
     private readonly holder = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     private elsewhere = false;
     private retryTimer: unknown;
+    /** A worker of this window crashed since the last import that went through. */
+    private crashed = false;
     private holders = 0;
     private watchers: vscode.Disposable[] = [];
     private firstTimer: unknown;
@@ -206,7 +209,17 @@ export class UsageService implements vscode.Disposable {
             return undefined;
         }
         const roots = (this.resolved ?? this.resolveNow()).roots.map(r => r.path);
-        const response = await this.ask({ type: 'liveContext', storeFile: this.deps.storeFile, roots, sessionId, holder: this.holder });
+        const response = await this.ask({
+            type: 'liveContext',
+            storeFile: this.deps.storeFile,
+            roots,
+            sessionId,
+            holder: this.holder,
+            crashed: this.crashed,
+        });
+        if (response?.type === 'liveContext') {
+            this.crashed = false;
+        }
         return response?.type === 'liveContext' ? { latest: response.latest, compactions: response.compactions } : undefined;
     }
 
@@ -370,9 +383,19 @@ export class UsageService implements vscode.Disposable {
         }
         const roots = resolved.roots.map(r => r.path);
         this.deps.log.debug(`Claude Code usage: importing ${paths ? `${paths.length} changed files in ` : ''}${roots.join(', ')}`);
-        const response = await this.ask({ type: 'import', storeFile: this.deps.storeFile, roots, paths, holder: this.holder });
+        const response = await this.ask({
+            type: 'import',
+            storeFile: this.deps.storeFile,
+            roots,
+            paths,
+            holder: this.holder,
+            crashed: this.crashed,
+        });
         if (response?.type !== 'imported') {
             return undefined;
+        }
+        if (!response.leaseHeldElsewhere) {
+            this.crashed = false;
         }
         if (response.leaseHeldElsewhere) {
             // Another window is importing into the same history; what it
@@ -402,7 +425,7 @@ export class UsageService implements vscode.Disposable {
         if (this.disposed) {
             return undefined;
         }
-        this.host ??= this.deps.createHost();
+        this.host ??= this.deps.createHost(() => (this.crashed = true));
         this.clock.clearTimeout(this.idleTimer);
         this.inFlight++;
         try {
@@ -552,11 +575,12 @@ export function registerClaudeCodeUsage(
             };
         },
         rootInputs: () => machineRootInputs(underTest ? { fixtures } : undefined),
-        createHost: () =>
+        createHost: onCrash =>
             new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(path.join(context.extensionPath, 'out', 'usageWorker.js'), {
                 name: 'Claude Code usage reader',
                 fallback: 'usage is not updated',
                 log,
+                onExit: onCrash,
                 resourceLimits: { maxOldGenerationSizeMb: 128 },
             }),
         watch: (projectsFolder, onHint) => {

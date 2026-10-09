@@ -122,7 +122,13 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 reply({ type: 'failed', id: request.id, failure: 'outdated', errorName: 'StoreError' });
                 return;
             }
-            const summary = await importUnderLease(store, request.roots, holderOf(request), { isCancelled }, paths);
+            const summary = await importUnderLease(
+                store,
+                request.roots,
+                holderOf(request),
+                { isCancelled, countCrashes: request.crashed === true },
+                paths,
+            );
             reply(
                 summary
                     ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false }
@@ -138,7 +144,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
             const paths = request.roots.flatMap(root => sessionTranscripts(root, request.sessionId));
             if (paths.length > 0 && !store.outdated(PARSER_VERSION)) {
                 // Null when another window holds the lease: what is stored is read all the same.
-                await importUnderLease(store, request.roots, holderOf(request), { isCancelled }, paths);
+                await importUnderLease(store, request.roots, holderOf(request), { isCancelled, countCrashes: request.crashed === true }, paths);
             }
             reply({
                 type: 'liveContext',

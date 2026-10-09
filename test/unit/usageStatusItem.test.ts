@@ -56,13 +56,13 @@ suite('usage status item: the window and what is shown', () => {
 
     test('a compaction after the latest request shows what it left', () => {
         const compacted = describeLive(
-            live({ compactions: [{ uuid: 'c', sessionId: 's', timestamp: Date.UTC(2026, 9, 9, 11), trigger: 'auto', preTokens: 160_000, postTokens: 12_000 }] }),
+            live({ compactions: [{ uuid: 'c', sessionId: 's', kind: 'main', timestamp: Date.UTC(2026, 9, 9, 11), trigger: 'auto', preTokens: 160_000, postTokens: 12_000 }] }),
         );
         assert.strictEqual(compacted.text, '$(comment-discussion) 12.0K · 1%');
         assert.ok(compacted.tooltip.some(l => l.includes('12,000 of 1,000,000 tokens') && l.includes('after compacting')));
 
         const before = describeLive(
-            live({ compactions: [{ uuid: 'c', sessionId: 's', timestamp: Date.UTC(2026, 9, 9, 9), trigger: 'manual', preTokens: 100_000, postTokens: 9_000 }] }),
+            live({ compactions: [{ uuid: 'c', sessionId: 's', kind: 'main', timestamp: Date.UTC(2026, 9, 9, 9), trigger: 'manual', preTokens: 100_000, postTokens: 9_000 }] }),
         );
         assert.strictEqual(before.text, '$(comment-discussion) 850.0K · 85%'.replace('$(comment-discussion)', '$(warning)'));
         assert.ok(before.tooltip.some(l => l.startsWith('Compactions: 1, the last 100,000 → 9,000')));
@@ -266,6 +266,26 @@ suite('usage status item: through the worker', () => {
         assert.deepStrictEqual(response.compactions.map(c => [c.trigger, c.postTokens]), [['auto', 12_000]]);
         // So the item shows what the compaction left, the compaction being the newer.
         assert.strictEqual(describeLive(live({ latest: response.latest, compactions: response.compactions })).text, '$(comment-discussion) 12.0K · 1%');
+
+        // A subagent compacts its own context: never the main conversation's figure.
+        const subagent = path.join(tmp, 'sub-root', 'projects', 'p');
+        fs.mkdirSync(path.join(subagent, 'sess-x', 'subagents'), { recursive: true });
+        const record = (fields: object) => JSON.stringify({ sessionId: 'sess-x', timestamp: '2026-10-09T10:00:00.000Z', ...fields }) + '\n';
+        fs.writeFileSync(
+            path.join(subagent, 'sess-x.jsonl'),
+            record({ type: 'user', uuid: 'u', cwd: '/x', message: { role: 'user', content: 'x' } }) +
+                record({ type: 'assistant', uuid: 'a', message: { model: 'claude-opus-5-5', id: 'mx', usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 } } }),
+        );
+        fs.writeFileSync(
+            path.join(subagent, 'sess-x', 'subagents', 'agent-1.jsonl'),
+            record({ type: 'system', subtype: 'compact_boundary', uuid: 'sub-compaction', compactMetadata: { trigger: 'auto', preTokens: 9, postTokens: 1 } }),
+        );
+        assert.strictEqual((await host.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'sub-root')] })).type, 'imported');
+        const sub = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [path.join(tmp, 'sub-root')], sessionId: 'sess-x' });
+        assert.deepStrictEqual(sub.type === 'liveContext' && sub.compactions, []);
+        const report = await host.send({ type: 'query', id: 0, storeFile, range: 'coverage', zone: 'UTC', workspaceFolders: null });
+        assert.ok(report.type === 'report');
+        assert.deepStrictEqual(report.report.sessions.find(x => x.sessionId === 'sess-x')?.compactions, []);
 
         for (const sessionId of ['../../etc/passwd', 'a/b', '', 'x'.repeat(201)]) {
             const refused = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [FIXTURE_ROOT], sessionId });

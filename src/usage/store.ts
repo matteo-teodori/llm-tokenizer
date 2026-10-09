@@ -241,6 +241,7 @@ CREATE TABLE compactions (
     provider TEXT NOT NULL DEFAULT 'claude-code',
     uuid TEXT NOT NULL,
     session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
     ts INTEGER NOT NULL,
     trigger TEXT,
     pre_tokens INTEGER,
@@ -508,11 +509,11 @@ export class UsageStore {
     insertCompactions(provider: UsageProvider, compactions: Iterable<Compaction>): void {
         this.assertWritable();
         const insert = this.db.prepare(
-            `INSERT OR IGNORE INTO compactions (provider, uuid, session_id, ts, trigger, pre_tokens, post_tokens)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT OR IGNORE INTO compactions (provider, uuid, session_id, kind, ts, trigger, pre_tokens, post_tokens)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         for (const c of compactions) {
-            insert.run(provider, c.uuid, c.sessionId, c.timestamp, c.trigger, c.preTokens, c.postTokens);
+            insert.run(provider, c.uuid, c.sessionId, c.kind, c.timestamp, c.trigger, c.preTokens, c.postTokens);
         }
     }
 
@@ -635,14 +636,18 @@ export class UsageStore {
             : undefined;
     }
 
-    /** A session's compactions, newest first. */
+    /** A session's compactions of its main conversation, newest first. */
     sessionCompactions(sessionId: string): Compaction[] {
         return this.db
-            .prepare('SELECT uuid, session_id, ts, trigger, pre_tokens, post_tokens FROM compactions WHERE session_id = ? ORDER BY ts DESC, uuid')
+            .prepare(
+                `SELECT uuid, session_id, kind, ts, trigger, pre_tokens, post_tokens FROM compactions
+                 WHERE session_id = ? AND kind = 'main' ORDER BY ts DESC, uuid`,
+            )
             .all(sessionId)
             .map(row => ({
                 uuid: row.uuid as string,
                 sessionId: row.session_id as string,
+                kind: row.kind as TranscriptKind,
                 timestamp: row.ts as number,
                 trigger: row.trigger as string | null,
                 preTokens: row.pre_tokens as number | null,
@@ -672,11 +677,12 @@ export class UsageStore {
 
     compactions(sinceMs = 0): Compaction[] {
         return this.db
-            .prepare('SELECT uuid, session_id, ts, trigger, pre_tokens, post_tokens FROM compactions WHERE ts >= ? ORDER BY ts, uuid')
+            .prepare('SELECT uuid, session_id, kind, ts, trigger, pre_tokens, post_tokens FROM compactions WHERE ts >= ? ORDER BY ts, uuid')
             .all(sinceMs)
             .map(row => ({
                 uuid: row.uuid as string,
                 sessionId: row.session_id as string,
+                kind: row.kind as TranscriptKind,
                 timestamp: row.ts as number,
                 trigger: row.trigger as string | null,
                 preTokens: row.pre_tokens as number | null,

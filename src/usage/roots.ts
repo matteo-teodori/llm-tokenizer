@@ -192,7 +192,9 @@ function editorVariable(
 /** `env.CLAUDE_CONFIG_DIR` from Claude Code's settings file, and nothing else. */
 function settingsConfigDir(file: string): string | null {
     try {
-        if (fs.statSync(file).size > MAX_SETTINGS_BYTES) {
+        // A regular file only: reading a FIFO would block the extension host.
+        const stat = fs.statSync(file);
+        if (!stat.isFile() || stat.size > MAX_SETTINGS_BYTES) {
             return null;
         }
         const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;

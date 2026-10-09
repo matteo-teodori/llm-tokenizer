@@ -39,8 +39,27 @@ const CHUNK_BYTES = 1 << 20;
 /** About 12× the longest line measured (1.37 MB); past it a line is skipped. */
 export const MAX_LINE_BYTES = 16 << 20;
 
-/** Files over this are guarded while read; see `read_guards` in the store. */
-export const LARGE_FILE_BYTES = 64 << 20;
+/**
+ * The longest line that is ever parsed. Measured, the longest real assistant
+ * line is 396 KiB, and none passes 1 MiB; 8 MiB of dense JSON (`[{},{},…]`)
+ * exhausted the worker's 128 MB heap on every pass, where 4 MiB did not. A
+ * longer line holding a record's marker is skipped as oversize.
+ */
+export const MAX_PARSED_LINE_BYTES = 4 << 20;
+
+/** Reads of more new bytes than this are guarded; see `read_guards` in the store. */
+export const GUARDED_READ_BYTES = 4 << 20;
+
+/**
+ * No real request reports more of a counter than this: 100 times the
+ * largest context window. Larger values, which summed would pass 2^53 and
+ * make every report fail, are refused as bad fields.
+ */
+export const MAX_COUNTER = 100_000_000;
+
+/** Record times outside these are not Claude Code's, which began in 2025. */
+const EARLIEST_TIME = Date.UTC(2023, 0, 1);
+const LATEST_TIME = Date.UTC(2100, 0, 1);
 
 /** How much of the file before the checkpoint is hashed to notice a rewrite. */
 const TAIL_BYTES = 64;
@@ -154,6 +173,10 @@ export function transcriptsAt(root: string, paths: readonly string[]): Transcrip
         let real: string;
         try {
             real = fs.realpathSync(candidate);
+            // A regular file only: opening a FIFO would block the worker.
+            if (!fs.statSync(real).isFile()) {
+                continue;
+            }
         } catch {
             continue;
         }
@@ -318,9 +341,15 @@ export interface ReadResult {
  * @throws the file system's error, for the caller to count as a skip reason.
  */
 export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | undefined): ReadResult {
-    const fd = fs.openSync(file.path, 'r');
+    // Non-blocking, so that a FIFO under the projects folder cannot hang the
+    // worker in open(); anything but a regular file is then refused.
+    const fd = fs.openSync(file.path, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
     try {
-        const state = fileState(fs.fstatSync(fd, { bigint: true }));
+        const stat = fs.fstatSync(fd, { bigint: true });
+        if (!stat.isFile()) {
+            throw Object.assign(new Error('not a regular file'), { code: 'ENOTREG' });
+        }
+        const state = fileState(stat);
         const result: ReadResult = {
             unchanged: false,
             restarted: null,
@@ -496,6 +525,15 @@ function useLine(line: Buffer, offset: number, file: TranscriptFile, result: Rea
     if (kind === null && !needCwd) {
         return needCwd;
     }
+    if (bytes.length > MAX_PARSED_LINE_BYTES) {
+        // Too long to parse safely. Only a record's line counts as lost; a
+        // line read for its cwd alone is just not looked in.
+        if (kind !== null) {
+            result.oversize++;
+            count(result.malformed, 'oversize');
+        }
+        return needCwd;
+    }
 
     let record: unknown;
     try {
@@ -514,9 +552,8 @@ function useLine(line: Buffer, offset: number, file: TranscriptFile, result: Rea
     if (needCwd) {
         const cwd = boundedString(r.cwd, MAX_CWD);
         if (cwd) {
-            const ts = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN;
             result.firstCwd = cwd;
-            result.firstCwdTs = Number.isFinite(ts) ? ts : null;
+            result.firstCwdTs = recordTime(r.timestamp);
             needCwd = false;
         }
     }
@@ -531,7 +568,7 @@ function useLine(line: Buffer, offset: number, file: TranscriptFile, result: Rea
     if (r.type === 'assistant') {
         parseAssistant(r, offset, file, result);
     } else if (r.type === 'system' && r.subtype === 'compact_boundary') {
-        parseCompaction(r, result);
+        parseCompaction(r, file, result);
     } else if (r.type === 'system' && r.subtype === 'api_error') {
         result.apiErrors++;
     }
@@ -550,8 +587,8 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         count(result.malformed, 'bad-field:message.model');
         return;
     }
-    const timestamp = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN;
-    if (!Number.isFinite(timestamp)) {
+    const timestamp = recordTime(r.timestamp);
+    if (timestamp === null) {
         count(result.malformed, 'bad-field:timestamp');
         return;
     }
@@ -575,7 +612,14 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
             sessionId,
             timestamp,
             limitType,
-            resetsAt: typeof resetsAt === 'number' && Number.isSafeInteger(resetsAt) ? resetsAt : null,
+            // Epoch seconds, kept only where they make a real date.
+            resetsAt:
+                typeof resetsAt === 'number' &&
+                Number.isSafeInteger(resetsAt) &&
+                resetsAt * 1000 >= EARLIEST_TIME &&
+                resetsAt * 1000 < LATEST_TIME
+                    ? resetsAt
+                    : null,
         });
     }
 
@@ -601,7 +645,7 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         if (value === undefined || value === null) {
             return null;
         }
-        if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+        if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_COUNTER) {
             return value;
         }
         count(result.malformed, `bad-field:${field}`);
@@ -637,25 +681,33 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
     });
 }
 
-function parseCompaction(r: Record<string, unknown>, result: ReadResult): void {
+function parseCompaction(r: Record<string, unknown>, file: TranscriptFile, result: ReadResult): void {
     const uuid = boundedString(r.uuid, MAX_ID);
     const sessionId = boundedString(r.sessionId, MAX_ID);
-    const timestamp = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN;
-    if (!uuid || !sessionId || !Number.isFinite(timestamp)) {
+    const timestamp = recordTime(r.timestamp);
+    if (!uuid || !sessionId || timestamp === null) {
         count(result.malformed, 'bad-field:compact_boundary');
         return;
     }
     const meta = objectOf(r.compactMetadata);
     const tokens = (value: unknown): number | null =>
-        typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+        typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_COUNTER ? value : null;
     result.compactions.push({
         uuid,
         sessionId,
+        // A subagent compacts its own context, not the main conversation's.
+        kind: file.kind,
         timestamp,
         trigger: boundedString(meta?.trigger, MAX_ID),
         preTokens: tokens(meta?.preTokens),
         postTokens: tokens(meta?.postTokens),
     });
+}
+
+/** A record's ISO time as epoch milliseconds, or null when it is not a plausible one. */
+function recordTime(value: unknown): number | null {
+    const time = typeof value === 'string' ? Date.parse(value) : NaN;
+    return Number.isFinite(time) && time >= EARLIEST_TIME && time < LATEST_TIME ? time : null;
 }
 
 function objectOf(value: unknown): Record<string, unknown> | undefined {

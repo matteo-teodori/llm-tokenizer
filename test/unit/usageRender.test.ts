@@ -41,7 +41,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
                 lastTs: Date.UTC(2026, 9, 9, 11, 30),
                 totals: t,
                 models: [],
-                compactions: [{ uuid: 'c', sessionId: HOSTILE, timestamp: 0, trigger: HOSTILE, preTokens: 160_000, postTokens: 12_000 }],
+                compactions: [{ uuid: 'c', sessionId: HOSTILE, kind: 'main', timestamp: 0, trigger: HOSTILE, preTokens: 160_000, postTokens: 12_000 }],
             },
         ],
         dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, totals: t }],

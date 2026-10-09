@@ -16,13 +16,15 @@ export type UsageWorkerRequest =
     /**
      * With `paths`, only those transcripts: the ones a watcher reported
      * changed. `holder` names the window, so that a worker it restarts is
-     * the same holder of the import lease as the one that died.
+     * the same holder of the import lease as the one that died. `crashed`:
+     * the window saw its last worker crash, so a read it left unfinished
+     * counts as a crash of that file.
      */
-    | { type: 'import'; id: number; storeFile: string; roots: string[]; paths?: string[]; holder?: string }
+    | { type: 'import'; id: number; storeFile: string; roots: string[]; paths?: string[]; holder?: string; crashed?: boolean }
     /** `workspaceFolders` null reports every project. */
     | { type: 'query'; id: number; storeFile: string; range: RangeKey; zone: string; workspaceFolders: string[] | null }
     /** Bring one session's main transcript up to date, then read its latest request and compactions. */
-    | { type: 'liveContext'; id: number; storeFile: string; roots: string[]; sessionId: string; holder?: string }
+    | { type: 'liveContext'; id: number; storeFile: string; roots: string[]; sessionId: string; holder?: string; crashed?: boolean }
     | { type: 'clear'; id: number; storeFile: string }
     | { type: 'close'; id: number };
 

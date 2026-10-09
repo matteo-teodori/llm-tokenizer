@@ -7,7 +7,19 @@ import { byDay, rollup, totalsOf } from '../../src/usage/aggregate';
 import { importPaths, importRoots, importUnderLease } from '../../src/usage/importer';
 import { machineRootInputs, resolveRoots } from '../../src/usage/roots';
 import { UsageStore, loadSqlite, type OpenOptions } from '../../src/usage/store';
-import { MAX_LINE_BYTES, PARSER_VERSION, newerVersion, readTranscript, walkProjects, type TranscriptFile } from '../../src/usage/transcripts';
+import { execFileSync } from 'child_process';
+
+import { queryReport } from '../../src/usage/queries';
+import {
+    MAX_COUNTER,
+    MAX_LINE_BYTES,
+    MAX_PARSED_LINE_BYTES,
+    PARSER_VERSION,
+    newerVersion,
+    readTranscript,
+    walkProjects,
+    type TranscriptFile,
+} from '../../src/usage/transcripts';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import { WorkerHost } from '../../src/workerHost';
 
@@ -364,6 +376,106 @@ suite('usage transcripts', () => {
         assert.ok(b.acquireLease('import', 'window-b', PARSER_VERSION), "the finished pass kept the lease");
     });
 
+    test('a counter past any real request is refused, so no sum can overflow a report', async () => {
+        // Two near 2^53 in one bucket made every report throw, and Clear could
+        // not help: the records were read again from disk.
+        const file = path.join(tmp, 'projects', 'p', 's1.jsonl');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const huge = (id: string, value: number) =>
+            line({ ...assistant(id, 1), message: { model: 'claude-opus-5-5', id, type: 'message', role: 'assistant', content: [], usage: { input_tokens: value, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 } } });
+        fs.writeFileSync(file, huge('a', Number.MAX_SAFE_INTEGER) + huge('b', Number.MAX_SAFE_INTEGER) + huge('c', MAX_COUNTER) + huge('d', MAX_COUNTER + 1));
+        const store = freshStore();
+        const summary = await importRoots(store, [tmp]);
+        assert.deepStrictEqual(summary.malformed, { 'bad-field:input_tokens': 3 });
+        const report = queryReport(store, { range: 'coverage', zone: 'UTC', workspaceFolders: null, now: Date.UTC(2026, 9, 10), platform: process.platform });
+        assert.deepStrictEqual([report.totals.input, report.totals.provenance], [MAX_COUNTER, 'partial']);
+    });
+
+    test('times outside 2023–2100 are not records: no year 271822, no render that throws', async () => {
+        const file = path.join(tmp, 'projects', 'p', 's1.jsonl');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(
+            file,
+            line(assistant('ancient', 1, { timestamp: '-271821-04-20T00:00:00.000Z' })) +
+                line(assistant('roman', 1, { timestamp: '0001-01-01T00:00:00.000Z' })) +
+                line(assistant('ok', 1)) +
+                line({ ...assistant('q', 0), uuid: 'q', message: { model: '<synthetic>', id: 'q', usage: {} }, quotaLimits: { rateLimitType: 'five_hour', resetsAt: 1e13 } }),
+        );
+        const store = freshStore();
+        const summary = await importRoots(store, [tmp]);
+        assert.deepStrictEqual(summary.malformed, { 'bad-field:timestamp': 2 });
+        assert.deepStrictEqual(store.limitHits().map(h => h.resetsAt), [null]);
+        const report = queryReport(store, { range: 'coverage', zone: 'UTC', workspaceFolders: null, now: Date.UTC(2026, 9, 10), platform: process.platform });
+        assert.strictEqual(report.from, '2026-10-09');
+    });
+
+    test('a line too long to parse safely is skipped as oversize, and reading carries on', () => {
+        const file = path.join(tmp, 'projects', 'p', 's1.jsonl');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const dense = `{"type":"assistant","message":{"model":"m","id":"x","usage":{}},"timestamp":"2026-10-09T10:00:00Z","sessionId":"s1","pad":[${'{},'.repeat(Math.ceil(MAX_PARSED_LINE_BYTES * 2 / 3))}0]}\n`;
+        fs.writeFileSync(file, line(assistant('before', 1)) + dense + line(assistant('after', 1)));
+        const result = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual([result.requests.map(r => r.messageId), result.oversize], [['before', 'after'], 1]);
+    });
+
+    test('a FIFO is never opened: not named by a watcher, not as a transcript, not as settings', async function () {
+        if (process.platform === 'win32') {
+            this.skip();
+        }
+        const [real] = transcripts(1);
+        const fifo = path.join(tmp, 'projects', 'p', 'pipe.jsonl');
+        execFileSync('mkfifo', [fifo]);
+        const started = Date.now();
+        const store = freshStore();
+        const summary = await importPaths(store, [tmp], [fifo, real]);
+        assert.strictEqual(summary.files, 1);
+        assert.throws(() => readTranscript(mainFile(fifo), undefined), (error: NodeJS.ErrnoException) => error.code === 'ENOTREG');
+        const home = path.join(tmp, 'home');
+        fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+        execFileSync('mkfifo', [path.join(home, '.claude', 'settings.json')]);
+        resolveRoots({ setting: '', editorEnvironment: undefined, env: {}, home, platform: process.platform });
+        assert.ok(Date.now() - started < 2_000, 'something waited on a FIFO');
+    });
+
+    test('a read left unfinished counts as a crash only when the window saw one', async () => {
+        // A window reloaded mid-read, or one whose worker it stopped, leaves the
+        // same trace as a crash, and must not keep a file out for a day.
+        const [file] = transcripts(1);
+        const store = freshStore();
+        const interrupted = () =>
+            store.transaction(() =>
+                store.putReadGuard({ provider: 'claude-code', path: file, inProgress: true, crashCount: 1, lastCrash: 1 }),
+            );
+        interrupted();
+        let summary = await importRoots(store, [tmp], { guardedReadBytes: 0, countCrashes: false });
+        assert.deepStrictEqual([summary.read, summary.skipped], [1, {}]);
+        fs.appendFileSync(file, line(assistant('m9', 1)));
+        interrupted();
+        summary = await importRoots(store, [tmp], { guardedReadBytes: 0, countCrashes: true, now: () => 2 });
+        assert.deepStrictEqual([summary.read, summary.skipped], [0, { crashed: 1 }]);
+    });
+
+    test('a read is guarded by the bytes it will take, not by the size of the file', async () => {
+        const [file] = transcripts(1);
+        fs.appendFileSync(file, line({ ...assistant('pad', 1), pad: 'x'.repeat(2 << 20) }));
+        const store = freshStore();
+        const crashedOnce = () =>
+            store.transaction(() =>
+                store.putReadGuard({ provider: 'claude-code', path: file, inProgress: true, crashCount: 1, lastCrash: 1 }),
+            );
+        // New, 2 MiB to read: guarded, so the second crash keeps it out.
+        crashedOnce();
+        let summary = await importRoots(store, [tmp], { guardedReadBytes: 1 << 20, now: () => 2 });
+        assert.deepStrictEqual(summary.skipped, { crashed: 1 });
+        store.transaction(() => store.deleteReadGuard('claude-code', file));
+        await importRoots(store, [tmp], { guardedReadBytes: 1 << 20 });
+        // The same 2 MiB file with a line more: a small read, not guarded.
+        fs.appendFileSync(file, line(assistant('tail', 1)));
+        crashedOnce();
+        summary = await importRoots(store, [tmp], { guardedReadBytes: 1 << 20, now: () => 2 });
+        assert.deepStrictEqual([summary.read, summary.skipped], [1, {}]);
+    });
+
     test('a newer parser drops the rows its file no longer gives', async () => {
         const [file] = transcripts(1);
         const store = freshStore();
@@ -406,7 +518,7 @@ suite('usage transcripts', () => {
         // so the guard is left as a read that never finished leaves it.
         const [file] = transcripts(1);
         let now = 1_791_000_000_000;
-        const options = { largeFileBytes: 0, now: () => now };
+        const options = { guardedReadBytes: 0, now: () => now };
         const store = freshStore();
         const crashed = (crashCount: number) =>
             store.transaction(() =>
@@ -450,7 +562,7 @@ suite('usage transcripts', () => {
         const store = freshStore();
         const seen: unknown[] = [];
         await importRoots(store, [tmp], {
-            largeFileBytes: 0,
+            guardedReadBytes: 0,
             isCancelled: () => {
                 seen.push(store.getReadGuard('claude-code', first));
                 return false;
@@ -467,7 +579,7 @@ suite('usage transcripts', () => {
         const store = freshStore();
         fs.chmodSync(file, 0);
         try {
-            const summary = await importRoots(store, [tmp], { largeFileBytes: 0 });
+            const summary = await importRoots(store, [tmp], { guardedReadBytes: 0 });
             assert.deepStrictEqual(summary.skipped, { unreadable: 1 });
             assert.strictEqual(store.getReadGuard('claude-code', file), undefined);
         } finally {
@@ -609,6 +721,52 @@ suite('usage worker', () => {
             const response = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: paths as string[] });
             assert.deepStrictEqual(response.type === 'failed' && response.failure, 'bad-request', JSON.stringify(paths).slice(0, 40));
         }
+    });
+
+    test("8 MiB of dense JSON in one record's line is skipped, not fatal, within the worker's 128 MB heap", async function () {
+        // It exhausted the heap on every pass: every file after it went unread.
+        this.timeout(60_000);
+        const root = path.join(tmp, 'dense-root');
+        const project = path.join(root, 'projects', 'p');
+        fs.mkdirSync(project, { recursive: true });
+        const dense = `{"type":"assistant","message":{"model":"m","id":"x","usage":{}},"timestamp":"2026-10-09T10:00:00Z","sessionId":"s1","pad":[${'{},'.repeat((8 << 20) / 3)}0]}\n`;
+        fs.writeFileSync(path.join(project, 'a.jsonl'), line(assistant('before', 1)) + dense);
+        fs.writeFileSync(path.join(project, 'b.jsonl'), line(assistant('after', 1)));
+        const limited = new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(WORKER, {
+            name: 'usage',
+            fallback: 'showing nothing',
+            log,
+            resourceLimits: { maxOldGenerationSizeMb: 128 },
+        });
+        hosts.push(limited);
+        const response = await limited.send({ type: 'import', id: 0, storeFile: path.join(tmp, 'store', 'usage.sqlite'), roots: [root] });
+        assert.ok(response.type === 'imported' && response.summary?.read === 2 && response.summary.oversizeLines === 1, JSON.stringify(response).slice(0, 300));
+    });
+
+    test("the worker counts a read left unfinished as a crash only when its window says one happened", async () => {
+        // A 5 MiB transcript: past the guard's 4 MiB, so its read is guarded.
+        const root = path.join(tmp, 'big-root');
+        const file = path.join(root, 'projects', 'p', 's1.jsonl');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, line(assistant('m1', 1)) + line({ ...assistant('pad', 1), pad: 'x'.repeat(5 << 20) }));
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const opened = UsageStore.open(sqlite, storeFile);
+        assert.strictEqual(opened.status, 'ready');
+        const unfinished = () =>
+            opened.store.transaction(() =>
+                opened.store.putReadGuard({ provider: 'claude-code', path: fs.realpathSync(file), inProgress: true, crashCount: 1, lastCrash: Date.now() }),
+            );
+        unfinished();
+        const worker = host();
+        const reloaded = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        assert.ok(reloaded.type === 'imported' && reloaded.summary?.read === 1, JSON.stringify(reloaded).slice(0, 300));
+
+        fs.appendFileSync(file, line(assistant('m2', 1)) + line({ ...assistant('pad2', 1), pad: 'y'.repeat(5 << 20) }));
+        unfinished();
+        const crashed = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], crashed: true });
+        assert.ok(crashed.type === 'imported' && crashed.summary?.skipped.crashed === 1, JSON.stringify(crashed).slice(0, 300));
+        opened.store.close();
     });
 
     test('a failed open is tried again on the next request, not kept', async () => {

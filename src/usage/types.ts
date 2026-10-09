@@ -77,6 +77,8 @@ export interface UsageRequest extends TokenCounts {
 export interface Compaction {
     uuid: string;
     sessionId: string;
+    /** The transcript it was in: a subagent compacts its own context. */
+    kind: TranscriptKind;
     timestamp: number;
     trigger: string | null;
     preTokens: number | null;
