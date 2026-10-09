@@ -53,6 +53,8 @@ export interface ResolvedRoots {
      * then it keeps no transcripts, and there is nothing to read.
      */
     historyDisabled: boolean;
+    /** CLAUDE_CODE_DISABLE_1M_CONTEXT is set there: every model is held to a 200K window. */
+    largeContextDisabled: boolean;
 }
 
 /**
@@ -109,8 +111,14 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
             roots.push(candidate);
         }
     }
-    const disabled = [inputs.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, editorVariable(inputs.editorEnvironment, inputs.platform, 'CLAUDE_CODE_SKIP_PROMPT_HISTORY')];
-    return { candidates, roots, refused, historyDisabled: disabled.some(value => isTruthy(value)) };
+    const flag = (name: string) => [inputs.env[name], editorVariable(inputs.editorEnvironment, inputs.platform, name)].some(isTruthy);
+    return {
+        candidates,
+        roots,
+        refused,
+        historyDisabled: flag('CLAUDE_CODE_SKIP_PROMPT_HISTORY'),
+        largeContextDisabled: flag('CLAUDE_CODE_DISABLE_1M_CONTEXT'),
+    };
 }
 
 /** What chose a root, in words, for the diagnostics. */

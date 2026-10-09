@@ -21,15 +21,19 @@ import * as vscode from 'vscode';
 
 import { WorkerHost, WorkerHostError } from '../workerHost';
 import type { ImportSummary } from './importer';
+import { readLiveSessions } from './liveSessions';
 import { UsagePanel } from './panel';
 import type { UsageWorkerRequest, UsageWorkerResponse } from './protocol';
 import type { RangeKey, UsageReport } from './report';
+import type { LatestRequest } from './store';
+import type { Compaction } from './types';
 import { machineRootInputs, resolveRoots, type ResolvedRoots, type RootInputs } from './roots';
+import { UsageStatusItem } from './statusItem';
 
 const CONFIG_SECTION = 'llm-tokenizer';
 
 /** This feature's settings. A change to any of them, or to where Claude Code writes, is handled here. */
-export const USAGE_SETTINGS = ['enableClaudeCodeUsage', 'claudeCodeDataDirectory'] as const;
+export const USAGE_SETTINGS = ['enableClaudeCodeUsage', 'claudeCodeDataDirectory', 'showClaudeCodeUsageInStatusBar'] as const;
 
 export function affectsUsage(event: Pick<vscode.ConfigurationChangeEvent, 'affectsConfiguration'>): boolean {
     return (
@@ -181,6 +185,20 @@ export class UsageService implements vscode.Disposable {
         return true;
     }
 
+    /**
+     * One session's live context: its main transcript brought up to date, then
+     * its latest request and its compactions, newest first. Undefined while
+     * off or failing.
+     */
+    async liveContext(sessionId: string): Promise<{ latest: LatestRequest | null; compactions: Compaction[] } | undefined> {
+        if (!this.enabled) {
+            return undefined;
+        }
+        const roots = (this.resolved ?? this.resolveNow()).roots.map(r => r.path);
+        const response = await this.ask({ type: 'liveContext', storeFile: this.deps.storeFile, roots, sessionId });
+        return response?.type === 'liveContext' ? { latest: response.latest, compactions: response.compactions } : undefined;
+    }
+
     /** The report for one range and scope, or undefined while off or failing. */
     async report(range: RangeKey, zone: string, workspaceFolders: string[] | null): Promise<UsageReport | undefined> {
         if (!this.enabled) {
@@ -293,21 +311,27 @@ export class UsageService implements vscode.Disposable {
         return this.importing;
     }
 
-    private async importOnce(paths?: string[]): Promise<ImportSummary | undefined> {
+    /** Where Claude Code writes, now, with the settings as they are. */
+    private resolveNow(): ResolvedRoots {
         const settings = this.deps.readSettings();
         this.resolved = resolveRoots({
             ...this.deps.rootInputs(),
             setting: settings.dataDirectory,
             editorEnvironment: settings.editorEnvironment,
         });
-        for (const refused of this.resolved.refused) {
+        return this.resolved;
+    }
+
+    private async importOnce(paths?: string[]): Promise<ImportSummary | undefined> {
+        const resolved = this.resolveNow();
+        for (const refused of resolved.refused) {
             this.deps.log.warn(`Claude Code usage: refused a root outside the test fixtures (${refused.source})`);
         }
-        if (this.resolved.roots.length === 0) {
+        if (resolved.roots.length === 0) {
             this.setStatus('no-roots');
             return undefined;
         }
-        const roots = this.resolved.roots.map(r => r.path);
+        const roots = resolved.roots.map(r => r.path);
         this.deps.log.debug(`Claude Code usage: importing ${paths ? `${paths.length} changed files in ` : ''}${roots.join(', ')}`);
         const response = await this.ask({ type: 'import', storeFile: this.deps.storeFile, roots, paths });
         if (response?.type !== 'imported') {
@@ -410,9 +434,7 @@ export class UsageService implements vscode.Disposable {
         if (!this.enabled || this.holders === 0) {
             return;
         }
-        const settings = this.deps.readSettings();
-        const resolved = resolveRoots({ ...this.deps.rootInputs(), setting: settings.dataDirectory, editorEnvironment: settings.editorEnvironment });
-        this.watchers = resolved.roots.map(root => this.deps.watch(path.join(root.path, 'projects'), file => this.hint(file)));
+        this.watchers = this.resolveNow().roots.map(root => this.deps.watch(path.join(root.path, 'projects'), file => this.hint(file)));
     }
 
     private stopWatchers(): void {
@@ -503,11 +525,24 @@ export function registerClaudeCodeUsage(
         startupSettled,
     });
 
+    const config = () => vscode.workspace.getConfiguration(CONFIG_SECTION);
+    const statusItem = new UsageStatusItem(service, {
+        shown: () => config().get<boolean>('enableClaudeCodeUsage', false) && config().get<boolean>('showClaudeCodeUsageInStatusBar', false),
+        readLive: roots => readLiveSessions(roots),
+        workspaceFolders: () => (vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file').map(f => f.uri.fsPath),
+        platform: process.platform,
+        zone: () => Intl.DateTimeFormat().resolvedOptions().timeZone,
+        formatTime: localTime,
+        createItem: () => vscode.window.createStatusBarItem('llm-tokenizer.claudeCodeUsage', vscode.StatusBarAlignment.Right, 98),
+    });
+
     context.subscriptions.push(
         service,
+        statusItem,
         vscode.workspace.onDidChangeConfiguration(event => {
             if (affectsUsage(event)) {
                 service.settingsChanged();
+                statusItem.settingsChanged();
             }
         }),
         // Always registered: while the feature is off, the panel says what turning it on does.
@@ -516,6 +551,13 @@ export function registerClaudeCodeUsage(
         vscode.commands.registerCommand('llm-tokenizer.clearClaudeCodeUsageHistory', () => clearCommand(service)),
     );
     return service;
+}
+
+/** Epoch ms as a local `YYYY-MM-DD HH:MM`. */
+function localTime(epochMs: number): string {
+    const d = new Date(epochMs);
+    const two = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }
 
 async function refreshCommand(service: UsageService): Promise<void> {

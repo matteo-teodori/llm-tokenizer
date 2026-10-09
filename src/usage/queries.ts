@@ -73,6 +73,17 @@ export function reportSessions(
     });
 }
 
+/** Whether a session that started in `cwd` counts for one of `folders`, as "This workspace" counts it. */
+export function inFolders(
+    cwd: string,
+    folders: readonly string[],
+    platform: NodeJS.Platform,
+    realpath: (p: string) => string = realOrSelf,
+): boolean {
+    const root = realpath(sessionRoot(cwd));
+    return folders.some(folder => isWithin(root, realpath(folder), platform));
+}
+
 function realOrSelf(p: string): string {
     if (!path.isAbsolute(p) || /^[\\/]{2}/.test(p)) {
         return p;

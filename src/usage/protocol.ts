@@ -9,12 +9,16 @@
 
 import type { ImportSummary } from './importer';
 import type { RangeKey, UsageReport } from './report';
+import type { LatestRequest } from './store';
+import type { Compaction } from './types';
 
 export type UsageWorkerRequest =
     /** With `paths`, only those transcripts: the ones a watcher reported changed. */
     | { type: 'import'; id: number; storeFile: string; roots: string[]; paths?: string[] }
     /** `workspaceFolders` null reports every project. */
     | { type: 'query'; id: number; storeFile: string; range: RangeKey; zone: string; workspaceFolders: string[] | null }
+    /** Bring one session's main transcript up to date, then read its latest request and compactions. */
+    | { type: 'liveContext'; id: number; storeFile: string; roots: string[]; sessionId: string }
     | { type: 'clear'; id: number; storeFile: string }
     | { type: 'close'; id: number };
 
@@ -25,6 +29,8 @@ export type UsageWorkerResponse =
     | { type: 'imported'; id: number; summary: ImportSummary; leaseHeldElsewhere: false }
     | { type: 'imported'; id: number; summary: null; leaseHeldElsewhere: true }
     | { type: 'report'; id: number; report: UsageReport }
+    /** `compactions` newest first, at most 20. */
+    | { type: 'liveContext'; id: number; latest: LatestRequest | null; compactions: Compaction[] }
     | { type: 'cleared'; id: number; generation: number }
     | { type: 'closed'; id: number }
     /** This runtime has no `node:sqlite` binding. */

@@ -20,6 +20,7 @@ import { isTimeZone } from './usage/aggregate';
 import { importUnderLease } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS } from './usage/report';
+import { sessionTranscripts } from './usage/transcripts';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import type { UsageFailure, UsageWorkerRequest, UsageWorkerResponse } from './usage/protocol';
 
@@ -30,6 +31,9 @@ const port = parentPort;
 
 /** More named paths than this are a full pass's job. */
 const MAX_PATHS = 1000;
+
+/** A session id becomes part of a file name, so only what Claude Code's ids are made of. */
+const SESSION_ID = /^[A-Za-z0-9_-]{1,200}$/;
 
 /** Identifies this worker in the import lease, unique per thread. */
 const holder = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -110,6 +114,24 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                     ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false }
                     : { type: 'imported', id: request.id, summary: null, leaseHeldElsewhere: true },
             );
+            return;
+        }
+        case 'liveContext': {
+            if (typeof request.sessionId !== 'string' || !SESSION_ID.test(request.sessionId)) {
+                reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
+                return;
+            }
+            const paths = request.roots.flatMap(root => sessionTranscripts(root, request.sessionId));
+            if (paths.length > 0) {
+                // Null when another window holds the lease: what is stored is read all the same.
+                await importUnderLease(store, request.roots, holder, { isCancelled }, paths);
+            }
+            reply({
+                type: 'liveContext',
+                id: request.id,
+                latest: store.latestMainRequest(request.sessionId) ?? null,
+                compactions: store.sessionCompactions(request.sessionId).slice(0, 20),
+            });
             return;
         }
         case 'clear':

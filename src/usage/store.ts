@@ -130,6 +130,16 @@ export interface FileCheckpoint {
     newestVersion: string | null;
 }
 
+/** What `latestMainRequest` returns: when, on which model, and the three input counters. */
+export interface LatestRequest {
+    timestamp: number;
+    model: string;
+    variant: string | null;
+    input: number | null;
+    cacheCreation: number | null;
+    cacheRead: number | null;
+}
+
 /**
  * A large file's read in progress, and how often reading it never finished.
  * Kept apart from its checkpoint, which only a finished read writes.
@@ -584,6 +594,42 @@ export class UsageStore {
                 thinking: row.thinking as number,
                 webSearchRequests: row.web_search as number,
                 webFetchRequests: row.web_fetch as number,
+            }));
+    }
+
+    /** A session's latest request in its main conversation: what its context held then. */
+    latestMainRequest(sessionId: string): LatestRequest | undefined {
+        const row = this.db
+            .prepare(
+                `SELECT ts, model, variant, input, cache_creation, cache_read FROM requests
+                 WHERE session_id = ? AND kind = 'main' AND is_main = 1
+                 ORDER BY ts DESC, byte_offset DESC LIMIT 1`,
+            )
+            .get(sessionId);
+        return row
+            ? {
+                  timestamp: row.ts as number,
+                  model: row.model as string,
+                  variant: row.variant as string | null,
+                  input: row.input as number | null,
+                  cacheCreation: row.cache_creation as number | null,
+                  cacheRead: row.cache_read as number | null,
+              }
+            : undefined;
+    }
+
+    /** A session's compactions, newest first. */
+    sessionCompactions(sessionId: string): Compaction[] {
+        return this.db
+            .prepare('SELECT uuid, session_id, ts, trigger, pre_tokens, post_tokens FROM compactions WHERE session_id = ? ORDER BY ts DESC, uuid')
+            .all(sessionId)
+            .map(row => ({
+                uuid: row.uuid as string,
+                sessionId: row.session_id as string,
+                timestamp: row.ts as number,
+                trigger: row.trigger as string | null,
+                preTokens: row.pre_tokens as number | null,
+                postTokens: row.post_tokens as number | null,
             }));
     }
 

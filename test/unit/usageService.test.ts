@@ -131,6 +131,8 @@ function defaultAnswer(request: UsageWorkerRequest): UsageWorkerResponse {
             return { type: 'closed', id: request.id };
         case 'query':
             return { type: 'failed', id: request.id, failure: 'unknown', errorName: 'Error' };
+        case 'liveContext':
+            return { type: 'liveContext', id: request.id, latest: null, compactions: [] };
     }
 }
 

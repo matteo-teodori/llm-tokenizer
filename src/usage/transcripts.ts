@@ -173,6 +173,39 @@ export function transcriptsAt(root: string, paths: readonly string[]): Transcrip
     return found;
 }
 
+/**
+ * The main transcripts of one session: `<project>/<sessionId>.jsonl` in any
+ * project folder, since `/cd` and EnterWorktree move a session between them.
+ * One readdir of `projects` and a stat per folder, never a walk: this runs
+ * every minute while the status item is shown. `sessionId` must already be
+ * known safe for a file name.
+ */
+export function sessionTranscripts(root: string, sessionId: string): string[] {
+    let projects: string;
+    let entries: fs.Dirent[];
+    try {
+        projects = fs.realpathSync(path.join(root, 'projects'));
+        entries = fs.readdirSync(projects, { withFileTypes: true });
+    } catch {
+        return [];
+    }
+    const found: string[] = [];
+    for (const entry of entries) {
+        if (!entry.isDirectory()) {
+            continue;
+        }
+        const candidate = path.join(projects, entry.name, `${sessionId}.jsonl`);
+        try {
+            if (fs.lstatSync(candidate).isFile()) {
+                found.push(candidate);
+            }
+        } catch {
+            // Not in this project.
+        }
+    }
+    return found;
+}
+
 const AGENT = /^agent-(.+)\.jsonl$/;
 const WORKFLOW = /^wf_(.+)$/;
 const SET_ASIDE = /^(.+?)(?:\.orphaned-.+\.jsonl|\.jsonl\.superseded-.+)$/;
