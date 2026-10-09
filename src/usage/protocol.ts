@@ -11,7 +11,8 @@ import type { ImportSummary } from './importer';
 import type { RangeKey, UsageReport } from './report';
 
 export type UsageWorkerRequest =
-    | { type: 'import'; id: number; storeFile: string; roots: string[] }
+    /** With `paths`, only those transcripts: the ones a watcher reported changed. */
+    | { type: 'import'; id: number; storeFile: string; roots: string[]; paths?: string[] }
     /** `workspaceFolders` null reports every project. */
     | { type: 'query'; id: number; storeFile: string; range: RangeKey; zone: string; workspaceFolders: string[] | null }
     | { type: 'clear'; id: number; storeFile: string }

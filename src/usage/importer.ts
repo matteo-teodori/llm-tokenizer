@@ -23,6 +23,7 @@ import {
     fileState,
     isUnchanged,
     readTranscript,
+    transcriptsAt,
     walkProjects,
     type FileState,
     type MalformedCategory,
@@ -81,7 +82,50 @@ const CRASH_RETRY_MS = 24 * 60 * 60 * 1000;
 
 const yieldToEvents = () => new Promise<void>(resolve => setImmediate(resolve));
 
-export async function importRoots(store: UsageStore, roots: string[], options: ImportOptions = {}): Promise<ImportSummary> {
+export function importRoots(store: UsageStore, roots: string[], options: ImportOptions = {}): Promise<ImportSummary> {
+    return runImport(store, roots.length, options, async (importFiles, summary) => {
+        for (const root of roots) {
+            const walk = walkProjects(root);
+            if (walk.projects === null) {
+                summary.missingProjects++;
+                continue;
+            }
+            summary.symlinkedFolders += walk.symlinkedFolders;
+            summary.unreadableFolders += walk.unreadableFolders;
+            summary.journals += walk.journals;
+            if (!(await importFiles(walk.files))) {
+                return;
+            }
+        }
+    });
+}
+
+/**
+ * A pass over only the transcripts in `paths`: the files a watcher reported
+ * changed, so a hint costs what changed rather than a stat of every file.
+ * A path outside every root's projects folder is left out.
+ */
+export function importPaths(store: UsageStore, roots: string[], paths: readonly string[], options: ImportOptions = {}): Promise<ImportSummary> {
+    return runImport(store, roots.length, options, async importFiles => {
+        for (const root of roots) {
+            if (!(await importFiles(transcriptsAt(root, paths)))) {
+                return;
+            }
+        }
+    });
+}
+
+/**
+ * The pass itself: `plan` hands it files, root by root, and it reads each
+ * from its checkpoint into the store. `importFiles` resolves to false once
+ * the pass is cancelled.
+ */
+async function runImport(
+    store: UsageStore,
+    rootCount: number,
+    options: ImportOptions,
+    plan: (importFiles: (files: readonly TranscriptFile[]) => Promise<boolean>, summary: ImportSummary) => Promise<void>,
+): Promise<ImportSummary> {
     const started = performance.now();
     const filesPerTransaction = options.filesPerTransaction ?? 100;
     const filesPerYield = options.filesPerYield ?? 50;
@@ -89,7 +133,7 @@ export async function importRoots(store: UsageStore, roots: string[], options: I
     const largeFileBytes = options.largeFileBytes ?? LARGE_FILE_BYTES;
     const now = options.now ?? Date.now;
     const summary: ImportSummary = {
-        roots: roots.length,
+        roots: rootCount,
         files: 0,
         read: 0,
         unchanged: 0,
@@ -126,22 +170,13 @@ export async function importRoots(store: UsageStore, roots: string[], options: I
     };
 
     let sinceYield = 0;
-    for (const root of roots) {
-        const walk = walkProjects(root);
-        if (walk.projects === null) {
-            summary.missingProjects++;
-            continue;
-        }
-        summary.symlinkedFolders += walk.symlinkedFolders;
-        summary.unreadableFolders += walk.unreadableFolders;
-        summary.journals += walk.journals;
-
+    const importFiles = async (unsorted: readonly TranscriptFile[]): Promise<boolean> => {
         // A fixed order, so that equal records always resolve the same way.
-        const files = [...walk.files].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
+        const files = [...unsorted].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
         for (const file of files) {
             if (options.isCancelled?.()) {
                 summary.cancelled = true;
-                break;
+                return false;
             }
             summary.files++;
             const previous = store.getFile(PROVIDER, file.path);
@@ -211,10 +246,10 @@ export async function importRoots(store: UsageStore, roots: string[], options: I
                 await pause();
             }
         }
-        if (summary.cancelled) {
-            break;
-        }
-    }
+        return true;
+    };
+
+    await plan(importFiles, summary);
     flush();
 
     summary.elapsedMs = Math.round(performance.now() - started);
@@ -233,20 +268,22 @@ export async function importUnderLease(
     roots: string[],
     holder: string,
     options: ImportOptions = {},
+    paths?: readonly string[],
 ): Promise<ImportSummary | null> {
     if (!store.acquireLease('import', holder, PARSER_VERSION)) {
         return null;
     }
     const pause = options.pause ?? yieldToEvents;
     let lost = false;
-    return importRoots(store, roots, {
+    const leased: ImportOptions = {
         ...options,
         pause: async () => {
             await pause();
             lost ||= !store.acquireLease('import', holder, PARSER_VERSION);
         },
         isCancelled: () => lost || (options.isCancelled?.() ?? false),
-    });
+    };
+    return paths ? importPaths(store, roots, paths, leased) : importRoots(store, roots, leased);
 }
 
 /**

@@ -28,6 +28,9 @@ if (!parentPort) {
 }
 const port = parentPort;
 
+/** More named paths than this are a full pass's job. */
+const MAX_PATHS = 1000;
+
 /** Identifies this worker in the import lease, unique per thread. */
 const holder = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -96,7 +99,12 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
             return;
         }
         case 'import': {
-            const summary = await importUnderLease(store, request.roots, holder, { isCancelled });
+            const paths = request.paths;
+            if (paths !== undefined && !(Array.isArray(paths) && paths.length <= MAX_PATHS && paths.every(p => typeof p === 'string' && p.length <= 4096))) {
+                reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
+                return;
+            }
+            const summary = await importUnderLease(store, request.roots, holder, { isCancelled }, paths);
             reply(
                 summary
                     ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false }

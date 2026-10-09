@@ -136,6 +136,43 @@ export function walkProjects(root: string): WalkReport {
     return report;
 }
 
+/**
+ * The transcripts among `paths` that lie in `<root>/projects`, classified as
+ * the walk would classify them, under the same real path. For the files a
+ * watcher reports changed: anything outside the projects folder, in a folder
+ * the walk never enters, or not a transcript, is left out.
+ */
+export function transcriptsAt(root: string, paths: readonly string[]): TranscriptFile[] {
+    let projects: string;
+    try {
+        projects = fs.realpathSync(path.join(root, 'projects'));
+    } catch {
+        return [];
+    }
+    const found: TranscriptFile[] = [];
+    for (const candidate of paths) {
+        let real: string;
+        try {
+            real = fs.realpathSync(candidate);
+        } catch {
+            continue;
+        }
+        const relative = path.relative(projects, real);
+        if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+            continue;
+        }
+        const parts = relative.split(path.sep);
+        if (parts.slice(0, -1).some(part => part === 'tool-results' || part === 'memory')) {
+            continue;
+        }
+        const file = classify(root, parts);
+        if (file && file !== 'journal') {
+            found.push({ ...file, path: path.join(projects, relative) });
+        }
+    }
+    return found;
+}
+
 const AGENT = /^agent-(.+)\.jsonl$/;
 const WORKFLOW = /^wf_(.+)$/;
 const SET_ASIDE = /^(.+?)(?:\.orphaned-.+\.jsonl|\.jsonl\.superseded-.+)$/;

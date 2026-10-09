@@ -11,6 +11,7 @@ import {
     HINT_DEBOUNCE_MS,
     HOURLY_MS,
     IDLE_MS,
+    MAX_HINT_PATHS,
     UsageService,
     type Clock,
     type UsageHost,
@@ -86,6 +87,8 @@ function changeOf(service: UsageService, ms = 5_000): Promise<void> {
 /** A recording stand-in for the worker host. */
 class FakeHost implements UsageHost {
     readonly sent: UsageWorkerRequest['type'][] = [];
+    /** Each import's named paths, or 'all' for a full pass. */
+    readonly imports: (string[] | 'all')[] = [];
     stopped = 0;
     running = false;
     /** Answers each request; an import can be held open by the test. */
@@ -94,6 +97,9 @@ class FakeHost implements UsageHost {
     send(request: UsageWorkerRequest): Promise<UsageWorkerResponse> {
         this.running = true;
         this.sent.push(request.type);
+        if (request.type === 'import') {
+            this.imports.push(request.paths ? [...request.paths].sort() : 'all');
+        }
         return this.answer(request);
     }
 
@@ -148,7 +154,7 @@ suite('usage service', () => {
         const clock = new FakeClock();
         const host = new FakeHost();
         const calls = { hosts: 0, roots: 0, watchers: 0, watching: 0 };
-        const hints: (() => void)[] = [];
+        const hints: ((file: string) => void)[] = [];
         let settings: UsageSettings = { enabled: true, dataDirectory: '', editorEnvironment: undefined, ...overrides.settings };
         const service = new UsageService({
             log: { info: () => undefined, warn: () => undefined, debug: () => undefined },
@@ -254,7 +260,7 @@ suite('usage service', () => {
 
         const before = host.sent.length;
         for (let i = 0; i < 20; i++) {
-            hints[0]();
+            hints[0](`/r/projects/p/s${i % 2}.jsonl`);
             await clock.advance(HINT_DEBOUNCE_MS / 2);
         }
         // Twenty hints over 10 s, each sooner than the debounce: one import, at
@@ -267,6 +273,47 @@ suite('usage service', () => {
 
         held.dispose();
         assert.strictEqual(calls.watching, 0, 'the watcher outlived the hold');
+    });
+
+    test('a hint imports the files it names, not every file, and a burst names each once', async () => {
+        const { service, clock, host, hints } = make();
+        await settle();
+        const held = service.hold();
+        host.imports.length = 0;
+        for (const file of ['/r/projects/p/a.jsonl', '/r/projects/p/b.jsonl', '/r/projects/p/a.jsonl']) {
+            hints[0](file);
+        }
+        await clock.advance(HINT_DEBOUNCE_MS);
+        assert.deepStrictEqual(host.imports, [['/r/projects/p/a.jsonl', '/r/projects/p/b.jsonl']]);
+
+        // More than the cap: one full pass is cheaper than naming each.
+        for (let i = 0; i <= MAX_HINT_PATHS; i++) {
+            hints[0](`/r/projects/p/s${i}.jsonl`);
+        }
+        await clock.advance(HINT_DEBOUNCE_MS);
+        assert.deepStrictEqual(host.imports.at(-1), 'all');
+        held.dispose();
+    });
+
+    test('a hint during a full pass is imported by name after it, not by another full pass', async () => {
+        const { service, clock, host, hints } = make();
+        await settle();
+        const held = service.hold();
+        let release!: () => void;
+        host.answer = request =>
+            request.type === 'import' && !request.paths
+                ? new Promise(resolve => (release = () => resolve(defaultAnswer(request))))
+                : Promise.resolve(defaultAnswer(request));
+        host.imports.length = 0;
+        const full = service.refresh();
+        await settle();
+        hints[0]('/r/projects/p/a.jsonl');
+        await clock.advance(HINT_DEBOUNCE_MS);
+        release();
+        await full;
+        await settle();
+        assert.deepStrictEqual(host.imports, ['all', ['/r/projects/p/a.jsonl']]);
+        held.dispose();
     });
 
     test('turned off, it stops its timers, watchers and worker; the history stays', async () => {

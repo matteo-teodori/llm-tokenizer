@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { byDay, rollup, totalsOf } from '../../src/usage/aggregate';
-import { importRoots, importUnderLease } from '../../src/usage/importer';
+import { importPaths, importRoots, importUnderLease } from '../../src/usage/importer';
 import { machineRootInputs, resolveRoots } from '../../src/usage/roots';
 import { UsageStore, loadSqlite, type OpenOptions } from '../../src/usage/store';
 import { MAX_LINE_BYTES, PARSER_VERSION, newerVersion, readTranscript, walkProjects, type TranscriptFile } from '../../src/usage/transcripts';
@@ -289,6 +289,26 @@ suite('usage transcripts', () => {
         }
     });
 
+    test('a pass over named paths reads only those transcripts, and only inside the projects folder', async () => {
+        const [s0, s1, s2] = transcripts(3);
+        const outside = path.join(tmp, 'elsewhere', 'x.jsonl');
+        const decoy = path.join(tmp, 'projects', 'p', 's9', 'tool-results', 'r.jsonl');
+        const journal = path.join(tmp, 'projects', 'p', 's9', 'subagents', 'workflows', 'wf_1', 'journal.jsonl');
+        for (const file of [outside, decoy, journal]) {
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            fs.writeFileSync(file, line(assistant(`m-${path.basename(file)}`, 1)));
+        }
+        const store = freshStore();
+        const summary = await importPaths(store, [tmp], [s0, outside, decoy, journal, path.join(tmp, 'projects', 'p', 'gone.jsonl'), s2]);
+        assert.strictEqual(summary.files, 2);
+        assert.deepStrictEqual([...store.requests()].map(r => r.messageId).sort(), ['m0', 'm2']);
+
+        // Their checkpoints are the ones a full pass would leave.
+        const full = await importRoots(store, [tmp]);
+        assert.deepStrictEqual([full.read, full.unchanged], [1, 2]);
+        assert.ok(store.getFile('claude-code', s1));
+    });
+
     test('a newer parser drops the rows its file no longer gives', async () => {
         const [file] = transcripts(1);
         const store = freshStore();
@@ -519,6 +539,18 @@ suite('usage worker', () => {
             assert.strictEqual([...opened.store.requests()].length, 0, 'the import went on writing after the Clear');
         } finally {
             opened.store.close();
+        }
+    });
+
+    test('named paths go through the worker, and anything but a short list of strings is refused', async () => {
+        const root = manyTranscripts();
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const worker = host();
+        const named = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [path.join(root, 'projects', 'p', 's7.jsonl')] });
+        assert.ok(named.type === 'imported' && named.summary?.files === 1, JSON.stringify(named).slice(0, 200));
+        for (const paths of ['nope', [42], Array.from({ length: 1001 }, () => 'x')]) {
+            const response = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: paths as string[] });
+            assert.deepStrictEqual(response.type === 'failed' && response.failure, 'bad-request', JSON.stringify(paths).slice(0, 40));
         }
     });
 

@@ -46,6 +46,8 @@ export const IDLE_MS = 10 * 60 * 1000;
 /** Watcher hints are coalesced over this long, and never deferred past the ceiling. */
 export const HINT_DEBOUNCE_MS = 1_000;
 export const HINT_CEILING_MS = 10_000;
+/** Past this many changed files, one full pass is cheaper than naming each. */
+export const MAX_HINT_PATHS = 200;
 
 export type UsageStatus = 'off' | 'ready' | 'no-roots' | 'no-sqlite' | 'read-only' | 'failing';
 
@@ -64,8 +66,8 @@ export interface UsageServiceDeps {
     /** Everything `resolveRoots` needs besides the two settings. */
     rootInputs(): Omit<RootInputs, 'setting' | 'editorEnvironment'>;
     createHost(): UsageHost;
-    /** Watch `projects` folder for transcript changes; each event is only a hint. */
-    watch(projectsFolder: string, onHint: () => void): vscode.Disposable;
+    /** Watch a `projects` folder for transcript changes; each event is only a hint, naming the file. */
+    watch(projectsFolder: string, onHint: (file: string) => void): vscode.Disposable;
     startupSettled: Thenable<unknown>;
     clock?: Clock;
 }
@@ -105,7 +107,8 @@ export class UsageService implements vscode.Disposable {
     /** Bumped on every start and stop, so a timer armed before either does nothing. */
     private generation = 0;
     private importing: Promise<ImportSummary | undefined> | undefined;
-    private again = false;
+    /** What the next pass must cover: named files, or everything. */
+    private pending: Set<string> | 'all' | undefined;
     private holders = 0;
     private watchers: vscode.Disposable[] = [];
     private firstTimer: unknown;
@@ -113,6 +116,7 @@ export class UsageService implements vscode.Disposable {
     private idleTimer: unknown;
     private hintTimer: unknown;
     private hintDeadline = 0;
+    private hinted = new Set<string>();
     private inFlight = 0;
 
     constructor(private readonly deps: UsageServiceDeps) {
@@ -238,7 +242,7 @@ export class UsageService implements vscode.Disposable {
     private stop(): void {
         this.enabled = false;
         this.generation++;
-        this.again = false;
+        this.pending = undefined;
         this.stopWatchers();
         for (const timer of [this.firstTimer, this.hourlyTimer, this.idleTimer, this.hintTimer]) {
             this.clock.clearTimeout(timer);
@@ -249,18 +253,34 @@ export class UsageService implements vscode.Disposable {
         this.setStatus('off');
     }
 
-    private runImport(): Promise<ImportSummary | undefined> {
+    /**
+     * Import `paths`, or everything when none are given. Calls during a pass
+     * are merged into one more pass after it, which keeps named files named:
+     * a hint during a full pass never becomes a second full pass.
+     */
+    private runImport(paths?: readonly string[]): Promise<ImportSummary | undefined> {
+        if (!paths || this.pending === 'all') {
+            this.pending = 'all';
+        } else {
+            this.pending ??= new Set();
+            for (const p of paths) {
+                this.pending.add(p);
+            }
+            if (this.pending.size > MAX_HINT_PATHS) {
+                this.pending = 'all';
+            }
+        }
         if (this.importing) {
-            this.again = true;
             return this.importing;
         }
         const generation = this.generation;
         const pass = async (): Promise<ImportSummary | undefined> => {
             let summary: ImportSummary | undefined;
-            do {
-                this.again = false;
-                summary = await this.importOnce();
-            } while (this.again && generation === this.generation);
+            while (this.pending && generation === this.generation) {
+                const take = this.pending;
+                this.pending = undefined;
+                summary = await this.importOnce(take === 'all' ? undefined : [...take]);
+            }
             return summary;
         };
         this.importing = pass().finally(() => {
@@ -273,7 +293,7 @@ export class UsageService implements vscode.Disposable {
         return this.importing;
     }
 
-    private async importOnce(): Promise<ImportSummary | undefined> {
+    private async importOnce(paths?: string[]): Promise<ImportSummary | undefined> {
         const settings = this.deps.readSettings();
         this.resolved = resolveRoots({
             ...this.deps.rootInputs(),
@@ -288,8 +308,8 @@ export class UsageService implements vscode.Disposable {
             return undefined;
         }
         const roots = this.resolved.roots.map(r => r.path);
-        this.deps.log.debug(`Claude Code usage: importing ${roots.join(', ')}`);
-        const response = await this.ask({ type: 'import', storeFile: this.deps.storeFile, roots });
+        this.deps.log.debug(`Claude Code usage: importing ${paths ? `${paths.length} changed files in ` : ''}${roots.join(', ')}`);
+        const response = await this.ask({ type: 'import', storeFile: this.deps.storeFile, roots, paths });
         if (response?.type !== 'imported') {
             return undefined;
         }
@@ -392,7 +412,7 @@ export class UsageService implements vscode.Disposable {
         }
         const settings = this.deps.readSettings();
         const resolved = resolveRoots({ ...this.deps.rootInputs(), setting: settings.dataDirectory, editorEnvironment: settings.editorEnvironment });
-        this.watchers = resolved.roots.map(root => this.deps.watch(path.join(root.path, 'projects'), () => this.hint()));
+        this.watchers = resolved.roots.map(root => this.deps.watch(path.join(root.path, 'projects'), file => this.hint(file)));
     }
 
     private stopWatchers(): void {
@@ -402,13 +422,15 @@ export class UsageService implements vscode.Disposable {
         this.watchers = [];
         this.clock.clearTimeout(this.hintTimer);
         this.hintDeadline = 0;
+        this.hinted.clear();
     }
 
-    /** A transcript changed: import soon, coalescing a burst, never later than the ceiling. */
-    private hint(): void {
+    /** A transcript changed: import it soon, coalescing a burst, never later than the ceiling. */
+    private hint(file: string): void {
         if (!this.enabled) {
             return;
         }
+        this.hinted.add(file);
         const now = this.clock.now();
         if (this.hintDeadline === 0) {
             this.hintDeadline = now + HINT_CEILING_MS;
@@ -418,8 +440,10 @@ export class UsageService implements vscode.Disposable {
         this.hintTimer = this.clock.setTimeout(
             () => {
                 this.hintDeadline = 0;
+                const files = [...this.hinted];
+                this.hinted.clear();
                 if (generation === this.generation) {
-                    void this.runImport();
+                    void this.runImport(files);
                 }
             },
             Math.max(0, Math.min(HINT_DEBOUNCE_MS, this.hintDeadline - now)),
@@ -473,7 +497,8 @@ export function registerClaudeCodeUsage(
                 false,
                 true,
             );
-            return vscode.Disposable.from(watcher, watcher.onDidCreate(onHint), watcher.onDidChange(onHint));
+            const named = (uri: vscode.Uri) => onHint(uri.fsPath);
+            return vscode.Disposable.from(watcher, watcher.onDidCreate(named), watcher.onDidChange(named));
         },
         startupSettled,
     });
