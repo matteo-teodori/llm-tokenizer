@@ -66,6 +66,44 @@ suite('extension', () => {
         }
     });
 
+    test('a change of case alone migrates a saved choice without a notice', () => {
+        // MiniMax's ids were re-cased in 2.1.2 to the form its API documents.
+        // The model is the same, so telling the user it is "no longer
+        // available" and switching them to it would be false.
+        const writes: [string, unknown][] = [];
+        const notices: string[] = [];
+        const context = (saved: string): vscode.ExtensionContext =>
+            ({
+                globalState: {
+                    get: (key: string) => (key === STORAGE_KEY ? saved : undefined),
+                    update: (key: string, value: unknown) => {
+                        writes.push([key, value]);
+                        return Promise.resolve();
+                    },
+                },
+            } as unknown as vscode.ExtensionContext);
+        const notify = (message: string) => notices.push(message);
+        const channel = vscode.window.createOutputChannel('LLM Tokenizer (test)', { log: true });
+
+        const aliases = Object.entries(MODEL_ALIASES);
+        const recased = aliases.find(([from, to]) => from.toLowerCase() === to.toLowerCase());
+        const replaced = aliases.find(([from, to]) => from.toLowerCase() !== to.toLowerCase());
+        assert.ok(recased && replaced, 'the registry should carry both kinds of alias to test with');
+
+        try {
+            assert.strictEqual(resolveInitialModel(context(recased[0]), channel, notify).id, recased[1]);
+            assert.deepStrictEqual(writes, [[STORAGE_KEY, recased[1]]]);
+            assert.strictEqual(notices.length, 0, `a re-cased id notified: ${JSON.stringify(notices)}`);
+
+            // A model that really was replaced still says so.
+            resolveInitialModel(context(replaced[0]), channel, notify);
+            assert.strictEqual(notices.length, 1, `expected one notice, got ${JSON.stringify(notices)}`);
+            assert.ok(notices[0].includes(`"${replaced[0]}" is no longer available`), notices[0]);
+        } finally {
+            channel.dispose();
+        }
+    });
+
     test('repeated summaries reuse one panel instead of stacking up', () => {
         // Every run used to create its own panel. Ten counts left ten tabs, each
         // created with retainContextWhenHidden and each holding its rendered

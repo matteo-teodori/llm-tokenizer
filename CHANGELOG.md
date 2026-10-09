@@ -33,7 +33,10 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Changed
 - **MiniMax model ids now use the capitalisation the API documents.**
   `minimax-m3` is now `MiniMax-M3`, and so on, because that is the only
-  form MiniMax's own documentation uses. A saved choice migrates by itself.
+  form MiniMax's own documentation uses. A saved choice migrates by itself,
+  without a notice, since the model has not changed. An old id in the
+  `defaultModel` setting keeps working, though VS Code flags it until it is
+  updated.
 - **DeepSeek V4 Flash has been replaced by V4.1 Flash.** DeepSeek retired
   V4 Flash on 10 September and routes its id to V4.1 Flash
   (`deepseek-flash`), which has a tokenizer file of its own. A saved V4
@@ -69,7 +72,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - The checks that every contributed command is registered, and that every
   setting reads back with its declared type, now take the manifest as their
   list instead of a hand-written one. They also catch a default of the
-  wrong type and a default outside its own enum. 170 tests.
+  wrong type and a default outside its own enum. 172 tests.
 - Working notes in `.notes/` are no longer linted. Three comments that
   described the runtime and Llama's special-token baseline wrongly are
   corrected.
