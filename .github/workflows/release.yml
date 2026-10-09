@@ -37,6 +37,10 @@ jobs:
       - name: Test
         run: xvfb-run -a npm test
 
+      # Every release also passes on the oldest VS Code it claims to support.
+      - name: Test on the engines floor
+        run: xvfb-run -a npm run test:floor
+
       - name: Check the tag matches package.json
         if: startsWith(github.ref, 'refs/tags/v')
         run: |

@@ -25,6 +25,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   the login shell's environment, and points `CLAUDE_CONFIG_DIR` at a
   fixture, and the F5 entry point refuses to run if it points anywhere
   else.
+- The suite also runs on VS Code 1.105.0, the oldest version
+  `package.json` accepts: `npm run test:floor` locally, and on Linux in CI
+  and before every release.
 
 ## [2.1.2] - 2026-10-09
 

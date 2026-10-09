@@ -452,7 +452,9 @@
     "audit-bundled": "node scripts/audit-bundled.mjs",
     "lint": "eslint .",
     "pretest": "npm run compile-tests && npm run build",
-    "test": "vscode-test",
+    "test": "vscode-test --label stable",
+    "pretest:floor": "npm run pretest",
+    "test:floor": "vscode-test --label floor",
     "release": "npm run package && vsce package --no-dependencies",
     "compile-tests": "node scripts/clean.mjs .test-out && tsc -p tsconfig.test.json"
   },
