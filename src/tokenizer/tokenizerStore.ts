@@ -23,6 +23,12 @@ export type AssetKind = TokenizerAsset['kind'];
 /** The file each shape lives in, relative to the repo root. */
 const RANK_FILE = 'tiktoken.model';
 
+/**
+ * What a repo id's slash becomes in its directory name. `clear()` relies on
+ * it to tell the store's directories from anything else in global storage.
+ */
+const REPO_SEPARATOR = '--';
+
 const HF_ENDPOINT = 'https://huggingface.co';
 
 /** Refuse absurd payloads rather than filling the user's disk on a bad redirect. */
@@ -163,6 +169,15 @@ export class TokenizerStore {
      * Delete every cached tokenizer. Exposed as a command so users can reclaim
      * disk.
      *
+     * Only the store's own directories go, recognised by the name `repoDir`
+     * gives them: every repo id is `owner/name`, so every one contains `--`.
+     * This used to delete `globalStorageUri` whole, which is the directory the
+     * whole extension shares, so anything else kept there went with the
+     * tokenizers. Matching on the name rather than on what a directory holds
+     * means a stray file in one (a Finder `.DS_Store`) cannot stop it being
+     * cleared. Anything else stored here must therefore never have `--` in
+     * its name.
+     *
      * Downloads already in flight are disowned rather than awaited: one can
      * have up to two minutes left to run, and the command is awaited before the
      * user is told the cache is empty. Disowning them is what stops a finished
@@ -174,39 +189,34 @@ export class TokenizerStore {
         this.generation++;
         this.inFlight.clear();
         this.memory.clear();
-        try {
-            await vscode.workspace.fs.delete(this.storageUri, { recursive: true, useTrash: false });
-        } catch {
-            // Nothing cached yet.
-        }
-    }
 
-    /** Total bytes currently cached, for display in the settings UI. */
-    public async cacheSize(): Promise<number> {
-        let total = 0;
+        let entries: [string, vscode.FileType][];
         try {
-            for (const [name, type] of await vscode.workspace.fs.readDirectory(this.storageUri)) {
-                if (type !== vscode.FileType.Directory) {
-                    continue;
-                }
-                const dir = vscode.Uri.joinPath(this.storageUri, name);
-                for (const [file, fileType] of await vscode.workspace.fs.readDirectory(dir)) {
-                    if (fileType === vscode.FileType.File) {
-                        total += (await vscode.workspace.fs.stat(vscode.Uri.joinPath(dir, file))).size;
-                    }
-                }
-            }
+            entries = await vscode.workspace.fs.readDirectory(this.storageUri);
         } catch {
-            // Nothing cached yet.
+            return; // Nothing cached yet.
         }
-        return total;
+        for (const [name, type] of entries) {
+            if (type !== vscode.FileType.Directory || !name.includes(REPO_SEPARATOR)) {
+                continue;
+            }
+            try {
+                await vscode.workspace.fs.delete(vscode.Uri.joinPath(this.storageUri, name), {
+                    recursive: true,
+                    useTrash: false,
+                });
+            } catch {
+                // Best effort, as the whole-directory delete was: one that is
+                // locked must not keep the others.
+            }
+        }
     }
 
     // ── internals ────────────────────────────────────────────────────────────
 
     /** Repo ids contain a slash; flatten it so it maps to a single directory. */
     private repoDir(repo: string): vscode.Uri {
-        return vscode.Uri.joinPath(this.storageUri, repo.replace(/[/\\]/g, '--'));
+        return vscode.Uri.joinPath(this.storageUri, repo.replace(/[/\\]/g, REPO_SEPARATOR));
     }
 
     private async readFromDisk(repo: string, kind: AssetKind): Promise<TokenizerAsset> {

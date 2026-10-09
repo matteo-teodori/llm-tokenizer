@@ -4,6 +4,12 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.2.0] - 2026-10-09
+
+### Fixed
+- **Clear Downloaded Tokenizers deletes only the tokenizers.** It deleted
+  the extension's whole storage directory, not just the tokenizers in it.
+
 ## [2.1.2] - 2026-10-09
 
 ### Added

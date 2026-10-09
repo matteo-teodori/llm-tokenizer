@@ -562,6 +562,34 @@ suite('tokenizer service', () => {
         }
     });
 
+    test('clearing downloaded tokenizers leaves the rest of global storage alone', async () => {
+        // The store keeps its directories in globalStorageUri, which the whole
+        // extension shares, and clearing used to delete that directory whole:
+        // whatever else was kept there went with the tokenizers.
+        const llama = model('llama-3.3-70b');
+        const kimi = model('kimi-k3');
+        assert.ok(llama.encoder.kind === 'hf' && kimi.encoder.kind === 'tiktokenModel');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+        await seedRankTable(storageUri, kimi.encoder.repo);
+        // A stray file in a tokenizer's directory must not keep it: Finder
+        // leaves a .DS_Store in any folder it has shown.
+        const llamaDir = vscode.Uri.joinPath(storageUri, llama.encoder.repo.replace(/[/\\]/g, '--'));
+        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(llamaDir, '.DS_Store'), new Uint8Array([0]));
+
+        const sibling = vscode.Uri.joinPath(storageUri, 'claude-code-usage');
+        await vscode.workspace.fs.createDirectory(sibling);
+        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(sibling, 'usage.sqlite'), new Uint8Array([1, 2, 3]));
+        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(storageUri, 'notes.txt'), new Uint8Array([4]));
+
+        await store.clear();
+
+        const left = (await vscode.workspace.fs.readDirectory(storageUri)).map(([name]) => name).sort();
+        assert.deepStrictEqual(left, ['claude-code-usage', 'notes.txt']);
+        assert.deepStrictEqual([...(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(sibling, 'usage.sqlite')))], [1, 2, 3]);
+        assert.strictEqual(await store.isDownloaded(llama.encoder.repo, 'hf'), false);
+        assert.strictEqual(await store.isDownloaded(kimi.encoder.repo, 'tiktokenModel'), false);
+    });
+
     test('forgetting loaded vocabularies reverts counts to estimates', async () => {
         // Clearing the store alone left the worker holding its parsed
         // tokenizer, so the download command afterwards said "already
