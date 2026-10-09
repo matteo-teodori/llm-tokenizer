@@ -357,6 +357,28 @@ suite('tokenizer service', () => {
         }
     });
 
+    test('a vocabulary loaded before a crash is re-sent to the replacement worker', async () => {
+        // A dead worker forgets what it held, so the service must forget it
+        // too. Otherwise it skips re-hydration and counts against a
+        // replacement that has nothing loaded, and the model stays an estimate
+        // for the rest of the session.
+        const llama = model('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-on-demand.js'), store, log);
+
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        assert.deepStrictEqual(await tokenizer.count('abc', llama), { count: 2, exact: true });
+        assert.strictEqual((await tokenizer.count('CRASH', model('gpt-5.6-sol'))).exact, false);
+        assert.deepStrictEqual(
+            await tokenizer.count('abc', llama),
+            { count: 2, exact: true },
+            'the replacement worker was never sent the vocabulary',
+        );
+    });
+
     test('a crash that trips the budget mid re-hydration does not shelve the vocabulary', async () => {
         // Re-hydration compares the crash epoch to tell a vocabulary that cannot
         // be used from a worker that is dying. It read the epoch after checking
