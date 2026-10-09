@@ -45,12 +45,15 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 - **Selection Counting**: Count only the text you highlighted
 - **Runs off the UI thread**: Tokenizing happens in a worker thread, so the editor never blocks
 - **Persistent Preferences**: Your model choice is remembered
+- **Claude Code usage (optional, off by default)**: how many tokens Claude Code processed, by day, project, session and model, read from its own records on your machine. See [Claude Code Usage](#claude-code-usage).
 
 ### 🔒 Privacy
 **Your code never leaves your machine.** There is no telemetry and no network
 request that contains file contents. The only network access is a one-time
 download of a model's *vocabulary file* from huggingface.co, which you can turn
-off with `llm-tokenizer.downloadTokenizers`.
+off with `llm-tokenizer.downloadTokenizers`. Claude Code usage, if you turn it
+on, reads Claude Code's own session records on this machine and sends nothing
+anywhere.
 
 ### ⚙️ Configuration
 - `llm-tokenizer.defaultModel`: Model used until you pick one
@@ -58,6 +61,9 @@ off with `llm-tokenizer.downloadTokenizers`.
 - `llm-tokenizer.ignoreGitignoredFiles`: Exclude gitignored files from folder and workspace totals
 - `llm-tokenizer.enableProjectScan`: Turn off workspace-wide counting on very large repositories
 - `llm-tokenizer.downloadTokenizers`: Allow the one-time tokenizer download that makes counts exact
+- `llm-tokenizer.enableClaudeCodeUsage`: Read Claude Code's session records to show its usage (off by default)
+- `llm-tokenizer.claudeCodeDataDirectory`: Claude Code's configuration folder, when Claude Code's own rules would not find it
+- `llm-tokenizer.showClaudeCodeUsageInStatusBar`: Show the live context of the Claude Code session in this workspace (off by default)
 
 ## Supported Models
 
@@ -129,6 +135,7 @@ Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
 - **Ignore Gitignored Files**: exclude `.gitignore` matches from counts (on by default)
 - **Enable Project Scan**: turn off workspace-wide counting on very large repositories
 - **Download Tokenizers**: allow the one-time download that makes counts exact
+- **Enable Claude Code Usage**, **Claude Code Data Directory** and **Show Claude Code Usage in Status Bar**: see [Claude Code Usage](#claude-code-usage)
 
 ### Context Warnings
 - **Normal**: under 80% of the model's usable input limit
@@ -136,6 +143,61 @@ Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
 - **Error**: at or over 100%
 
 A leading `≈` means the count is an estimate rather than an exact tokenization.
+
+## Claude Code Usage
+
+How many tokens Claude Code processed, read from the session records Claude
+Code keeps on your machine. It is off by default: turn on
+**Enable Claude Code Usage** in Settings, then run **Show Claude Code Usage**.
+
+**The panel** shows today, the last 7 or 30 days, or everything since the
+history starts, for all projects or for this workspace:
+- tokens processed, split into input, cache writes, cache reads and output,
+  with how much of the input was read from the cache;
+- a column per day, in your time zone;
+- models, the main conversation against subagents and workflows, and effort;
+- projects and sessions, sortable, and the usage limits you reached;
+- diagnostics: what was read, what was skipped and why, and where from.
+
+*Processed* is everything a request sent or received: input, cache writes,
+cache reads and output. Cache reads are most of it, because Claude Code sends
+the conversation again with every turn and the cache serves it. A total marked
+`≥` is a lower bound: some request did not report every counter.
+
+**The status item** (**Show Claude Code Usage in Status Bar**) shows how full
+the context of the Claude Code session running in this workspace is, with the
+80% and 100% colours where the model's window is known. It reads Claude
+Code's running-session files too.
+
+**Export CSV** gives, per day and model, every input a hand-made cost
+calculation needs: requests, input, cache writes (5-minute and 1-hour), cache
+reads, output, thinking, web searches and fetches. It gives no prices.
+
+**What is kept, and where.** Token counts, model ids, times, session ids and
+project folders, in a database in this extension's own storage
+(`claude-code-usage/usage.sqlite` under VS Code's global storage for LLM
+Tokenizer). Prompts, responses, thinking and tool contents are never kept,
+and nothing is sent anywhere. The history outlives Claude Code's own records,
+which Claude Code deletes after 30 days by default.
+**Clear Claude Code Usage History** removes it; anything still on disk is read
+again at the next refresh.
+
+### What it counts, and what it cannot see
+
+- Only the machine the extension runs on: other computers and claude.ai are
+  not seen. In a remote window that is normally the remote host, and the
+  panel names it.
+- Nothing Claude Code had already deleted before the first import.
+- Sessions run with `CLAUDE_CODE_SKIP_PROMPT_HISTORY`, which keeps no
+  transcripts at all.
+- `-p` and Agent SDK runs that `CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` trimmed.
+- Requests that never reach a transcript, such as title generation and
+  possibly compaction.
+- A request refused at a usage limit carries no tokens: it is listed as a
+  limit reached.
+
+The records' format is internal to Claude Code and may change with it; the
+diagnostics say when lines could not be read.
 
 ## Accuracy
 

@@ -30,11 +30,16 @@ src/              extension source, bundled by esbuild into out/
   summary/        the summary page: aggregation, languages, rendering
   html.ts         escaping, the webview CSP, and the text helpers a page script runs
   charts.ts       the theme tokens, meter and ranked bars the pages share
+  usage/          Claude Code usage: finding and reading its records, the history
+                  store, the rollups and reports, the panel and the status item
+  usageWorker.ts  the usage worker: the one thread that reads Claude Code's records
+                  or touches the history
 test/
   unit/           logic that does not need a real workspace
   integration/    drives the extension host and the bundled worker
   fixtures/       a deliberately awkward workspace the tests assert against, the
-                  crashing workers, and a stand-in for ~/.claude
+                  crashing workers, and a stand-in for ~/.claude whose totals are
+                  worked out by hand in its README
 scripts/          build-time tooling; bundles.mjs lists the bundles that ship
 build.mjs         the bundler
 ```

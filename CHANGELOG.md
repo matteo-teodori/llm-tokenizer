@@ -6,6 +6,30 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [2.2.0] - 2026-10-09
 
+### Added
+- **Claude Code usage, off by default.** How many tokens Claude Code
+  processed, read from the session records it keeps on your machine. Turn on
+  **Enable Claude Code Usage**, then run **Show Claude Code Usage**.
+  - The panel shows today, 7 days, 30 days or the whole history, for all
+    projects or this workspace: tokens processed by category and by day,
+    models, delegated work, effort, projects, sessions, the usage limits
+    reached, and diagnostics.
+  - **Show Claude Code Usage in Status Bar** shows how full the context of
+    the session running in this workspace is.
+  - **Export CSV** gives every input a hand-made cost calculation needs, per
+    day and model, and no prices.
+  - Each request is counted once, from its most complete record: Claude Code
+    writes a line per streaming update, and summing them would count about
+    twice the tokens.
+  - Only counts, model ids, times, session ids and project folders are kept,
+    in a database in this extension's storage. Prompts, responses and tool
+    contents are never kept, and nothing is sent anywhere. **Clear Claude
+    Code Usage History** removes it.
+  - Every setting is machine-scoped, so a repository's own settings cannot
+    turn it on.
+  - A history written by a later version of LLM Tokenizer opens read-only in
+    this one.
+
 ### Fixed
 - **Clear Downloaded Tokenizers deletes only the tokenizers.** It deleted
   the extension's whole storage directory, not just the tokenizers in it.
@@ -34,6 +58,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   and before every release.
 - CONTRIBUTING's layout and commands cover what exists now, and its
   changelog rule matches the dated sections this file uses.
+- `WorkerHost` takes a heap limit, and can let a worker go without being
+  disposed. The registry records the window Claude Code gives Opus 4.6 and
+  Sonnet 4.6 without their `[1m]` variant.
 
 ## [2.1.2] - 2026-10-09
 
