@@ -361,7 +361,7 @@ export class UsageStore {
         let db = new sqlite.DatabaseSync(file);
         try {
             db.exec('PRAGMA busy_timeout = 5000');
-            const schema = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+            const schema = userVersion(db);
 
             // A newer extension created it: read it, never write or migrate it.
             if (schema > SCHEMA_VERSION) {
@@ -407,14 +407,29 @@ export class UsageStore {
         return 'wal';
     }
 
+    /**
+     * Bring the schema to SCHEMA_VERSION, one version per transaction.
+     *
+     * Two windows can open one new store at once: both read user_version 0,
+     * and the second's CREATE TABLE then failed on the first one's tables
+     * ("table meta already exists"), in about 1 in 5 openings on the
+     * editors' runtimes (measured on VS Code 1.105 and 1.141, Electron 37.6
+     * and 43.7; never on Node 26.3 in 60). So the version is
+     * read again once the write lock is held, and one already applied is
+     * skipped.
+     */
     private static migrate(db: DatabaseSync, file: string, from: number): void {
         for (let version = from + 1; version <= SCHEMA_VERSION; version++) {
             // The first migration creates the schema; there is nothing to keep.
             if (from > 0) {
-                db.exec(`VACUUM INTO ${sqlString(`${file}.bak-v${version - 1}`)}`);
+                backUp(db, `${file}.bak-v${version - 1}`);
             }
             db.exec('BEGIN IMMEDIATE');
             try {
+                if (userVersion(db) >= version) {
+                    db.exec('COMMIT');
+                    continue;
+                }
                 MIGRATIONS[version](db);
                 if (version === 1) {
                     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -937,6 +952,25 @@ function onNetworkFilesystem(directory: string): boolean {
         return NETWORK_FILESYSTEMS.has(fs.statfsSync(directory).type);
     } catch {
         return false;
+    }
+}
+
+function userVersion(db: DatabaseSync): number {
+    return Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+}
+
+/**
+ * The copy of the store a migration starts from. VACUUM INTO refuses a file
+ * that exists, so a second window migrating at the same moment finds the
+ * first one's copy, and that copy is the backup.
+ */
+function backUp(db: DatabaseSync, target: string): void {
+    try {
+        db.exec(`VACUUM INTO ${sqlString(target)}`);
+    } catch (error) {
+        if (!fs.existsSync(target)) {
+            throw error;
+        }
     }
 }
 

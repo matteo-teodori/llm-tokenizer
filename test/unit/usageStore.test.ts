@@ -272,6 +272,24 @@ suite('usage history store', () => {
         assert.ok(store.acquireLease('import', 'window-b', 1), 'a released lease stayed held');
     });
 
+    test('a window that read an old version while another migrated skips what is already applied', () => {
+        // Two windows opening one new store both read user_version 0; the
+        // second gets the write lock after the first committed. Measured on
+        // the editors' runtimes, its CREATE TABLE then failed in 1 opening in 5.
+        ready(open()).close();
+        opened.length = 0;
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const db = new sqlite.DatabaseSync(file);
+        try {
+            // A static that uses no `this`, called as a second window would.
+            const migrate = (UsageStore as unknown as { migrate: (db: unknown, file: string, from: number) => void }).migrate;
+            assert.doesNotThrow(() => migrate(db, file, 0));
+            assert.strictEqual((db.prepare('SELECT count(*) AS n FROM meta').get() as { n: number }).n, 2, 'the second window wrote its own meta rows');
+        } finally {
+            db.close();
+        }
+    });
+
     test('a lease whose holder has exited is taken over at once', () => {
         // A window closed mid-import, or a test run that ended: no need to
         // wait out the heartbeat.
