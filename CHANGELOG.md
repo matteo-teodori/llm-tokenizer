@@ -9,6 +9,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Fixed
 - **Clear Downloaded Tokenizers deletes only the tokenizers.** It deleted
   the extension's whole storage directory, not just the tokenizers in it.
+- **Changing an unrelated setting rescanned the whole workspace.** Turning
+  `downloadTokenizers` on or off, for one, recounted every file. Only the
+  four settings that change a count or the display do that now, and turning
+  downloads on starts the current model's download straight away rather
+  than at the next reload.
 
 ## [2.1.2] - 2026-10-09
 

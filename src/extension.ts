@@ -393,6 +393,26 @@ async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Pro
 // Event listeners
 // ═══════════════════════════════════════════════════════════════
 
+/** The settings whose change can alter what is counted, or what is shown. */
+const RESCAN_SETTINGS = ['ignoreGitignoredFiles', 'defaultModel', 'statusBarDisplay', 'enableProjectScan'];
+
+/**
+ * What a settings change calls for.
+ *
+ * Every `llm-tokenizer.*` change used to re-derive the status bar and rescan
+ * the whole workspace, a toggle of `downloadTokenizers` included, which
+ * changes neither. That one instead starts the download that activation
+ * would have, so turning downloads on no longer waits for a reload.
+ */
+export function settingsChangeEffects(
+    event: Pick<vscode.ConfigurationChangeEvent, 'affectsConfiguration'>,
+): { rescan: boolean; download: boolean } {
+    return {
+        rescan: RESCAN_SETTINGS.some(key => event.affectsConfiguration(`${CONFIG_SECTION}.${key}`)),
+        download: event.affectsConfiguration(`${CONFIG_SECTION}.downloadTokenizers`),
+    };
+}
+
 function registerEventListeners(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => debounceStatusBar(editor)),
@@ -456,7 +476,14 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
         // mode or the gitignore setting did nothing until some unrelated event
         // happened to fire.
         vscode.workspace.onDidChangeConfiguration(e => {
-            if (!e.affectsConfiguration(CONFIG_SECTION)) {
+            const effects = settingsChangeEffects(e);
+            // ensureExactTokenizer reads the setting itself, so turning
+            // downloads off here does nothing, as it should: what is on disk
+            // stays usable.
+            if (effects.download) {
+                void ensureExactTokenizer(currentModel, false);
+            }
+            if (!effects.rescan) {
                 return;
             }
 

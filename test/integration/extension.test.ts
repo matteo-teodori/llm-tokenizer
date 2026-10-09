@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 
 import { showMultiFileSummary, type MultiFileSummaryConfig } from '../../src/webview';
-import { resolveInitialModel } from '../../src/extension';
+import { resolveInitialModel, settingsChangeEffects } from '../../src/extension';
 import { STORAGE_KEY } from '../../src/constants';
 import { MODEL_ALIASES } from '../../src/tokenizer/registry';
 
@@ -112,6 +112,42 @@ suite('extension', () => {
         resolveInitialModel(context(replaced[0]), channel, notify);
         assert.strictEqual(notices.length, 1, `expected one notice, got ${JSON.stringify(notices)}`);
         assert.ok(notices[0].includes(`"${replaced[0]}" is no longer available`), notices[0]);
+    });
+
+    test('only a setting that changes a count or the display rescans the workspace', () => {
+        // Every llm-tokenizer.* change rescanned the whole workspace, a toggle
+        // of downloadTokenizers included, which changes neither; turning it on
+        // instead waited for a reload to start the download.
+        const changed = (...keys: string[]) => ({
+            affectsConfiguration: (section: string) =>
+                keys.some(key => key === section || key.startsWith(`${section}.`)),
+        });
+
+        assert.deepStrictEqual(settingsChangeEffects(changed(`${CONFIG}.downloadTokenizers`)), {
+            rescan: false,
+            download: true,
+        });
+        for (const key of ['ignoreGitignoredFiles', 'defaultModel', 'statusBarDisplay', 'enableProjectScan']) {
+            assert.deepStrictEqual(
+                settingsChangeEffects(changed(`${CONFIG}.${key}`)),
+                { rescan: true, download: false },
+                key,
+            );
+        }
+        assert.deepStrictEqual(settingsChangeEffects(changed('editor.fontSize')), {
+            rescan: false,
+            download: false,
+        });
+
+        // A setting added later must be given an effect here too, or changing
+        // it would do nothing until the window reloads.
+        const manifest = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON as {
+            contributes: { configuration: { properties: Record<string, unknown> } };
+        };
+        for (const key of Object.keys(manifest.contributes.configuration.properties)) {
+            const effects = settingsChangeEffects(changed(key));
+            assert.ok(effects.rescan || effects.download, `changing ${key} has no effect`);
+        }
     });
 
     test('repeated summaries reuse one panel instead of stacking up', () => {
