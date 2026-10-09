@@ -1,5 +1,5 @@
 /**
- * The model registry (September 2026).
+ * The model registry (October 2026).
  *
  * Every id here was checked against a live first-party source. v1.3.0 shipped
  * several models that never existed — `grok-4.2`, `grok-4.1-fast`,
@@ -49,19 +49,20 @@ const GROK = 3.7;
 const GEMINI_UNMAPPED = 4.0;
 
 /**
- * GPT-6. Estimated, deliberately, even though every other OpenAI model here is
- * exact.
+ * The GPT-6 models. Estimated, deliberately, even though every other OpenAI
+ * model here is exact.
  *
  * OpenAI's own tokenizer library is the source of truth for which encoding a
  * model uses, and `MODEL_PREFIX_TO_ENCODING` in tiktoken has no `gpt-6` entry —
- * it stops at `gpt-5` — while the GPT-6 Astra documentation page names no
- * encoding at all. Claiming o200k_base here would be a guess dressed as an
- * exact count, which is the one thing this file exists to prevent.
+ * it stops at `gpt-5`, and tiktoken's own lookup raises KeyError for every
+ * GPT-6 id — while none of the GPT-6 documentation pages names an encoding.
+ * Claiming o200k_base here would be a guess dressed as an exact count, which is
+ * the one thing this file exists to prevent.
  *
  * The ratio is measured rather than assumed: 4.119 chars/token for o200k_base
  * over a mixed corpus of this repository's own TypeScript, JSON, YAML and
- * Markdown. Move this entry to a `tiktoken` encoder the moment tiktoken ships a
- * gpt-6 mapping.
+ * Markdown. Move these entries to a `tiktoken` encoder the moment tiktoken
+ * ships a gpt-6 mapping.
  */
 const GPT6_UNMAPPED = 4.1;
 
@@ -74,9 +75,10 @@ const KIMI = 3.6;
 // ─────────────────────────────────────────────────────────────────────────────
 // Hugging Face tokenizer sources
 //
-// Meta's and Google's own repos are gated (HTTP 401 without an account), so
-// ungated mirrors are used. Every repo below was checked to serve
-// tokenizer.json anonymously.
+// Meta's repos and Google's Gemma 3 repos are gated (HTTP 401 without an
+// account), so ungated mirrors are used. Google's Gemma 4 repos are not gated,
+// which is why HF.gemma4 points at google/ directly. Every repo below was
+// checked to serve tokenizer.json anonymously.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HF = {
@@ -84,33 +86,59 @@ const HF = {
     llama4: 'unsloth/Llama-4-Scout-17B-16E-Instruct',
     gemma3: 'unsloth/gemma-3-4b-it',
     gemma4: 'google/gemma-4-E4B-it',
+    /**
+     * DeepSeek V4 Pro's vocabulary. The path is the retired V4 Flash's repo,
+     * kept so existing downloads stay valid: its tokenizer.json is
+     * byte-identical (sha256 8f9f37ca…) to deepseek-ai/DeepSeek-V4-Pro-0813,
+     * the snapshot the API serves for deepseek-v4-pro.
+     */
     deepseek: 'deepseek-ai/DeepSeek-V4-Flash',
+    /**
+     * V4.1 Flash keeps V4's vocabulary and merges but adds special tokens
+     * (`<｜System｜>` is one token here and five under V4), so its file differs
+     * (sha256 c90dfa01…) and it cannot share V4 Pro's repo.
+     */
+    deepseek41: 'deepseek-ai/DeepSeek-V4.1-Flash',
     qwen: 'Qwen/Qwen3.6-27B',
     /**
-     * Qwen 3.8 changed vocabulary. Verified by hash rather than assumed:
-     * Qwen3.8-27B, Qwen3.8-Flash-Next and Qwen3.8-2.4T-A95B all serve the same
-     * tokenizer.json (sha256 0997f410…), which differs from Qwen3.6-27B's
-     * (5f9e4d49…), so one download covers the 3.8 family and the 3.6 entries
-     * keep their own.
+     * Qwen 3.8's files differ from 3.6's. The vocabulary and merges are the
+     * same; 3.8 adds seven audio and TTS special tokens, which is enough for the
+     * files to hash differently (0997f410… against 3.6's 5f9e4d49…), so the 3.6
+     * entries keep their own repo. Within 3.8 one download covers the family:
+     * Qwen3.8-27B, Qwen3.8-Flash-Next and Qwen3.8-2.4T-A95B serve the same
+     * tokenizer.json.
      */
     qwen38: 'Qwen/Qwen3.8-27B',
     mistral: 'mistralai/Mistral-Large-3-675B-Instruct-2512',
     /**
-     * One repo for the whole GLM-5 line. Verified by hash: GLM-5.2, GLM-5.3 and
-     * GLM-5.3-Flash serve a byte-identical tokenizer.json *and*
-     * tokenizer_config.json (sha256 19e77364… / 98b12715…), so a single
-     * download covers them all.
+     * Medium 3.5 and Small 4 share one tokenizer.json (sha256 2ba5b333…) that
+     * is not Large 3's (57757562…). See the Mistral section for why that
+     * matters.
+     */
+    mistralMedium35: 'mistralai/Mistral-Medium-3.5-128B',
+    /**
+     * One repo for the whole GLM-5 line. Verified by hash: GLM-5, 5.1, 5.2, 5.3
+     * and 5.3-Flash serve a byte-identical tokenizer.json (sha256 19e77364…),
+     * and their tokenizer_config.json files differ only in model_max_length,
+     * so a single download covers them all.
      */
     glm: 'zai-org/GLM-5.2',
     minimax: 'MiniMaxAI/MiniMax-M3',
     minimaxLegacy: 'MiniMaxAI/MiniMax-M2',
     /**
-     * MiMo V2.5 and V2.5 Pro do NOT share a vocabulary — their tokenizer.json
-     * files hash differently (633518aa… and cdd40b08…) — so unlike the GLM and
-     * Kimi families each needs its own repo.
+     * MiMo V2.5 and V2.5 Pro have the same vocabulary and merges, but their
+     * tokenizer.json files differ (633518aa… and cdd40b08…: Pro lacks six
+     * audio and video tokens, and V2.5 uses an older serialisation), and only
+     * byte-identical files may share a repo, so each keeps its own.
      */
     mimo: 'XiaomiMiMo/MiMo-V2.5',
     mimoPro: 'XiaomiMiMo/MiMo-V2.5-Pro',
+    /**
+     * V2.6 is published as -RL and -MOPD checkpoints of Pro and Flash, and all
+     * four serve a byte-identical tokenizer.json (sha256 ff15eb92…), so one
+     * download covers both V2.6 models.
+     */
+    mimo26: 'XiaomiMiMo/MiMo-V2.6-Pro-RL',
     hunyuan: 'tencent/Hy3',
     hunyuan4: 'tencent/Hy4-preview',
     /**
@@ -143,9 +171,9 @@ function hf(repo: string, charsPerToken: number): ModelInfo['encoder'] {
  * The model a user gets before they choose one.
  *
  * Deliberately not `MODELS[0]`: the registry is ordered newest-first, and the
- * newest OpenAI model is GPT-6 Astra, which has no published tokenizer yet. A
- * token counter's default should be one it can count *exactly*, so this is the
- * newest exact model instead. It is also the value `scripts/sync-manifest.mjs`
+ * newest OpenAI models are the GPT-6 family, which has no published tokenizer
+ * yet. A token counter's default should be one it can count *exactly*, so this
+ * is the newest exact model instead. It is also the value `scripts/sync-manifest.mjs`
  * writes into the settings dropdown, so the manifest and the code cannot drift.
  */
 export const DEFAULT_MODEL_ID = 'gpt-5.6-sol';
@@ -154,17 +182,31 @@ export const MODELS: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────────────────
     // OpenAI — exact, offline. tiktoken is OpenAI's own tokenizer.
     // ─────────────────────────────────────────────────────────────────────────
-    // GPT-6 is the one OpenAI entry that is *not* exact — see GPT6_UNMAPPED.
+    // The GPT-6 models are the OpenAI entries that are *not* exact — see
+    // GPT6_UNMAPPED.
     { id: 'gpt-6-astra', label: 'GPT-6 Astra', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
     { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
+    // GPT-5.5, 5.4, 5.2 and 5.1 publish only a window (1,050,000 or 400,000) and
+    // a 128,000 max output — no separate input cap. Every OpenAI model that does
+    // publish one sets it to exactly window minus max output (922,000 for
+    // GPT-5.6 and GPT-6, 272,000 for GPT-5, GPT-5.3 Codex and GPT-5.4 mini), so
+    // these four carry that derived figure rather than the larger window: a
+    // "does it fit" warning should err early, not late.
     { id: 'gpt-5.5', label: 'GPT-5.5', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.4', label: 'GPT-5.4', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.4-mini', label: 'GPT-5.4 mini', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.2', label: 'GPT-5.2', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.1', label: 'GPT-5.1', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
+    // Scheduled shutdowns, still live today: o4-mini on 2026-10-23 (OpenAI's
+    // replacement is gpt-5.6-terra), gpt-5 and o3 on 2026-12-11 (gpt-5.6-sol),
+    // gpt-5.1 and gpt-5.3-codex on 2027-04-01 (gpt-6-sol). Remove each, with an
+    // alias to its replacement, at the first refresh after its date.
     { id: 'gpt-5', label: 'GPT-5', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-4.1', label: 'GPT-4.1', provider: 'OpenAI', contextLimit: 1_047_576, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-4o', label: 'GPT-4o', provider: 'OpenAI', contextLimit: 128_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
@@ -187,6 +229,12 @@ export const MODELS: ModelInfo[] = [
     // their /v1/messages/count_tokens endpoint, which needs an API key.
     // ─────────────────────────────────────────────────────────────────────────
     { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
+    { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
+    { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
+    // Haiku 5.5 moved to the current tokenizer — Anthropic's model page says the
+    // same text counts ~30% more than on Haiku 4.5 — so it shares CLAUDE_CURRENT
+    // with the 4.7-and-later models rather than Haiku 4.5's ratio.
+    { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-opus-5', label: 'Claude Opus 5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-fable-5', label: 'Claude Fable 5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
@@ -195,6 +243,8 @@ export const MODELS: ModelInfo[] = [
     { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
     { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
     { id: 'claude-opus-4-5', label: 'Claude Opus 4.5', provider: 'Anthropic', contextLimit: 200_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
+    // Deprecated on 2026-09-30: Anthropic retires it on 2026-11-30 and names
+    // claude-sonnet-5-5 as the replacement. Remove it, with that alias, after.
     { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5', provider: 'Anthropic', contextLimit: 200_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
     { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'Anthropic', contextLimit: 200_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
 
@@ -214,12 +264,17 @@ export const MODELS: ModelInfo[] = [
     { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', provider: 'Google', contextLimit: 1_048_576, encoder: hf(HF.gemma3, GEMINI_UNMAPPED) },
     { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', provider: 'Google', contextLimit: 1_048_576, encoder: hf(HF.gemma3, GEMINI_UNMAPPED) },
     { id: 'gemma-4-31b-it', label: 'Gemma 4 31B Instruct', provider: 'Google', contextLimit: 262_144, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
+    // Served by the Gemini API alongside 31B since 2026-04-02. All five Gemma 4
+    // checkpoints serve a byte-identical tokenizer.json (sha256 cc8d3a0c…), so
+    // it shares HF.gemma4.
+    { id: 'gemma-4-26b-a4b-it', label: 'Gemma 4 26B A4B Instruct', provider: 'Google', contextLimit: 262_144, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
     { id: 'gemma-4-e4b-it', label: 'Gemma 4 E4B Instruct', provider: 'Google', contextLimit: 131_072, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
 
     // ─────────────────────────────────────────────────────────────────────────
     // xAI — estimated. No public tokenizer exists for any current Grok model.
-    // Note grok-4.5 has a *smaller* window than the older grok-4.3.
+    // Note grok-4.7, 4.6 and 4.5 have a *smaller* window than the older 4.3.
     // ─────────────────────────────────────────────────────────────────────────
+    { id: 'grok-4.7', label: 'Grok 4.7', provider: 'xAI', contextLimit: 500_000, encoder: { kind: 'heuristic', charsPerToken: GROK } },
     { id: 'grok-4.6', label: 'Grok 4.6', provider: 'xAI', contextLimit: 500_000, encoder: { kind: 'heuristic', charsPerToken: GROK } },
     { id: 'grok-4.5', label: 'Grok 4.5', provider: 'xAI', contextLimit: 500_000, encoder: { kind: 'heuristic', charsPerToken: GROK } },
     { id: 'grok-4.3', label: 'Grok 4.3', provider: 'xAI', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: GROK } },
@@ -227,11 +282,14 @@ export const MODELS: ModelInfo[] = [
     { id: 'grok-build-0.1', label: 'Grok Build 0.1', provider: 'xAI', contextLimit: 256_000, encoder: { kind: 'heuristic', charsPerToken: GROK } },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // DeepSeek — exact. Reasoning is a mode of V4, not a separate model, so the
-    // old R1/V3 entries are gone.
+    // DeepSeek — exact. Reasoning is a mode of the model, not a separate one, so
+    // the old R1/V3 entries are gone. V4.1 Flash replaced V4 Flash on
+    // 2026-09-10 under the id `deepseek-flash`; the old id is only routed to it.
+    // DeepSeek's API reference gives both models a context_window of 1048576,
+    // input and output together, with no separate input cap.
     // ─────────────────────────────────────────────────────────────────────────
-    { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', provider: 'DeepSeek', contextLimit: 1_000_000, encoder: hf(HF.deepseek, 3.3) },
-    { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', provider: 'DeepSeek', contextLimit: 1_000_000, encoder: hf(HF.deepseek, 3.3) },
+    { id: 'deepseek-flash', label: 'DeepSeek V4.1 Flash', provider: 'DeepSeek', contextLimit: 1_048_576, encoder: hf(HF.deepseek41, 3.3) },
+    { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', provider: 'DeepSeek', contextLimit: 1_048_576, encoder: hf(HF.deepseek, 3.3) },
 
     // ─────────────────────────────────────────────────────────────────────────
     // Meta — exact. Llama 3+ uses a tiktoken-style BPE, which is why the old
@@ -247,63 +305,98 @@ export const MODELS: ModelInfo[] = [
     { id: 'llama-3.1-8b', label: 'Llama 3.1 8B Instruct', provider: 'Meta', contextLimit: 131_072, encoder: hf(HF.llama3, 3.8) },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Mistral — exact. The Tekken tokenizer is markedly denser than cl100k;
-    // the old proxy undercounted by up to 23%.
+    // Mistral — exact, except Large 4 until its weights ship. The Tekken
+    // tokenizer is markedly denser than cl100k; the old proxy undercounted by up
+    // to 23%.
     // ─────────────────────────────────────────────────────────────────────────
     // The ids are the strings Mistral's API actually accepts, which are not the
     // marketing names: Large 3 predates the major-minor convention and kept a
-    // date suffix, Medium 3.5 uses the hyphenated form (never a dot), and Small
-    // 4 is date-suffixed too. "256k" on the docs means 262,144 — the model
-    // cards serve with `--max-model-len 262144` — not 256,000.
+    // date suffix, Medium 3.5 and Large 4 use the hyphenated major-minor form
+    // (never a dot), and Small 4 is date-suffixed too. "256k" on the docs means
+    // 262,144 — the model cards serve with `--max-model-len 262144` — not
+    // 256,000.
     //
-    // One repo for all three: their Tekken vocabularies were compared entry by
-    // entry and differ only in the names of two reserved slots (36 and 37), so
-    // identical text encodes to identical ids. Large 3's tokenizer additionally
-    // prepends a BOS token, which `hfEncoder` already measures and subtracts.
+    // Large 4 is a public preview whose open weights are announced but not yet
+    // published (its Hugging Face repo is a placeholder that returns 401), so
+    // it is estimated with the Tekken fallback, and its "1M" is taken literally
+    // until a config says otherwise. Revisit both when the weights ship.
+    //
+    // Large 3 has its own file; Medium 3.5 and Small 4 share another. The two
+    // vocabularies differ only in reserved slots 36 and 37, so ordinary text
+    // encodes identically, but those slots are control strings: measured,
+    // `[MODEL_SETTINGS]` is 1 token under Medium 3.5's own file and 6 under
+    // Large 3's. Large 3's tokenizer also prepends a BOS token, which
+    // `hfEncoder` already measures and subtracts.
+    { id: 'mistral-large-4-0', label: 'Mistral Large 4 (preview)', provider: 'Mistral', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: 3.0 } },
     { id: 'mistral-large-2512', label: 'Mistral Large 3', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistral, 3.0) },
-    { id: 'mistral-medium-3-5', label: 'Mistral Medium 3.5', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistral, 3.0) },
-    { id: 'mistral-small-2603', label: 'Mistral Small 4', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistral, 3.0) },
+    { id: 'mistral-medium-3-5', label: 'Mistral Medium 3.5', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistralMedium35, 3.0) },
+    { id: 'mistral-small-2603', label: 'Mistral Small 4', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistralMedium35, 3.0) },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Alibaba Qwen — exact for the open-weight models; the -Max/-Plus API
-    // models are closed, so they are proxied through the open Qwen3.6 vocab.
+    // Alibaba Qwen — exact for the open-weight models and for the two API models
+    // Qwen's own model cards call "the official version based on" an open
+    // checkpoint (Qwen3.8-Max on 2.4T-A95B, Qwen3.8-Flash on Flash-Next, both
+    // sharing HF.qwen38). The 3.7 and 3.6 API models have no open counterpart,
+    // so they are estimated with a ratio measured on the open Qwen3.6 vocab.
     // ─────────────────────────────────────────────────────────────────────────
     // Model Studio publishes "Context Window" and "Max Input Length" as separate
     // fields, and these are the latter: 991,808 rather than the advertised
     // 1,000,000, and 260,096 rather than 262,144. The registry records what a
     // prompt may actually contain. (The open-weight 3.8 checkpoints are 256K
-    // natively — max_position_embeddings 262144 — so Alibaba serves them with a
-    // length extension its published config does not declare.)
-    { id: 'qwen3.8-max', label: 'Qwen3.8-Max', provider: 'Alibaba', contextLimit: 991_808, encoder: { kind: 'heuristic', charsPerToken: QWEN_CLOSED } },
+    // natively — max_position_embeddings 262144 — and their model cards
+    // document the extension to 1M that Alibaba serves.)
+    { id: 'qwen3.8-max', label: 'Qwen3.8-Max', provider: 'Alibaba', contextLimit: 991_808, encoder: hf(HF.qwen38, QWEN_CLOSED) },
     { id: 'qwen3.8-flash', label: 'Qwen3.8-Flash', provider: 'Alibaba', contextLimit: 991_808, encoder: hf(HF.qwen38, QWEN_CLOSED) },
     { id: 'qwen3.8-2.4t-a95b', label: 'Qwen3.8 2.4T-A95B', provider: 'Alibaba', contextLimit: 991_808, encoder: hf(HF.qwen38, QWEN_CLOSED) },
     { id: 'qwen3.8-27b', label: 'Qwen3.8 27B', provider: 'Alibaba', contextLimit: 991_808, encoder: hf(HF.qwen38, QWEN_CLOSED) },
     { id: 'qwen3.7-max', label: 'Qwen3.7-Max', provider: 'Alibaba', contextLimit: 991_808, encoder: { kind: 'heuristic', charsPerToken: QWEN_CLOSED } },
     { id: 'qwen3.7-plus', label: 'Qwen3.7-Plus', provider: 'Alibaba', contextLimit: 991_808, encoder: { kind: 'heuristic', charsPerToken: QWEN_CLOSED } },
+    { id: 'qwen3.7-flash', label: 'Qwen3.7-Flash', provider: 'Alibaba', contextLimit: 991_808, encoder: { kind: 'heuristic', charsPerToken: QWEN_CLOSED } },
     { id: 'qwen3.6-plus', label: 'Qwen3.6-Plus', provider: 'Alibaba', contextLimit: 991_808, encoder: { kind: 'heuristic', charsPerToken: QWEN_CLOSED } },
     { id: 'qwen3.6-27b', label: 'Qwen3.6 27B', provider: 'Alibaba', contextLimit: 260_096, encoder: hf(HF.qwen, QWEN_CLOSED) },
     { id: 'qwen3.6-35b-a3b', label: 'Qwen3.6 35B-A3B', provider: 'Alibaba', contextLimit: 260_096, encoder: hf(HF.qwen, QWEN_CLOSED) },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Zhipu GLM — exact.
+    // Zhipu GLM — exact, except GLM-5-Turbo.
     // ─────────────────────────────────────────────────────────────────────────
     // Z.ai publishes a single "Context Window" per model and no separate input
     // cap, so these are the advertised windows — the same basis as glm-5.2.
+    //
+    // GLM-5.3-FlashX is GLM-5.3-Flash served faster: Zhipu documents both under
+    // one model code line, "text parameters consistent with GLM-5.3", so it
+    // takes Flash's vocabulary and window. GLM-5-Turbo is the reverse case:
+    // Zhipu calls it separately optimised from the training phase, names no
+    // shared base, and publishes no tokenizer to hash, so it is estimated —
+    // even though every published GLM-5 file is byte-identical and a shared
+    // vocabulary is likely. Zhipu's /paas/v4/tokenizer endpoint accepts it, so
+    // with an API key the ratio could be calibrated.
     { id: 'glm-5.3', label: 'GLM-5.3', provider: 'Zhipu', contextLimit: 1_048_576, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5.3-flash', label: 'GLM-5.3-Flash', provider: 'Zhipu', contextLimit: 1_048_576, encoder: hf(HF.glm, 3.6) },
+    { id: 'glm-5.3-flashx', label: 'GLM-5.3-FlashX', provider: 'Zhipu', contextLimit: 1_048_576, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5.2', label: 'GLM-5.2', provider: 'Zhipu', contextLimit: 1_048_576, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5.1', label: 'GLM-5.1', provider: 'Zhipu', contextLimit: 200_000, encoder: hf(HF.glm, 3.6) },
     { id: 'glm-5', label: 'GLM-5', provider: 'Zhipu', contextLimit: 200_000, encoder: hf(HF.glm, 3.6) },
-    { id: 'glm-5-turbo', label: 'GLM-5-Turbo', provider: 'Zhipu', contextLimit: 200_000, encoder: hf(HF.glm, 3.6) },
+    { id: 'glm-5-turbo', label: 'GLM-5-Turbo', provider: 'Zhipu', contextLimit: 200_000, encoder: { kind: 'heuristic', charsPerToken: 3.6 } },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // MiniMax — exact.
+    // MiniMax — exact, except the M3.1 Flash preview.
     // ─────────────────────────────────────────────────────────────────────────
-    { id: 'minimax-m3', label: 'MiniMax M3', provider: 'MiniMax', contextLimit: 1_000_000, encoder: hf(HF.minimax, 3.6) },
-    { id: 'minimax-m2.7', label: 'MiniMax M2.7', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
-    { id: 'minimax-m2.5', label: 'MiniMax M2.5', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
-    { id: 'minimax-m2.1', label: 'MiniMax M2.1', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
-    { id: 'minimax-m2', label: 'MiniMax M2', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
+    // The ids are mixed case because MiniMax's API documents only that form —
+    // its OpenAPI enum, its list-models example and every `model=` in its docs
+    // say `MiniMax-M3`; lowercase appears only in an SGLang parser flag. The
+    // lowercase ids this registry used since 1.0 alias forward.
+    //
+    // M3.1 Flash is a closed preview (M Plan and MiniMax Code only, a public
+    // subscription rather than an approval programme) with no published
+    // tokenizer, and nothing first-party says it reuses M3's, so it is
+    // estimated with the family's ratio — the Grok situation, since MiniMax's
+    // server-side /v1/responses/input_tokens accepts it.
+    { id: 'MiniMax-M3.1-Flash-Preview', label: 'MiniMax M3.1 Flash (preview)', provider: 'MiniMax', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: 3.6 } },
+    { id: 'MiniMax-M3', label: 'MiniMax M3', provider: 'MiniMax', contextLimit: 1_000_000, encoder: hf(HF.minimax, 3.6) },
+    { id: 'MiniMax-M2.7', label: 'MiniMax M2.7', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
+    { id: 'MiniMax-M2.5', label: 'MiniMax M2.5', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
+    { id: 'MiniMax-M2.1', label: 'MiniMax M2.1', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
+    { id: 'MiniMax-M2', label: 'MiniMax M2', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
 
     // ─────────────────────────────────────────────────────────────────────────
     // Moonshot Kimi — exact. Moonshot publishes a tiktoken rank table rather
@@ -318,6 +411,11 @@ export const MODELS: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────────────────
     // The V2 series went offline on 2026-06-30 and mimo-v2-flash has been routed
     // to mimo-v2.5 since 2026-06-18, so the Flash entry is gone (aliased below).
+    // V2.5 is next: Xiaomi routes mimo-v2.5-pro and mimo-v2.5 to the V2.6 models
+    // from 2026-10-14 and retires both names on 2026-10-21. Remove them then,
+    // aliased to their V2.6 replacements, and re-point mimo-v2-flash with them.
+    { id: 'mimo-v2.6-pro', label: 'MiMo V2.6 Pro', provider: 'Xiaomi', contextLimit: 1_048_576, encoder: hf(HF.mimo26, 3.6) },
+    { id: 'mimo-v2.6-flash', label: 'MiMo V2.6 Flash', provider: 'Xiaomi', contextLimit: 1_048_576, encoder: hf(HF.mimo26, 3.6) },
     { id: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro', provider: 'Xiaomi', contextLimit: 1_048_576, encoder: hf(HF.mimoPro, 3.6) },
     { id: 'mimo-v2.5', label: 'MiMo V2.5', provider: 'Xiaomi', contextLimit: 1_048_576, encoder: hf(HF.mimo, 3.6) },
 
@@ -332,11 +430,14 @@ export const MODELS: ModelInfo[] = [
 ];
 
 /**
- * v1.x ids that no longer exist, mapped to the nearest live model.
+ * Ids that no longer exist — from v1.x and from later refreshes — mapped to
+ * the nearest live model.
  *
- * Some were renamed (the whole Anthropic block), some were retired by their
- * provider, and some never existed at all. Users get migrated on first run
- * with a one-time notice rather than silently reset to the default.
+ * Some were renamed (the whole Anthropic block, the MiniMax case), some were
+ * retired by their provider, and some never existed at all. Users get migrated
+ * on first run with a one-time notice rather than silently reset to the
+ * default. `findModel` follows a single hop, so when a target is itself
+ * retired, every alias pointing at it is re-pointed in the same change.
  */
 export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     // Anthropic: v1.3.0 invented a `claude-<major>.<minor>-<tier>` format.
@@ -374,10 +475,12 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     'grok-3': 'grok-4.3',
     'grok-code-fast-1': 'grok-build-0.1',
 
-    // DeepSeek: reasoning folded into V4.
-    'deepseek-v3.2': 'deepseek-v4-flash',
-    'deepseek-v3.1': 'deepseek-v4-flash',
-    'deepseek-v3': 'deepseek-v4-flash',
+    // DeepSeek: reasoning folded into V4, and V4 Flash retired in favour of
+    // V4.1 Flash on 2026-09-10 (DeepSeek routes the old id to it).
+    'deepseek-v4-flash': 'deepseek-flash',
+    'deepseek-v3.2': 'deepseek-flash',
+    'deepseek-v3.1': 'deepseek-flash',
+    'deepseek-v3': 'deepseek-flash',
     'deepseek-r1': 'deepseek-v4-pro',
 
     // Meta / Mistral / Alibaba: stale generations.
@@ -400,6 +503,16 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     'mistral-medium-latest': 'mistral-medium-3-5',
     'mistral-small-4': 'mistral-small-2603',
     'mistral-small-latest': 'mistral-small-2603',
+    // `mistral-large-4` is Mistral's documented floating major alias, as
+    // `mistral-medium-3` is for Medium 3.5.
+    'mistral-large-4': 'mistral-large-4-0',
+
+    // MiniMax: the API documents mixed-case ids only.
+    'minimax-m3': 'MiniMax-M3',
+    'minimax-m2.7': 'MiniMax-M2.7',
+    'minimax-m2.5': 'MiniMax-M2.5',
+    'minimax-m2.1': 'MiniMax-M2.1',
+    'minimax-m2': 'MiniMax-M2',
 
     // Tencent: `hunyuan-hy3` never existed as an API id.
     'hunyuan-hy3': 'hy3',

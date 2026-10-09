@@ -64,8 +64,10 @@ For the encoder:
 
 - **`tiktoken`** if it is an OpenAI model.
 - **`hf`** if a `tokenizer.json` is downloadable **anonymously**. Check first —
-  Meta's and Google's own repositories return 401 without an account, so the
-  registry points at ungated mirrors.
+  Meta's repositories and Google's Gemma 3 ones return 401 without an account,
+  so the registry points at ungated mirrors. Models may share a repo only when
+  their `tokenizer.json` files are byte-identical: compare sha256 hashes, never
+  sizes.
 - **`heuristic`** if no tokenizer is public. Say so in a comment, and give a
   ratio you have actually measured.
 

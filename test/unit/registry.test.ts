@@ -142,15 +142,16 @@ suite('model registry', () => {
 
     test('OpenAI models are tokenized exactly, except where tiktoken has no mapping', () => {
         // tiktoken is OpenAI's own tokenizer, so an OpenAI model should never be
-        // a guess — unless OpenAI has not said which encoding it uses. GPT-6 is
-        // that case today: `MODEL_PREFIX_TO_ENCODING` stops at `gpt-5` and the
-        // model page names no encoding, so the entry is honestly estimated
-        // rather than dressed up as exact.
+        // a guess — unless OpenAI has not said which encoding it uses. The GPT-6
+        // models are that case today: `MODEL_PREFIX_TO_ENCODING` stops at
+        // `gpt-5` and no GPT-6 model page names an encoding, so the entries are
+        // honestly estimated rather than dressed up as exact.
         //
         // The allowlist is the point of this test. A *new* estimated OpenAI
         // model still fails the build, and when tiktoken publishes a gpt-6
-        // mapping the entry moves to `tiktoken` and this list goes back to empty.
-        const noPublishedEncoding = new Set(['gpt-6-astra']);
+        // mapping the entries move to `tiktoken` and this list goes back to
+        // empty.
+        const noPublishedEncoding = new Set(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna']);
 
         for (const model of MODELS.filter(m => m.provider === 'OpenAI')) {
             if (noPublishedEncoding.has(model.id)) {
