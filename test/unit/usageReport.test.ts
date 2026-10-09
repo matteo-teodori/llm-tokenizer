@@ -210,7 +210,7 @@ suite('usage report', () => {
         assert.deepStrictEqual(report.limitWindows, [
             { limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
         ]);
-        assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0 });
+        assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 });
         assert.deepStrictEqual([report.coverage.requests, report.coverage.files], [4, 4]);
     });
 
@@ -404,6 +404,86 @@ suite('usage report', () => {
         assert.deepStrictEqual([report.omitted.sessions, report.totals.output], [1, 14]);
     });
 
+    test('the model and effort lists are capped too, the largest kept', () => {
+        const store = freshStore();
+        const pad = (i: number) => String(i).padStart(2, '0');
+        store.transaction(() =>
+            store.upsertRequests(
+                Array.from({ length: 60 }, (_, i) =>
+                    request({ messageId: `m${i}`, model: `model-${pad(i)}`, effort: `effort-${pad(i % 25)}`, output: 100 + i }),
+                ),
+            ),
+        );
+        const report = buildReport(
+            { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual([report.models.length, report.omitted.models], [50, 10]);
+        assert.deepStrictEqual([report.models[0].model, report.models.at(-1)?.model], ['model-59', 'model-10']);
+        assert.deepStrictEqual([report.efforts.length, report.omitted.efforts], [20, 5]);
+        assert.strictEqual(report.totals.output, 60 * 100 + (59 * 60) / 2);
+    });
+
+    test('day-and-model rows are capped at the newest, the rest counted', () => {
+        const store = freshStore();
+        const day = (d: number) => Date.UTC(2025, 0, 1 + d, 12);
+        const date = (d: number) => new Date(day(d)).toISOString().slice(0, 10);
+        // Ten models a day for 501 days.
+        store.transaction(() =>
+            store.upsertRequests(
+                Array.from({ length: 5_010 }, (_, i) => request({ messageId: `m${i}`, model: `model-${i % 10}`, timestamp: day(Math.floor(i / 10)) })),
+            ),
+        );
+        const report = buildReport(
+            { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual([report.dayModels.length, report.omitted.dayModels], [5_000, 10]);
+        // Listed oldest first: the first day's rows are the ones left out.
+        assert.deepStrictEqual([report.dayModels[0].date, report.dayModels.at(-1)?.date], [date(1), date(500)]);
+        assert.strictEqual(report.totals.coverage.requests, 5_010);
+    });
+
+    test('limit windows are capped at the newest, the rest counted', () => {
+        const store = freshStore();
+        const hits = Array.from({ length: 210 }, (_, i) => ({
+            uuid: `l${i}`,
+            sessionId: 's',
+            timestamp: Date.UTC(2026, 9, 1) + i * 60_000,
+            limitType: 'five_hour',
+            resetsAt: 1_791_000_000 + i * 3_600,
+        }));
+        const report = buildReport(
+            { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: hits, coverage: store.coverage() },
+            { range: '30d', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual([report.limitWindows.length, report.omitted.limitWindows], [200, 10]);
+        assert.deepStrictEqual([report.limitWindows[0].firstTs, report.limitWindows.at(-1)?.firstTs], [hits[10].timestamp, hits[209].timestamp]);
+    });
+
+    test("a report is read from one snapshot, whatever another window commits during it", () => {
+        const window = (): UsageStore => {
+            assert.ok(sqlite, 'this runtime has no node:sqlite');
+            const result = UsageStore.open(sqlite, path.join(tmp, 'store', 'shared.sqlite'));
+            assert.strictEqual(result.status, 'ready');
+            stores.push(result.store);
+            return result.store;
+        };
+        const store = window();
+        const other = window();
+        store.transaction(() => store.upsertRequests([request({ messageId: 'a' })]));
+        // Another window commits a request just after the sums are read.
+        const sums = store.bucketSums.bind(store);
+        store.bucketSums = since => {
+            const read = sums(since);
+            other.transaction(() => other.upsertRequests([request({ messageId: 'b' })]));
+            return read;
+        };
+        const report = queryReport(store, query());
+        assert.deepStrictEqual([report.totals.coverage.requests, report.coverage.requests], [1, 1]);
+        assert.strictEqual(queryReport(store, query()).coverage.requests, 2);
+    });
+
     test('limit windows are account-wide, never narrowed to the workspace', async () => {
         const store = freshStore();
         await importRoots(store, [FIXTURE_ROOT]);
@@ -494,6 +574,19 @@ suite('usage worker queries', () => {
         assert.ok(again.type === 'report' && again.report.totals.processed === 1_278, JSON.stringify(again).slice(0, 200));
         const refused = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
         assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'store-read-only');
+    });
+
+    test('a history moved aside is named once, by its file name, in the next answer', async () => {
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+        fs.writeFileSync(storeFile, 'this is not a database, '.repeat(400));
+        const worker = host();
+        const first = await worker.send(ask(storeFile));
+        const moved = first.type === 'report' ? first.recovered : undefined;
+        assert.ok(moved && moved.startsWith('usage.sqlite.corrupt-'), JSON.stringify(first).slice(0, 200));
+        assert.ok(fs.existsSync(path.join(tmp, 'store', moved)), 'not the name of the file it was moved to');
+        const again = await worker.send(ask(storeFile));
+        assert.ok(again.type === 'report' && !('recovered' in again), JSON.stringify(again).slice(0, 200));
     });
 
     test('a range or zone the worker does not know is refused', async () => {

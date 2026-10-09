@@ -802,6 +802,37 @@ export class UsageStore {
                 throw error;
             }
         }
+        // The copies set aside beside it hold the same history: a corrupt
+        // file moved away, and the backup each migration starts from. Clear
+        // means all of it.
+        const dir = path.dirname(this.file);
+        const base = path.basename(this.file);
+        let names: string[] = [];
+        try {
+            names = fs.readdirSync(dir);
+        } catch {
+            // Nothing beside it to remove.
+        }
+        for (const name of names) {
+            if (name.startsWith(`${base}.corrupt-`) || name.startsWith(`${base}.bak-v`)) {
+                fs.rmSync(path.join(dir, name), { force: true });
+            }
+        }
+    }
+
+    /** Run `work` as one read, on one snapshot, whatever other windows commit meanwhile. */
+    read<T>(work: () => T): T {
+        this.db.exec('BEGIN');
+        try {
+            const result = work();
+            this.db.exec('COMMIT');
+            return result;
+        } catch (error) {
+            if (this.db.isTransaction) {
+                this.db.exec('ROLLBACK');
+            }
+            throw error;
+        }
     }
 
     /**

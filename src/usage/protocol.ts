@@ -34,12 +34,16 @@ export type UsageWorkerRequest =
  */
 export type UsageFailure = 'store-busy' | 'store-io' | 'store-read-only' | 'outdated' | 'import-failed' | 'bad-request' | 'unknown';
 
+/**
+ * `recovered`, on the first answer after it happened: the file a corrupt
+ * history was moved to, its name only, before a new one was started.
+ */
 export type UsageWorkerResponse =
-    | { type: 'imported'; id: number; summary: ImportSummary; leaseHeldElsewhere: false }
-    | { type: 'imported'; id: number; summary: null; leaseHeldElsewhere: true }
-    | { type: 'report'; id: number; report: UsageReport }
+    | { type: 'imported'; id: number; summary: ImportSummary; leaseHeldElsewhere: false; recovered?: string }
+    | { type: 'imported'; id: number; summary: null; leaseHeldElsewhere: true; recovered?: string }
+    | { type: 'report'; id: number; report: UsageReport; recovered?: string }
     /** `compactions` newest first, at most 20. */
-    | { type: 'liveContext'; id: number; latest: LatestRequest | null; compactions: Compaction[] }
+    | { type: 'liveContext'; id: number; latest: LatestRequest | null; compactions: Compaction[]; recovered?: string }
     | { type: 'cleared'; id: number; generation: number }
     | { type: 'closed'; id: number }
     /** This runtime has no `node:sqlite` binding. */

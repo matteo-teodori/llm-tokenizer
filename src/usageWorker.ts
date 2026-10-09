@@ -14,6 +14,7 @@
  * after the whole import.
  */
 
+import * as path from 'path';
 import { parentPort } from 'worker_threads';
 
 import { isTimeZone } from './usage/aggregate';
@@ -44,6 +45,15 @@ function holderOf(request: { holder?: unknown }): string {
 
 const sqlite = loadSqlite();
 let opened: { file: string; result: OpenResult } | undefined;
+/** A corrupt history this worker moved aside, until an answer has said so. */
+let recovered: string | undefined;
+
+/** The moved file's name, once. */
+function takeRecovered(): { recovered?: string } {
+    const name = recovered;
+    recovered = undefined;
+    return name ? { recovered: name } : {};
+}
 
 function reply(response: UsageWorkerResponse): void {
     port.postMessage(response);
@@ -59,6 +69,9 @@ function storeAt(file: string): OpenResult {
             opened.result.store.close();
         }
         opened = { file, result: UsageStore.open(sqlite, file) };
+        if (opened.result.status === 'ready' && opened.result.recoveredFrom) {
+            recovered = path.basename(opened.result.recoveredFrom);
+        }
     }
     const result = opened.result;
     // A failure is not kept: a store busy or briefly unreachable at the first
@@ -109,7 +122,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 now: Date.now(),
                 platform: process.platform,
             });
-            reply({ type: 'report', id: request.id, report });
+            reply({ type: 'report', id: request.id, report, ...takeRecovered() });
             return;
         }
         case 'import': {
@@ -131,8 +144,8 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
             );
             reply(
                 summary
-                    ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false }
-                    : { type: 'imported', id: request.id, summary: null, leaseHeldElsewhere: true },
+                    ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false, ...takeRecovered() }
+                    : { type: 'imported', id: request.id, summary: null, leaseHeldElsewhere: true, ...takeRecovered() },
             );
             return;
         }
@@ -151,6 +164,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 id: request.id,
                 latest: store.latestMainRequest(request.sessionId) ?? null,
                 compactions: store.sessionCompactions(request.sessionId).slice(0, 20),
+                ...takeRecovered(),
             });
             return;
         }

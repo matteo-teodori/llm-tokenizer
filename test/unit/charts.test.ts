@@ -44,6 +44,13 @@ suite('charts', () => {
         assert.ok(html.indexOf('>b<') < html.indexOf('>a<'), 'the bars were reordered');
     });
 
+    test('ranked bars take a list longer than any spread could', () => {
+        // Spread into Math.max, 200,000 values overflowed the stack.
+        const rows = Array.from({ length: 200_000 }, (_, i) => ({ label: '', tokens: i, share: 0 }));
+        const html = rankedBars(rows);
+        assert.ok(html.includes('style="width: 100.00%"'), 'the widest bar is not full width');
+    });
+
     test('ranked bars escape their labels and survive an all-zero series', () => {
         const html = rankedBars([{ label: '<img src=x>', tokens: 0, share: 0 }]);
         assert.ok(!html.includes('<img'), html);

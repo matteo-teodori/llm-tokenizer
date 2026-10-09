@@ -167,6 +167,35 @@ export function localDate(epochMs: number, timeZone: string): string {
     return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+const minuteFormats = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * `epochMs` in `timeZone` as `YYYY-MM-DD HH:MM`, for display: a time no Date
+ * can hold is a dash, never a throw that would take a whole page down.
+ *
+ * @throws RangeError for a zone the runtime does not know; see `isTimeZone`.
+ */
+export function localMinute(epochMs: number, timeZone: string): string {
+    let format = minuteFormats.get(timeZone);
+    if (!format) {
+        format = new Intl.DateTimeFormat('en-US', {
+            timeZone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23',
+        });
+        minuteFormats.set(timeZone, format);
+    }
+    if (!Number.isFinite(epochMs) || Math.abs(epochMs) > 8.64e15) {
+        return '—';
+    }
+    const parts = Object.fromEntries(format.formatToParts(epochMs).map(part => [part.type, part.value]));
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
 /** True for an IANA zone this runtime can convert to. */
 export function isTimeZone(timeZone: string): boolean {
     try {

@@ -218,6 +218,39 @@ suite('usage history store', () => {
         assert.ok(fs.existsSync(file), 'the database file was removed');
     });
 
+    test('Clear removes the copies set aside beside the history too, and nothing else', () => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, 'this is not a database, '.repeat(400));
+        const store = ready(open({ now: () => 1_791_000_000_000 }));
+        const copies = [`${file}.corrupt-1791000000000`, `${file}.bak-v0`];
+        const others = [`${file}.notes`, path.join(path.dirname(file), 'other.sqlite.corrupt-1'), path.join(dir, 'usage.sqlite.bak-v0')];
+        for (const f of [...copies.slice(1), ...others]) {
+            fs.writeFileSync(f, 'x');
+        }
+        assert.ok(copies.every(f => fs.existsSync(f)));
+        store.clear();
+        assert.deepStrictEqual(copies.filter(f => fs.existsSync(f)), [], 'a copy of the history was kept');
+        assert.deepStrictEqual(others.filter(f => !fs.existsSync(f)), [], 'a file that is not a copy was removed');
+        // Its own journal is not a copy: the history still works.
+        store.transaction(() => store.upsertRequests([req()]));
+        assert.strictEqual([...store.requests()].length, 1);
+    });
+
+    test('a read sees one snapshot, whatever another window commits during it', () => {
+        const store = ready(open());
+        const other = ready(open());
+        store.transaction(() => store.upsertRequests([req()]));
+        const seen = store.read(() => {
+            const before = [...store.requests()].length;
+            other.transaction(() => other.upsertRequests([req({ messageId: 'msg_2', requestId: 'req_2' })]));
+            return [before, [...store.requests()].length];
+        });
+        assert.deepStrictEqual(seen, [1, 1]);
+        assert.strictEqual([...store.requests()].length, 2);
+        assert.throws(() => store.read(() => { throw new Error('inside'); }), /inside/);
+        assert.strictEqual(store.read(() => [...store.requests()].length), 2, 'a failed read left its transaction open');
+    });
+
     test('a history created by a newer version opens read-only', () => {
         const first = ready(open());
         first.close();

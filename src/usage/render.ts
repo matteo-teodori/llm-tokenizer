@@ -40,6 +40,8 @@ export interface PanelView {
     historyDisabled: boolean;
     lastImport: LastImport | undefined;
     sqliteRuntime: { node: string; electron: string | null } | undefined;
+    /** The file a corrupt history was moved to, when this window moved one. */
+    recoveredFrom: string | undefined;
     extensionVersion: string;
     /** When the panel last refreshed, epoch ms. */
     refreshedAt: number | undefined;
@@ -102,6 +104,10 @@ function emptyState(view: PanelView): string | undefined {
                 }</p>
             </section>`;
         case 'no-roots':
+            // With a history kept, the history is shown, under a banner.
+            if (view.report && view.report.coverage.requests > 0) {
+                return undefined;
+            }
             return `
             <section class="empty-state">
                 <h2>No Claude Code data folder found</h2>
@@ -135,6 +141,16 @@ function rootList(view: PanelView): string {
 
 function banner(view: PanelView): string {
     const lines: string[] = [];
+    if (view.recoveredFrom) {
+        lines.push(
+            `The history could not be read, so it was moved aside as ${escapeHtml(view.recoveredFrom)}, and a new one started from what Claude Code still keeps.`,
+        );
+    }
+    if (view.status === 'no-roots') {
+        lines.push(
+            "No Claude Code data folder is found now, so this is the history kept so far. <button type=\"button\" data-action=\"chooseFolder\">Choose Folder…</button>",
+        );
+    }
     if (view.status === 'read-only') {
         lines.push('This history was written by a newer LLM Tokenizer: it is shown, but not updated.');
     }
@@ -178,6 +194,9 @@ function ranked(rows: [string, number][], total: number): RankedValue[] {
     return rows.map(([label, tokens]) => ({ label, tokens, share: total > 0 ? tokens / total : 0 }));
 }
 
+/** The most days drawn as columns: past it, the newest are drawn, and the note says so. */
+const MAX_DAY_COLUMNS = 400;
+
 /** One column per day of the range, empty days included, so a gap reads as a gap. */
 function dayColumns(report: UsageReport, view: PanelView): string {
     const days = report.days;
@@ -185,12 +204,18 @@ function dayColumns(report: UsageReport, view: PanelView): string {
         return '';
     }
     const from = report.from ?? days[0].date;
+    const last = days[days.length - 1].date > report.to ? days[days.length - 1].date : report.to;
     const byDate = new Map(days.map(d => [d.date, d.totals]));
+    // The newest days, counted back from the last one, not on from the first.
     const all: string[] = [];
-    for (let d = from; d <= report.to && all.length < 400; d = nextDay(d)) {
-        all.push(d);
+    for (let d = last; d >= from && all.length < MAX_DAY_COLUMNS; d = previousDay(d)) {
+        all.unshift(d);
     }
-    const tallest = Math.max(...days.map(d => d.totals.processed), 0);
+    const hidden = days.filter(d => d.date < all[0]).length;
+    let tallest = 0;
+    for (const date of all) {
+        tallest = Math.max(tallest, byDate.get(date)?.processed ?? 0);
+    }
     return `
     <div class="columns" role="list">${all
         .map(date => {
@@ -202,12 +227,14 @@ function dayColumns(report: UsageReport, view: PanelView): string {
         })
         .join('')}</div>
     <div class="columns-axis"><span>${escapeHtml(all[0])}</span><span>${escapeHtml(all[all.length - 1])}</span></div>
-    <p class="note">Days in ${escapeHtml(view.zone)}.</p>`;
+    <p class="note">Days in ${escapeHtml(view.zone)}.${
+        hidden > 0 ? ` The newest ${MAX_DAY_COLUMNS} are drawn; ${hidden.toLocaleString('en-US')} earlier days with requests are in the totals.` : ''
+    }</p>`;
 }
 
-function nextDay(date: string): string {
+function previousDay(date: string): string {
     const [y, m, d] = date.split('-').map(Number);
-    return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+    return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
 }
 
 function modelName(view: PanelView, model: string, variant: string | null): string {
@@ -245,6 +272,7 @@ function overview(report: UsageReport, view: PanelView): string {
     <section class="panel">
         <h2>By model</h2>
         ${rankedBars(report.models.map(m => ({ label: modelName(view, m.model, m.variant), tokens: m.totals.processed, share: share0(m.totals, t) })))}
+        ${capNote(report.omitted.models, 'models')}
     </section>
     <section class="panel">
         <h2>Delegated work</h2>
@@ -254,7 +282,7 @@ function overview(report: UsageReport, view: PanelView): string {
         report.efforts.length > 1 || report.efforts[0]?.effort
             ? `<section class="panel"><h2>By effort</h2>${rankedBars(
                   report.efforts.map(e => ({ label: e.effort ?? 'not recorded', tokens: e.totals.processed, share: share0(e.totals, t) })),
-              )}</section>`
+              )}${capNote(report.omitted.efforts, 'effort levels')}</section>`
             : ''
     }
     ${limitWindows(report, view)}`;
@@ -281,6 +309,7 @@ function limitWindows(report: UsageReport, view: PanelView): string {
                     }</span></li>`,
             )
             .join('')}</ul>
+        ${report.omitted.limitWindows > 0 ? `<p class="truncation">…and ${report.omitted.limitWindows.toLocaleString('en-US')} earlier ones, not listed.</p>` : ''}
         <p class="note">For the whole account, whichever project hit them.</p>
     </section>`;
 }
@@ -436,6 +465,9 @@ function diagnostics(view: PanelView): string {
             ]);
         }
     }
+    if (view.recoveredFrom) {
+        rows.push(['Moved aside', escapeHtml(view.recoveredFrom)]);
+    }
     rows.push(['Time zone', escapeHtml(view.zone)]);
     return `
     <details class="panel" id="diagnostics">
@@ -513,7 +545,11 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
         String(r.totals.webFetchRequests),
         r.totals.provenance === 'partial' ? 'no' : 'yes',
     ]);
-    return { header, rows, notes: exportNotes(view) };
+    const notes = exportNotes(view);
+    if (report && report.omitted.dayModels > 0) {
+        notes.push(`${report.omitted.dayModels} older day-and-model rows are counted in the totals but not listed`);
+    }
+    return { header, rows, notes };
 }
 
 function copyRows(view: PanelView): PanelFragments['copy'] {
@@ -541,7 +577,6 @@ function exportNotes(view: PanelView): string[] {
         `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}`,
         'each request is its record with the largest output per message.id',
         `history since: ${report?.coverage.start !== null && report?.coverage.start !== undefined ? new Date(report.coverage.start).toISOString() : ''}`,
-        `exported: ${new Date().toISOString()}`,
     ];
 }
 
@@ -679,6 +714,8 @@ ${PAGE_TEXT_HELPERS}
 
     function lines(table, separator, format) {
         const out = table.notes.map(n => '# ' + n.replace(/[\\r\\n]+/g, ' '));
+        // Stamped on the click: the notes were rendered when the data came.
+        out.push('# exported: ' + new Date().toISOString());
         out.push(table.header.map(format).join(separator));
         table.rows.forEach(r => out.push(r.map(format).join(separator)));
         return out.join('\\n');
@@ -719,7 +756,7 @@ ${PAGE_TEXT_HELPERS}
             sorts[table.id] = { key, ascending: key === current.key ? !current.ascending : key === 'label' };
             applySort(table);
         } else if (button.dataset.action === 'copy') {
-            vscode.postMessage({ type: 'copy', text: lines(exports.copy, '\\t', cell) });
+            vscode.postMessage({ type: 'copy', text: lines(exports.copy, '\\t', pasteCell) });
         } else if (button.dataset.action === 'export') {
             vscode.postMessage({ type: 'export', text: lines(exports.csv, ',', csv) });
         } else if (button.dataset.action) {

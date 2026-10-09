@@ -14,7 +14,7 @@ import * as vscode from 'vscode';
 
 import { contentSecurityPolicy, createNonce } from '../html';
 import { modelById } from '../tokenizer/registry';
-import { isTimeZone } from './aggregate';
+import { isTimeZone, localMinute } from './aggregate';
 import { renderFragments, renderUsagePage, type PanelFragments, type PanelView } from './render';
 import { RANGE_KEYS, type RangeKey } from './report';
 import { sourceLabel, tildePath } from './roots';
@@ -22,6 +22,15 @@ import type { UsageService } from './usageService';
 
 /** Remembered between sessions: the zone the page reported, the range and the scope. */
 const STATE_KEY = 'llm-tokenizer.claudeCodeUsage.panel';
+
+/**
+ * The zone the panel's page last reported: the reader's own, even in a
+ * remote window, where the extension host's can be another machine's.
+ */
+export function savedZone(context: vscode.ExtensionContext): string | undefined {
+    const zone = context.globalState.get<Partial<PanelState>>(STATE_KEY)?.zone;
+    return zone && isTimeZone(zone) ? zone : undefined;
+}
 
 /** Copied or exported text is the page's own rendering of what it was sent; far more is not that. */
 const MAX_EXPORT_CHARS = 16 << 20;
@@ -79,6 +88,7 @@ export class UsagePanel implements vscode.Disposable {
     private hold: vscode.Disposable | undefined;
     private state: PanelState;
     private lastPosted = '';
+    private lastFragments: PanelFragments | undefined;
     private refreshedAt: number | undefined;
     private updating = Promise.resolve();
 
@@ -114,19 +124,28 @@ export class UsagePanel implements vscode.Disposable {
             panel.onDidDispose(() => this.dispose()),
             panel.onDidChangeViewState(() => {
                 if (panel.visible && !this.hold) {
+                    // Nothing was imported while hidden: look now.
                     this.hold = service.hold();
+                    void this.refresh();
                 } else if (!panel.visible) {
                     this.hold?.dispose();
                     this.hold = undefined;
+                    // Not kept alive while hidden: the page comes back from
+                    // its HTML, so that HTML is made the latest.
+                    this.setPage(this.lastFragments ?? this.fragmentsWithoutData());
                 }
             }),
             panel.webview.onDidReceiveMessage((raw: unknown) => void this.receive(raw)),
             service.onDidChange(() => void this.update(false)),
         );
-        const nonce = createNonce();
-        panel.webview.html = renderUsagePage(nonce, contentSecurityPolicy(nonce), this.fragmentsWithoutData());
+        this.setPage(this.fragmentsWithoutData());
         // Opening the panel is one of the times a full pass runs.
         void this.refresh();
+    }
+
+    private setPage(fragments: PanelFragments): void {
+        const nonce = createNonce();
+        this.panel.webview.html = renderUsagePage(nonce, contentSecurityPolicy(nonce), fragments);
     }
 
     dispose(): void {
@@ -140,8 +159,11 @@ export class UsagePanel implements vscode.Disposable {
     }
 
     private async refresh(): Promise<void> {
-        await this.service.refresh();
-        this.refreshedAt = Date.now();
+        // Stamped only when a pass ran: not when it failed, or waits on
+        // another window's.
+        if (await this.service.refresh()) {
+            this.refreshedAt = Date.now();
+        }
         await this.update(false);
     }
 
@@ -220,6 +242,7 @@ export class UsagePanel implements vscode.Disposable {
         this.updating = this.updating
             .then(async () => {
                 const fragments = renderFragments(await this.view());
+                this.lastFragments = fragments;
                 const serialised = JSON.stringify(fragments);
                 if (force || serialised !== this.lastPosted) {
                     this.lastPosted = serialised;
@@ -247,16 +270,6 @@ export class UsagePanel implements vscode.Disposable {
 
     private viewOf(report: PanelView['report']): PanelView {
         const zone = this.state.zone;
-        const format = new Intl.DateTimeFormat('en-US', {
-            timeZone: zone,
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            hourCycle: 'h23',
-        });
-        const parts = (epochMs: number) => Object.fromEntries(format.formatToParts(epochMs).map(p => [p.type, p.value]));
         const resolved = this.service.roots;
         const summary = this.service.lastImport;
         const version = (this.context.extension.packageJSON as { version?: unknown }).version;
@@ -285,16 +298,12 @@ export class UsagePanel implements vscode.Disposable {
                 elapsedMs: summary.elapsedMs,
             },
             sqliteRuntime: this.service.missingSqlite,
+            recoveredFrom: this.service.recoveredFrom,
             extensionVersion: typeof version === 'string' ? version : '',
             refreshedAt: this.refreshedAt,
-            formatTime: ms => {
-                const p = parts(ms);
-                return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
-            },
-            formatDate: ms => {
-                const p = parts(ms);
-                return `${p.year}-${p.month}-${p.day}`;
-            },
+            formatTime: ms => localMinute(ms, zone),
+            // A dash stays a dash.
+            formatDate: ms => localMinute(ms, zone).slice(0, 10),
         };
     }
 }

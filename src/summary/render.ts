@@ -456,7 +456,7 @@ ${PAGE_TEXT_HELPERS}
     });
 
     document.getElementById('copy').addEventListener('click', () => {
-        const lines = visible.map(f => cell(f.display) + '\\t' + f.tokens);
+        const lines = visible.map(f => pasteCell(f.display) + '\\t' + f.tokens);
         if (TRUNCATION_NOTE) {
             lines.push('# ' + TRUNCATION_NOTE);
         }

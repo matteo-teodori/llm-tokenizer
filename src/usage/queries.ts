@@ -30,14 +30,17 @@ export interface ReportQuery {
 
 export function queryReport(store: UsageStore, query: ReportQuery): UsageReport {
     const since = rangeSince(query.range, query.zone, query.now);
+    // One snapshot: read statement by statement, another window's commit
+    // could land between the sums and the sessions they belong to.
+    const input = store.read(() => ({
+        sums: store.bucketSums(since),
+        sessions: store.sessions(),
+        compactions: store.compactions(since),
+        limitHits: store.limitHits(since),
+        coverage: store.coverage(),
+    }));
     return buildReport(
-        {
-            sums: store.bucketSums(since),
-            sessions: reportSessions(store.sessions(), query),
-            compactions: store.compactions(since),
-            limitHits: store.limitHits(since),
-            coverage: store.coverage(),
-        },
+        { ...input, sessions: reportSessions(input.sessions, query) },
         { range: query.range, zone: query.zone, now: query.now, scope: query.workspaceFolders ? 'workspace' : 'all' },
     );
 }

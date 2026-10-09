@@ -44,6 +44,9 @@ export function contentSecurityPolicy(nonce: string): string {
         "default-src 'none'",
         "style-src 'unsafe-inline'",
         `script-src 'nonce-${nonce}'`,
+        // Not covered by default-src: no form posts anywhere, no base URL.
+        "form-action 'none'",
+        "base-uri 'none'",
     ].join('; ');
 }
 
@@ -73,6 +76,8 @@ export function embed(value: unknown): string {
  *   treating a cell as a formula: a file named `=cmd|'/c calc'!A1.ts` is
  *   executable content once the export is opened, so a leading `= + - @` gets
  *   an apostrophe, which forces it to text.
+ * - `pasteCell(value)` is `cell` with the same guard, for Copy: pasted into a
+ *   spreadsheet, a tab-separated cell is read as a formula just the same.
  */
 export const PAGE_TEXT_HELPERS = `
     function escapeText(s) {
@@ -85,8 +90,11 @@ export const PAGE_TEXT_HELPERS = `
     }
 
     function csv(value) {
+        return '"' + pasteCell(value).replace(/"/g, '""') + '"';
+    }
+
+    function pasteCell(value) {
         const text = cell(value);
-        const escaped = /^[=+\\-@]/.test(text) ? "'" + text : text;
-        return '"' + escaped.replace(/"/g, '""') + '"';
+        return /^[=+\\-@]/.test(text) ? "'" + text : text;
     }
 `;

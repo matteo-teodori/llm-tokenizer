@@ -46,6 +46,8 @@ suite('content security policy', () => {
         assert.ok(csp.includes("default-src 'none'"));
         assert.ok(csp.includes(`script-src 'nonce-${nonce}'`));
         assert.ok(!csp.includes('unsafe-eval'));
+        // Not covered by default-src.
+        assert.ok(csp.includes("form-action 'none'") && csp.includes("base-uri 'none'"));
         // Inline styles are the only inline content allowed.
         assert.ok(!/script-src[^;]*unsafe-inline/.test(csp));
     });
@@ -78,10 +80,11 @@ suite('embed', () => {
 
 suite('page text helpers', () => {
     // The snippet runs inside the page, so it is tested by running it.
-    const helpers = vm.runInNewContext(`${PAGE_TEXT_HELPERS}; ({ escapeText, cell, csv })`) as {
+    const helpers = vm.runInNewContext(`${PAGE_TEXT_HELPERS}; ({ escapeText, cell, csv, pasteCell })`) as {
         escapeText(s: string): string;
         cell(value: unknown): string;
         csv(value: unknown): string;
+        pasteCell(value: unknown): string;
     };
 
     test('escapeText escapes exactly as escapeHtml does', () => {
@@ -104,5 +107,14 @@ suite('page text helpers', () => {
         assert.strictEqual(helpers.csv('say "hi"'), '"say ""hi"""');
         assert.strictEqual(helpers.csv('a\tb\nc'), '"a b c"');
         assert.strictEqual(helpers.csv(7), '"7"');
+    });
+
+    test('a copied cell cannot be pasted into a spreadsheet as a formula either', () => {
+        // Copy is tab-separated, and pasted it is read cell by cell.
+        for (const lead of ['=', '+', '-', '@']) {
+            assert.strictEqual(helpers.pasteCell(`${lead}HYPERLINK("x")`), `'${lead}HYPERLINK("x")`, lead);
+        }
+        assert.strictEqual(helpers.pasteCell('a=b'), 'a=b');
+        assert.strictEqual(helpers.pasteCell('a\tb'), 'a b');
     });
 });

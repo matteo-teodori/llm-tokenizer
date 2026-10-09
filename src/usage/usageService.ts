@@ -20,9 +20,10 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { WorkerHost, WorkerHostError } from '../workerHost';
+import { localMinute } from './aggregate';
 import type { ImportSummary } from './importer';
 import { readLiveSessions } from './liveSessions';
-import { UsagePanel } from './panel';
+import { UsagePanel, savedZone } from './panel';
 import type { UsageWorkerRequest, UsageWorkerResponse } from './protocol';
 import type { RangeKey, UsageReport } from './report';
 import type { LatestRequest } from './store';
@@ -122,6 +123,7 @@ export class UsageService implements vscode.Disposable {
     private retryTimer: unknown;
     /** A worker of this window crashed since the last import that went through. */
     private crashed = false;
+    private recovered: string | undefined;
     private holders = 0;
     private watchers: vscode.Disposable[] = [];
     private firstTimer: unknown;
@@ -163,6 +165,11 @@ export class UsageService implements vscode.Disposable {
         return this.elsewhere;
     }
 
+    /** The name of the file a corrupt history was moved to, until Clear removes it. */
+    get recoveredFrom(): string | undefined {
+        return this.recovered;
+    }
+
     /** Re-read the settings: start, stop, or pick up a new data folder. */
     settingsChanged(): void {
         const enabled = this.deps.readSettings().enabled;
@@ -194,6 +201,8 @@ export class UsageService implements vscode.Disposable {
             return false;
         }
         this.summary = undefined;
+        // Clear deleted the moved-aside copy along with the rest.
+        this.recovered = undefined;
         this.deps.log.info(`Claude Code usage history cleared (generation ${response.generation})`);
         this.changed.fire();
         return true;
@@ -430,6 +439,13 @@ export class UsageService implements vscode.Disposable {
         this.inFlight++;
         try {
             const response = await this.host.send({ ...request, id: 0 });
+            if ('recovered' in response && response.recovered) {
+                this.recovered = response.recovered;
+                this.deps.log.warn(
+                    `Claude Code usage: the history could not be read, so it was moved aside as ${response.recovered}, and a new one started`,
+                );
+                this.changed.fire();
+            }
             switch (response.type) {
                 case 'unavailable':
                     this.runtime = { node: response.node, electron: response.electron };
@@ -597,13 +613,16 @@ export function registerClaudeCodeUsage(
     });
 
     const config = () => vscode.workspace.getConfiguration(CONFIG_SECTION);
+    // The reader's zone, as the panel's page last reported it: in a remote
+    // window, the extension host's can be another machine's.
+    const zone = () => savedZone(context) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
     const statusItem = new UsageStatusItem(service, {
         shown: () => config().get<boolean>('enableClaudeCodeUsage', false) && config().get<boolean>('showClaudeCodeUsageInStatusBar', false),
         readLive: roots => readLiveSessions(roots),
         workspaceFolders: () => (vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file').map(f => f.uri.fsPath),
         platform: process.platform,
-        zone: () => Intl.DateTimeFormat().resolvedOptions().timeZone,
-        formatTime: localTime,
+        zone,
+        formatTime: ms => localMinute(ms, zone()),
         createItem: () => vscode.window.createStatusBarItem('llm-tokenizer.claudeCodeUsage', vscode.StatusBarAlignment.Right, 98),
     });
 
@@ -622,13 +641,6 @@ export function registerClaudeCodeUsage(
         vscode.commands.registerCommand('llm-tokenizer.clearClaudeCodeUsageHistory', () => clearCommand(service)),
     );
     return service;
-}
-
-/** Epoch ms as a local `YYYY-MM-DD HH:MM`. */
-function localTime(epochMs: number): string {
-    const d = new Date(epochMs);
-    const two = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }
 
 async function refreshCommand(service: UsageService): Promise<void> {

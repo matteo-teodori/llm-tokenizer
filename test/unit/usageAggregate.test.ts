@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 
-import { byDay, cacheReadShare, isTimeZone, localDate, mergeTotals, totalsOf } from '../../src/usage/aggregate';
+import { byDay, cacheReadShare, isTimeZone, localDate, localMinute, mergeTotals, totalsOf } from '../../src/usage/aggregate';
 import type { UsageRequest } from '../../src/usage/types';
 
 function req(timestamp: number, overrides: Partial<UsageRequest> = {}): UsageRequest {
@@ -93,5 +93,13 @@ suite('usage rollups', () => {
         assert.ok(isTimeZone('UTC'));
         assert.ok(!isTimeZone('Mars/Olympus_Mons'));
         assert.throws(() => localDate(0, 'Mars/Olympus_Mons'), RangeError);
+    });
+
+    test('a time is shown to the minute in the zone given, and one no Date holds as a dash', () => {
+        assert.strictEqual(localMinute(Date.UTC(2026, 9, 9, 22, 30), 'Europe/Rome'), '2026-10-10 00:30');
+        assert.strictEqual(localMinute(Date.UTC(2026, 9, 9, 22, 30), 'UTC'), '2026-10-09 22:30');
+        for (const time of [9e15, -9e15, NaN, Infinity]) {
+            assert.strictEqual(localMinute(time, 'UTC'), '—', String(time));
+        }
     });
 });

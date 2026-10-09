@@ -146,6 +146,10 @@ export function rankedBar(row: RankedValue, widest: number): string {
  * size would encode length twice.
  */
 export function rankedBars(rows: RankedValue[]): string {
-    const widest = Math.max(...rows.map(r => r.tokens), 0);
+    // A loop, not a spread: a spread of a very long list overflows the stack.
+    let widest = 0;
+    for (const row of rows) {
+        widest = Math.max(widest, row.tokens);
+    }
     return `<div class="chart">${rows.map(r => rankedBar(r, widest)).join('')}</div>`;
 }

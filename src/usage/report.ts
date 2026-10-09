@@ -102,12 +102,22 @@ export interface UsageReport {
     dayModels: { date: string; model: string; variant: string | null; totals: UsageTotals }[];
     /** Account-wide, so never narrowed to the workspace. */
     limitWindows: LimitWindow[];
-    omitted: { sessions: number; projects: number };
+    /** Rows each list left out past its cap: counted in the totals, not listed. */
+    omitted: { sessions: number; projects: number; models: number; efforts: number; dayModels: number; limitWindows: number };
     coverage: StoreCoverage;
 }
 
 const DEFAULT_MAX_SESSIONS = 200;
 const DEFAULT_MAX_PROJECTS = 100;
+/**
+ * The other lists' caps. Real histories hold a handful of models and five
+ * effort levels; these only bound what a hostile one can make the page
+ * render (150,000 model ids overflowed the stack).
+ */
+const MAX_MODELS = 50;
+const MAX_EFFORTS = 20;
+const MAX_DAY_MODELS = 5_000;
+const MAX_LIMIT_WINDOWS = 200;
 const KIND_ORDER: readonly TranscriptKind[] = ['main', 'task', 'workflow', 'other'];
 
 /** The largest UTC offset in use, +14:00: no local day starts earlier than its UTC midnight minus this. */
@@ -242,6 +252,16 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     const sessionRows = [...sessions.values()].map(({ row, models: m }) => ({ ...row, models: byProcessed([...m.values()]) }));
     const maxProjects = options.maxProjects ?? DEFAULT_MAX_PROJECTS;
     const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+    const modelRows = byProcessed([...models.values()]);
+    const effortRows = [...efforts]
+        .map(([effort, t]) => ({ effort, totals: t }))
+        .sort((a, b) => b.totals.processed - a.totals.processed || compareText(a.effort ?? '', b.effort ?? ''));
+    // The newest rows are kept, then listed oldest first.
+    const dayModelRows = [...dayModels.values()]
+        .sort((a, b) => compareText(b.date, a.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model))
+        .slice(0, MAX_DAY_MODELS)
+        .reverse();
+    const windows = limitWindows(input.limitHits, zone, inRange);
 
     return {
         range: options.range,
@@ -251,11 +271,9 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         scope: options.scope,
         totals,
         days: [...days].sort(([a], [b]) => compareText(a, b)).map(([date, t]) => ({ date, totals: t })),
-        models: byProcessed([...models.values()]),
+        models: modelRows.slice(0, MAX_MODELS),
         kinds: KIND_ORDER.filter(k => kinds.has(k)).map(kind => ({ kind, totals: kinds.get(kind) ?? emptyTotals() })),
-        efforts: [...efforts]
-            .map(([effort, t]) => ({ effort, totals: t }))
-            .sort((a, b) => b.totals.processed - a.totals.processed || compareText(a.effort ?? '', b.effort ?? '')),
+        efforts: effortRows.slice(0, MAX_EFFORTS),
         projects: projectRows
             .sort((a, b) => b.totals.processed - a.totals.processed || compareText(a.label, b.label))
             .slice(0, maxProjects),
@@ -267,13 +285,15 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
                     compareText(a.sessionId, b.sessionId),
             )
             .slice(0, maxSessions),
-        dayModels: [...dayModels.values()].sort(
-            (a, b) => compareText(a.date, b.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model),
-        ),
-        limitWindows: limitWindows(input.limitHits, zone, inRange),
+        dayModels: dayModelRows,
+        limitWindows: windows.slice(-MAX_LIMIT_WINDOWS),
         omitted: {
             sessions: Math.max(0, sessionRows.length - maxSessions),
             projects: Math.max(0, projectRows.length - maxProjects),
+            models: Math.max(0, modelRows.length - MAX_MODELS),
+            efforts: Math.max(0, effortRows.length - MAX_EFFORTS),
+            dayModels: Math.max(0, dayModels.size - MAX_DAY_MODELS),
+            limitWindows: Math.max(0, windows.length - MAX_LIMIT_WINDOWS),
         },
         coverage: input.coverage,
     };

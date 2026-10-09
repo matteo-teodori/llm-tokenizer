@@ -422,6 +422,22 @@ suite('usage service', () => {
         assert.strictEqual(service.status, 'failing');
     });
 
+    test('a history moved aside is logged and kept on show, until Clear removes it', async () => {
+        const warnings: string[] = [];
+        const { service, host } = make({ log: { info: () => undefined, warn: m => warnings.push(m), debug: () => undefined } });
+        host.answer = request =>
+            Promise.resolve(
+                request.type === 'import'
+                    ? { type: 'imported', id: request.id, summary: summaryOf(1), leaseHeldElsewhere: false, recovered: 'usage.sqlite.corrupt-1791000000000' }
+                    : defaultAnswer(request),
+            );
+        await settle();
+        assert.strictEqual(service.recoveredFrom, 'usage.sqlite.corrupt-1791000000000');
+        assert.deepStrictEqual(warnings.filter(w => w.includes('moved aside as usage.sqlite.corrupt-1791000000000')).length, 1);
+        assert.ok(await service.clear());
+        assert.strictEqual(service.recoveredFrom, undefined);
+    });
+
     test('with no root to read, it says so, and reads nothing', async () => {
         const { service, host } = make({
             rootInputs: () => ({ env: {}, home: path.join(tmp, 'nowhere'), platform: process.platform }),
