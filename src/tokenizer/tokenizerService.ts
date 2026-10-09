@@ -87,8 +87,19 @@ export class TokenizerService implements vscode.Disposable {
      */
     private loadGeneration = 0;
 
-    /** When the worker died, oldest first; see MAX_WORKER_CRASHES. */
+    /**
+     * When the worker died, oldest first, on the monotonic clock so a wall-clock
+     * step back cannot stretch the window; see MAX_WORKER_CRASHES.
+     */
     private readonly crashTimes: number[] = [];
+
+    /**
+     * Bumped on every worker death. Code that awaits the worker compares it
+     * before and after, which also sees a crash when there was no worker
+     * beforehand — comparing Worker objects then compared undefined with
+     * undefined.
+     */
+    private workerEpoch = 0;
 
     private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
     /** Fires when a tokenizer finishes downloading, so counts can be refreshed. */
@@ -200,10 +211,9 @@ export class TokenizerService implements vscode.Disposable {
         // the restarted worker can be re-sent everything — but this `add` ran
         // *after* that clear and put the repo straight back, permanently
         // degrading the model to an estimate for the rest of the session. Only
-        // record the failure if the worker we were talking to is still the one
-        // in use.
-        const worker = this.worker;
-        if (!(await this.ensureExact(model)) && this.worker === worker) {
+        // record the failure if no worker died while it was being loaded.
+        const epoch = this.workerEpoch;
+        if (!(await this.ensureExact(model)) && this.workerEpoch === epoch) {
             this.unavailable.add(repo);
         }
     }
@@ -357,8 +367,9 @@ export class TokenizerService implements vscode.Disposable {
             }
         });
         // Both handlers ignore a worker that has already been replaced. A worker
-        // that throws asynchronously emits 'error', and its 'exit' follows a
-        // turn later — by which time the next count has spawned a replacement.
+        // that throws asynchronously emits 'error', and its 'exit' usually
+        // follows a turn later — by which time the next count has spawned a
+        // replacement.
         // Unguarded, the dead worker's 'exit' discarded that replacement: it
         // rejected the replacement's request into an estimate, and orphaned a
         // live thread that dispose() never terminated.
@@ -385,13 +396,14 @@ export class TokenizerService implements vscode.Disposable {
      * the next request rather than silently reverting to estimates.
      */
     private handleWorkerExit(error: Error): void {
+        this.workerEpoch++;
         this.worker = undefined;
         this.loadedRepos.clear();
         // Still on disk — let the next count re-send them.
         this.unavailable.clear();
         this.failAllPending(error);
 
-        this.crashTimes.push(Date.now());
+        this.crashTimes.push(performance.now());
         if (this.recentCrashes() === MAX_WORKER_CRASHES) {
             this.log.warn(
                 `The tokenizer worker failed ${MAX_WORKER_CRASHES} times within a minute; ` +
@@ -402,7 +414,7 @@ export class TokenizerService implements vscode.Disposable {
 
     /** Worker deaths within the last CRASH_WINDOW_MS. */
     private recentCrashes(): number {
-        const cutoff = Date.now() - CRASH_WINDOW_MS;
+        const cutoff = performance.now() - CRASH_WINDOW_MS;
         while (this.crashTimes.length > 0 && this.crashTimes[0] <= cutoff) {
             this.crashTimes.shift();
         }

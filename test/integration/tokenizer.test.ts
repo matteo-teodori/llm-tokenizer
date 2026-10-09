@@ -257,10 +257,13 @@ suite('tokenizer service', () => {
 
     test("a crashed worker's late exit does not discard its replacement", async () => {
         // A worker that throws asynchronously emits 'error', and its 'exit'
-        // arrives a turn later — after the next count has already spawned a
-        // replacement. The unguarded 'exit' handler then discarded the
+        // usually arrives a turn later — after the next count has already
+        // spawned a replacement. The unguarded 'exit' handler then discarded the
         // replacement: its answer was rejected into an estimate, and its thread
-        // was orphaned, still running after dispose().
+        // was orphaned, still running after dispose(). When 'exit' lands in the
+        // same turn instead, the unguarded handler records the crash twice, so
+        // the second crash below trips the respawn budget: either way, the last
+        // count fails without the guard.
         tokenizer.dispose();
         tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-async.js'), store, log);
         const gpt = model('gpt-5.6-sol');
@@ -268,12 +271,45 @@ suite('tokenizer service', () => {
         const warm = await tokenizer.count('warm', gpt);
         assert.strictEqual(warm.exact, true, 'the stand-in worker answers exactly');
 
-        const crashed = await tokenizer.count('CRASH', gpt);
-        assert.strictEqual(crashed.exact, false, 'a crashed request falls back to an estimate');
+        for (let round = 1; round <= 2; round++) {
+            const crashed = await tokenizer.count('CRASH', gpt);
+            assert.strictEqual(crashed.exact, false, `crash ${round} falls back to an estimate`);
 
-        const after = await tokenizer.count('after', gpt);
-        assert.strictEqual(after.exact, true, "the replacement worker's answer was thrown away");
-        assert.strictEqual(after.count, 'after'.length);
+            const after = await tokenizer.count('after', gpt);
+            assert.strictEqual(after.exact, true, `the replacement's answer was thrown away after crash ${round}`);
+            assert.strictEqual(after.count, 'after'.length);
+        }
+    });
+
+    test('a crash while loading a downloaded vocabulary does not shelve it for the session', async () => {
+        // Re-hydration records a vocabulary as unusable only if the worker it
+        // spoke to is still in use. Comparing Worker objects could not see a
+        // crash when there was no worker before the load — the first count of a
+        // session, or the first after a crash — because both sides were
+        // undefined, so a downloaded tokenizer stayed an estimate until reload.
+        // The download command could not fix it: the file is on disk, so it
+        // answers "already downloaded".
+        const llama = model('llama-3.3-70b');
+        assert.strictEqual(llama.encoder.kind, 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        const spawnLog = path.join(os.tmpdir(), `llm-tokenizer-spawns-${process.pid}-${testIndex}`);
+        process.env.LLM_TOKENIZER_TEST_SPAWN_LOG = spawnLog;
+        try {
+            tokenizer.dispose();
+            tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-first-start.js'), store, log);
+
+            const first = await tokenizer.count('abc', llama);
+            assert.strictEqual(first.exact, false, 'the count the crash interrupted falls back to an estimate');
+
+            // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+            const second = await tokenizer.count('abc', llama);
+            assert.strictEqual(second.exact, true, 'the downloaded tokenizer was shelved after one crash');
+            assert.strictEqual(second.count, 2);
+        } finally {
+            delete process.env.LLM_TOKENIZER_TEST_SPAWN_LOG;
+            await fs.rm(spawnLog, { force: true });
+        }
     });
 
     test('a worker that dies as it loads is not respawned for every count', async () => {
