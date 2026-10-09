@@ -2,7 +2,7 @@
     "compilerOptions": {
         "module": "commonjs",
         "moduleResolution": "node",
-        // VS Code 1.104+ ships Electron 34 / Node 22.
+        // The engines floor, VS Code 1.105, ships Electron 37.6 / Node 22.19.
         "target": "es2023",
         "lib": ["es2023"],
         // Type checking only — esbuild does the emitting for the extension and

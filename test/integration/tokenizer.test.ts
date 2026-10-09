@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -11,6 +12,9 @@ import { MAX_TOKENIZED_FILE_BYTES } from '../../src/constants';
 
 /** The bundled worker, as the extension host loads it. */
 const WORKER = path.join(__dirname, '..', '..', '..', 'out', 'worker.js');
+
+/** Workers that crash on purpose; see test/fixtures/workers/README.md. */
+const CRASHING_WORKERS = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'workers');
 
 function model(id: string): ModelInfo {
     const found = findModel(id);
@@ -61,8 +65,19 @@ suite('tokenizer service', () => {
     let storageUri: vscode.Uri;
     let testIndex = 0;
 
-    setup(() => {
+    // One channel for the whole suite. VS Code hands back the existing channel
+    // for a name, and one disposed before it has finished opening — a quick
+    // test can end that soon — stays registered but closed: every later use of
+    // the name throws "Channel has been closed", failing whatever runs next.
+    suiteSetup(() => {
         log = vscode.window.createOutputChannel('LLM Tokenizer (test)', { log: true });
+    });
+
+    suiteTeardown(() => {
+        log.dispose();
+    });
+
+    setup(() => {
         // A fresh directory per test: one of these seeds a tokenizer, and the
         // others assert that nothing has been downloaded.
         storageUri = vscode.Uri.file(
@@ -74,7 +89,6 @@ suite('tokenizer service', () => {
 
     teardown(async () => {
         tokenizer.dispose();
-        log.dispose();
         try {
             await vscode.workspace.fs.delete(storageUri, { recursive: true, useTrash: false });
         } catch {
@@ -176,8 +190,8 @@ suite('tokenizer service', () => {
     });
 
     test('models with no public tokenizer are counted, but marked estimated', async () => {
-        // Anthropic and xAI publish no tokenizer. Returning a number is fine;
-        // presenting it as exact is not.
+        // Anthropic and xAI publish no tokenizer for a current model. Returning
+        // a number is fine; presenting it as exact is not.
         for (const id of ['claude-opus-5', 'grok-4.5']) {
             const result = await tokenizer.count('some text to count', model(id));
             assert.ok(result.count > 0);
@@ -249,6 +263,191 @@ suite('tokenizer service', () => {
         const result = await tokenizer.count('still answers', model('gpt-5.6-sol'));
         assert.ok(result.count > 0);
         assert.strictEqual(result.exact, false, 'a fallback count is an estimate');
+    });
+
+    test("a crashed worker's late exit does not discard its replacement", async () => {
+        // A worker that throws asynchronously emits 'error', and its 'exit'
+        // usually arrives a turn later — after the next count has already
+        // spawned a replacement. The unguarded 'exit' handler then discarded the
+        // replacement: its answer was rejected into an estimate, and its thread
+        // was orphaned, still running after dispose(). When 'exit' lands in the
+        // same turn instead, the unguarded handler records the crash twice, so
+        // the second crash below trips the respawn budget: either way, the last
+        // count fails without the guard.
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-async.js'), store, log);
+        const gpt = model('gpt-5.6-sol');
+
+        const warm = await tokenizer.count('warm', gpt);
+        assert.strictEqual(warm.exact, true, 'the stand-in worker answers exactly');
+
+        for (let round = 1; round <= 2; round++) {
+            const crashed = await tokenizer.count('CRASH', gpt);
+            assert.strictEqual(crashed.exact, false, `crash ${round} falls back to an estimate`);
+
+            const after = await tokenizer.count('after', gpt);
+            assert.strictEqual(after.exact, true, `the replacement's answer was thrown away after crash ${round}`);
+            assert.strictEqual(after.count, 'after'.length);
+        }
+    });
+
+    test('a crash while loading a downloaded vocabulary does not shelve it for the session', async () => {
+        // Re-hydration records a vocabulary as unusable only if the worker it
+        // spoke to is still in use. Comparing Worker objects could not see a
+        // crash when there was no worker before the load — the first count of a
+        // session, or the first after a crash — because both sides were
+        // undefined, so a downloaded tokenizer stayed an estimate until reload.
+        // The download command could not fix it: the file is on disk, so it
+        // answers "already downloaded".
+        const llama = model('llama-3.3-70b');
+        assert.strictEqual(llama.encoder.kind, 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        const spawnLog = path.join(os.tmpdir(), `llm-tokenizer-spawns-${process.pid}-${testIndex}`);
+        process.env.LLM_TOKENIZER_TEST_SPAWN_LOG = spawnLog;
+        try {
+            tokenizer.dispose();
+            tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-first-start.js'), store, log);
+
+            const first = await tokenizer.count('abc', llama);
+            assert.strictEqual(first.exact, false, 'the count the crash interrupted falls back to an estimate');
+
+            // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+            const second = await tokenizer.count('abc', llama);
+            assert.strictEqual(second.exact, true, 'the downloaded tokenizer was shelved after one crash');
+            assert.strictEqual(second.count, 2);
+        } finally {
+            delete process.env.LLM_TOKENIZER_TEST_SPAWN_LOG;
+            await fs.rm(spawnLog, { force: true });
+        }
+    });
+
+    test('a worker that dies as it loads is not respawned for every count', async () => {
+        // Every request used to spawn a fresh worker, so a bundle that fails at
+        // load cost one thread start per file — 50 spawns for 50 counts,
+        // measured — and each one ended in the estimate anyway.
+        const spawnLog = path.join(os.tmpdir(), `llm-tokenizer-spawns-${process.pid}-${testIndex}`);
+        process.env.LLM_TOKENIZER_TEST_SPAWN_LOG = spawnLog;
+        // Counts the errors logged: once the service has stopped respawning, a
+        // count must not log a failure of its own, or a scan logs one per file.
+        let errors = 0;
+        const countingLog = {
+            error: () => { errors++; },
+            warn: () => undefined,
+            info: () => undefined,
+            debug: () => undefined,
+            trace: () => undefined,
+        } as unknown as vscode.LogOutputChannel;
+        try {
+            tokenizer.dispose();
+            tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-load.js'), store, countingLog);
+
+            for (let i = 0; i < 20; i++) {
+                const result = await tokenizer.count(`file ${i}`, model('gpt-5.6-sol'));
+                assert.strictEqual(result.exact, false, `count ${i} should fall back to an estimate`);
+                assert.ok(result.count > 0);
+            }
+
+            const spawned = (await fs.readFile(spawnLog, 'utf8')).length;
+            assert.strictEqual(spawned, 3, `the worker was started ${spawned} times for 20 counts`);
+            // Two per crash: the worker's own error, and the count it failed.
+            assert.ok(errors <= 6, `${errors} errors logged for 3 crashes and 20 counts`);
+        } finally {
+            delete process.env.LLM_TOKENIZER_TEST_SPAWN_LOG;
+            await fs.rm(spawnLog, { force: true });
+        }
+    });
+
+    test('a crash that trips the budget mid re-hydration does not shelve the vocabulary', async () => {
+        // Re-hydration compares the crash epoch to tell a vocabulary that cannot
+        // be used from a worker that is dying. It read the epoch after checking
+        // the disk, so it missed a crash during that check — the first read of
+        // a large tokenizer.json takes a quarter of a second. When that crash
+        // tripped the budget, the load the budget refused was recorded as an
+        // unusable vocabulary, and the model stayed an estimate after the
+        // budget ran out.
+        const llama = model('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        // The disk check is held open until the third crash has landed.
+        let release = (): void => undefined;
+        const held = new Promise<void>(resolve => { release = resolve; });
+        const isDownloaded = store.isDownloaded.bind(store);
+        store.isDownloaded = async (repo, kind) => {
+            await held;
+            return isDownloaded(repo, kind);
+        };
+
+        let now = 0;
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-on-demand.js'), store, log, () => now);
+        const gpt = model('gpt-5.6-sol');
+
+        for (let crash = 1; crash <= 2; crash++) {
+            assert.strictEqual((await tokenizer.count('CRASH', gpt)).exact, false, `crash ${crash}`);
+        }
+        const during = tokenizer.count('abc', llama);
+        assert.strictEqual((await tokenizer.count('CRASH', gpt)).exact, false, 'crash 3');
+        release();
+        assert.strictEqual((await during).exact, false, 'counted while the budget was tripped');
+
+        now += 61_000;
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        const after = await tokenizer.count('abc', llama);
+        assert.strictEqual(after.exact, true, 'the vocabulary was shelved once the budget ran out');
+        assert.strictEqual(after.count, 2);
+    });
+
+    test('a download the crash budget refused to load is loaded once the budget runs out', async () => {
+        // A count while a download is in flight finds nothing on disk and
+        // records the vocabulary as missing. When a crash in that same moment
+        // tripped the budget, the finished download was refused, and the stale
+        // "missing" outlived the budget: the model stayed an estimate.
+        const llama = model('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        const { repo } = llama.encoder;
+
+        // The count's disk check is held until the third crash, and the
+        // download until after it; the download then lands the fixture where a
+        // real one would write.
+        let releaseCheck = (): void => undefined;
+        let releaseDownload = (): void => undefined;
+        const checkHeld = new Promise<void>(resolve => { releaseCheck = resolve; });
+        const downloadHeld = new Promise<void>(resolve => { releaseDownload = resolve; });
+        const isDownloaded = store.isDownloaded.bind(store);
+        store.isDownloaded = async (r, kind) => {
+            await checkHeld;
+            return isDownloaded(r, kind);
+        };
+        const fetchAsset = store.fetch.bind(store);
+        store.fetch = async (r, kind, token) => {
+            await downloadHeld;
+            await seedTokenizer(storageUri, repo);
+            return fetchAsset(r, kind, token);
+        };
+
+        let now = 0;
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-on-demand.js'), store, log, () => now);
+        const gpt = model('gpt-5.6-sol');
+
+        for (let crash = 1; crash <= 2; crash++) {
+            assert.strictEqual((await tokenizer.count('CRASH', gpt)).exact, false, `crash ${crash}`);
+        }
+        const download = tokenizer.ensureExact(llama);
+        const during = tokenizer.count('abc', llama);
+        assert.strictEqual((await tokenizer.count('CRASH', gpt)).exact, false, 'crash 3');
+        releaseCheck();
+        assert.strictEqual((await during).exact, false, 'counted mid-download');
+        releaseDownload();
+        assert.strictEqual(await download, false, 'the budget let the finished download load');
+
+        now += 61_000;
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        const after = await tokenizer.count('abc', llama);
+        assert.strictEqual(after.exact, true, 'the downloaded vocabulary was never loaded');
+        assert.strictEqual(after.count, 2);
     });
 
     test('an undownloaded model stays an estimate, and never fetches mid-count', async () => {
@@ -366,8 +565,8 @@ suite('tokenizer service', () => {
     test('forgetting loaded vocabularies reverts counts to estimates', async () => {
         // Clearing the store alone left the worker holding its parsed
         // tokenizer, so the download command afterwards said "already
-        // downloaded" and did nothing, while the ~150 MB rank table stayed
-        // resident until the window reloaded.
+        // downloaded" and did nothing, while the rank table stayed resident
+        // until the window reloaded.
         const kimi = model('kimi-k3');
         assert.strictEqual(kimi.encoder.kind, 'tiktokenModel');
         await seedRankTable(storageUri, kimi.encoder.repo);

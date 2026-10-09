@@ -26,7 +26,10 @@ export interface LoadTokenizerRequest {
     asset: TokenizerAsset;
 }
 
-/** Release a loaded Hugging Face tokenizer (each holds ~120 MB of heap). */
+/**
+ * Release a downloaded vocabulary, tokenizer.json or rank table: from 13 MB of
+ * heap for Kimi's to about 130 MB for Gemma 3's.
+ */
 export interface EvictRequest {
     type: 'evict';
     id: number;

@@ -9,6 +9,19 @@ import { MODEL_ALIASES } from '../../src/tokenizer/registry';
 const EXTENSION_ID = 'matteoteodori.llm-tokenizer';
 const CONFIG = 'llm-tokenizer';
 
+/**
+ * A log channel that only records. VS Code hands back the existing channel for
+ * a name, and a real one disposed before it has finished opening, as a
+ * synchronous test does, stays registered but closed: every later channel of
+ * that name throws "Channel has been closed", failing whatever suite runs next.
+ */
+function recordingChannel(lines: string[] = []): vscode.LogOutputChannel {
+    const record = (message: string): void => {
+        lines.push(message);
+    };
+    return { trace: record, debug: record, info: record, warn: record, error: record } as unknown as vscode.LogOutputChannel;
+}
+
 suite('extension', () => {
     suiteSetup(async () => {
         const extension = vscode.extensions.getExtension(EXTENSION_ID);
@@ -41,7 +54,7 @@ suite('extension', () => {
 
         // This file is a second module instance from the one the host activated,
         // so the module's own channel was never assigned; pass one in.
-        const channel = vscode.window.createOutputChannel('LLM Tokenizer (test)', { log: true });
+        const channel = recordingChannel();
 
         const config = vscode.workspace.getConfiguration(CONFIG);
         const original = config.inspect<string>('defaultModel')?.globalValue;
@@ -62,8 +75,43 @@ suite('extension', () => {
             assert.deepStrictEqual(writes, [[STORAGE_KEY, MODEL_ALIASES[alias]]]);
         } finally {
             await config.update('defaultModel', original, vscode.ConfigurationTarget.Global);
-            channel.dispose();
         }
+    });
+
+    test('a change of case alone migrates a saved choice without a notice', () => {
+        // MiniMax's ids were re-cased in 2.1.2 to the form its API documents.
+        // The model is the same, so telling the user it is "no longer
+        // available" and switching them to it would be false.
+        const writes: [string, unknown][] = [];
+        const notices: string[] = [];
+        const context = (saved: string): vscode.ExtensionContext =>
+            ({
+                globalState: {
+                    get: (key: string) => (key === STORAGE_KEY ? saved : undefined),
+                    update: (key: string, value: unknown) => {
+                        writes.push([key, value]);
+                        return Promise.resolve();
+                    },
+                },
+            } as unknown as vscode.ExtensionContext);
+        const notify = (message: string) => notices.push(message);
+        const logged: string[] = [];
+        const channel = recordingChannel(logged);
+
+        const aliases = Object.entries(MODEL_ALIASES);
+        const recased = aliases.find(([from, to]) => from.toLowerCase() === to.toLowerCase());
+        const replaced = aliases.find(([from, to]) => from.toLowerCase() !== to.toLowerCase());
+        assert.ok(recased && replaced, 'the registry should carry both kinds of alias to test with');
+
+        assert.strictEqual(resolveInitialModel(context(recased[0]), channel, notify).id, recased[1]);
+        assert.deepStrictEqual(writes, [[STORAGE_KEY, recased[1]]]);
+        assert.strictEqual(notices.length, 0, `a re-cased id notified: ${JSON.stringify(notices)}`);
+        assert.ok(logged.some(line => line.includes(`"${recased[0]}" is now "${recased[1]}"`)), logged.join('\n'));
+
+        // A model that really was replaced still says so.
+        resolveInitialModel(context(replaced[0]), channel, notify);
+        assert.strictEqual(notices.length, 1, `expected one notice, got ${JSON.stringify(notices)}`);
+        assert.ok(notices[0].includes(`"${replaced[0]}" is no longer available`), notices[0]);
     });
 
     test('repeated summaries reuse one panel instead of stacking up', () => {
@@ -106,27 +154,45 @@ suite('extension', () => {
     });
 
     test('registers every contributed command', async () => {
+        // The list used to be written out here by hand, so a command added to
+        // the manifest and never registered would still have passed: the class
+        // of bug that blocked 2.1.0, with manifest and code disagreeing and
+        // nothing to catch it. The manifest is now the list.
+        const manifest = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON as {
+            contributes: { commands: { command: string }[] };
+        };
+        const contributed = manifest.contributes.commands.map(c => c.command);
+        assert.ok(contributed.length > 0, 'the manifest contributes no commands');
+
         const registered = new Set(await vscode.commands.getCommands(true));
-        for (const command of [
-            'llm-tokenizer.countTokens',
-            'llm-tokenizer.selectModel',
-            'llm-tokenizer.downloadTokenizer',
-            'llm-tokenizer.clearTokenizerCache',
-        ]) {
+        for (const command of contributed) {
             assert.ok(registered.has(command), `${command} is contributed but not registered`);
         }
     });
 
-    test('every contributed setting is readable with the declared default', () => {
+    test('every contributed setting is readable with its declared type', () => {
         // `llm-tokenizer.defaultModel` was contributed, documented, and offered
         // 69 values in the settings UI while no code ever read it. This asserts
-        // each setting at least resolves.
+        // that each setting the manifest declares resolves to its type, and to
+        // one of its values where it has an enum.
+        const manifest = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON as {
+            contributes: {
+                configuration: { properties: Record<string, { type: string; enum?: unknown[] }> };
+            };
+        };
+        const properties = Object.entries(manifest.contributes.configuration.properties);
+        assert.ok(properties.length > 0, 'the manifest contributes no settings');
+
         const config = vscode.workspace.getConfiguration(CONFIG);
-        assert.strictEqual(typeof config.get<string>('defaultModel'), 'string');
-        assert.strictEqual(typeof config.get<string>('statusBarDisplay'), 'string');
-        assert.strictEqual(typeof config.get<boolean>('ignoreGitignoredFiles'), 'boolean');
-        assert.strictEqual(typeof config.get<boolean>('enableProjectScan'), 'boolean');
-        assert.strictEqual(typeof config.get<boolean>('downloadTokenizers'), 'boolean');
+        for (const [key, schema] of properties) {
+            assert.ok(key.startsWith(`${CONFIG}.`), `${key} is outside the ${CONFIG} section`);
+            const value = config.get<unknown>(key.slice(CONFIG.length + 1));
+            const expected = { integer: 'number', array: 'object' }[schema.type] ?? schema.type;
+            assert.strictEqual(typeof value, expected, `${key} does not resolve to a ${schema.type}`);
+            if (schema.enum) {
+                assert.ok(schema.enum.includes(value), `${key} resolves to ${String(value)}, outside its enum`);
+            }
+        }
     });
 
     test('the contributed default model is one the extension knows about', async () => {

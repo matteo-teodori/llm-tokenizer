@@ -4,6 +4,116 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.1.2] - 2026-10-09
+
+### Added
+- **Fifteen models released, or found missing, since the September registry
+  check.**
+  - Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5.
+  - GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna.
+  - Grok 4.7.
+  - Gemma 4 26B A4B.
+  - DeepSeek V4.1 Flash.
+  - Mistral Large 4 (preview).
+  - Qwen3.7-Flash.
+  - GLM-5.3-FlashX.
+  - MiniMax M3.1 Flash (preview).
+  - MiMo V2.6 Pro and V2.6 Flash.
+
+  That makes 99 models across the same 13 providers, 64 of them counted
+  with the model's own tokenizer.
+
+  Haiku 5.5 is estimated with Claude's current-tokenizer ratio rather than
+  Haiku 4.5's, because Anthropic says the same text counts about 30% more
+  tokens on it. The new GPT-6 models are estimated for the same reason as
+  GPT-6 Astra: OpenAI has published no encoding for them. The Mistral
+  Large 4 and MiniMax M3.1 previews have no published tokenizer, so they
+  are estimated, with their family's measured ratio, until one ships.
+
+### Changed
+- **MiniMax model ids now use the capitalisation the API documents.**
+  `minimax-m3` is now `MiniMax-M3`, and so on, because that is the only
+  form MiniMax's own documentation uses. A saved choice migrates by itself,
+  without a notice, since the model has not changed. An old id in the
+  `defaultModel` setting keeps working, though VS Code flags it until it is
+  updated.
+- **Estimated models use a measured ratio wherever a close relative
+  publishes a vocabulary.** Each is that vocabulary's characters per token
+  on this repository's own code and docs, rounded down, which puts the
+  total for those files slightly high. A single file can still read low,
+  by up to a third.
+  - Gemini 3.8, 3.7 and 3.6 Flash and 3.5 Flash-Lite now use Gemma's
+    ratio, so their estimates rise by about 11%. The old figure had never
+    been measured and undercounted by about 9%, which is the direction that
+    says a prompt fits when it does not.
+  - Qwen3.7-Max and Plus and Qwen3.6-Plus now use the open Qwen3.6
+    vocabulary's ratio, so their estimates drop by about 5%. The new
+    Qwen3.7-Flash uses it too.
+  - GLM-5-Turbo uses the GLM-5 vocabulary's ratio, the MiniMax M3.1 Flash
+    preview M3's, and the Mistral Large 4 preview Tekken's.
+  - Claude Opus 4.6, Sonnet 4.6 and earlier now use 3.3 characters a token
+    instead of 3.4, so their estimates rise by about 3%. Against the newer
+    tokenizer's 2.5, 3.4 implied a gap of 36% in token count, past the 35%
+    Anthropic gives as the most; 3.3 puts it at 32%, near Anthropic's
+    typical 30%.
+
+  The downloadable Gemini, Gemma and Qwen models show the same estimates
+  until their vocabulary arrives. The other downloadable models keep the
+  placeholder they show before their download: a ratio below the one their
+  vocabulary measures, so that count reads high.
+- **DeepSeek V4 Flash has been replaced by V4.1 Flash.** DeepSeek retired
+  V4 Flash on 10 September and routes its id to V4.1 Flash
+  (`deepseek-flash`), which has a tokenizer file of its own. A saved V4
+  Flash choice migrates to it. V4 Pro's limit is now 1,048,576, the
+  figure in DeepSeek's API reference.
+- **Mistral Medium 3.5 and Small 4 download their own tokenizer.** They had
+  shared Large 3's. That file counts ordinary text the same way, but it
+  counts Mistral's control strings differently: `[MODEL_SETTINGS]` came to
+  6 tokens instead of 1. One extra download of about 17 MB covers both
+  models.
+- **Qwen3.8-Max is now counted exactly, and GLM-5-Turbo is now estimated.**
+  - Qwen documents Max as the official version of its open Qwen3.8
+    checkpoint, whose tokenizer the registry already used for Qwen3.8-Flash.
+  - Zhipu publishes no tokenizer for GLM-5-Turbo and says nothing about
+    which vocabulary it shares, so calling it exact was an assumption.
+
+### Fixed
+- **A crashed tokenizer worker could take its replacement down with it.**
+  When the worker died, its exit arrived after the next count had already
+  started a replacement, and the extension threw the replacement away. That
+  count came back as an estimate. The replacement thread was left running,
+  outside anything the extension could stop. It held whatever vocabulary
+  it had loaded, which for the larger ones is over 100 MB.
+- **A worker that failed as it started was restarted for every file.** A
+  scan of 50 files started it 50 times, and each attempt ended in an
+  estimate anyway. After three failures within a minute, counts now go
+  straight to the estimate until the worker can be restarted. A scan no
+  longer logs one error per file.
+- **Counts in the billions read as thousands of millions.** A billion tokens
+  showed as "1000.0M". They now read "1.0B".
+- **The extension's description said Claude was counted exactly.** It never
+  was: Anthropic publishes no tokenizer for a current Claude model, and
+  since 2.0 every Claude count has been labelled as an estimate. The description now says which models
+  are estimated: Claude, Grok, GPT-6 and a few others.
+
+### Internal
+- The checks that every contributed command is registered, and that every
+  setting reads back with its declared type, now take the manifest as their
+  list instead of a hand-written one. They also catch a default of the
+  wrong type and a default outside its own enum. 174 tests.
+- The integration suites no longer depend on the order the test runner
+  finds them in. A log channel disposed while it was still opening stayed
+  registered but closed, so every later channel of the same name threw,
+  failing whichever suite ran next; the tests now share one channel per
+  suite, or use a stand-in.
+- Working notes in `.notes/` are no longer linted. Three comments that
+  described the runtime and Llama's special-token baseline wrongly are
+  corrected, and so are those on which Meta repositories are gated, on
+  vocabulary sizes and the memory they take, on DeepSeek V4.1's added
+  tokens, and on which Claude models use the newer tokenizer.
+- CONTRIBUTING now says when an API model may use an open checkpoint's
+  vocabulary, and how a heuristic ratio is measured.
+
 ## [2.1.1] - 2026-09-04
 
 ### Added
@@ -327,7 +437,8 @@ either exact or visibly marked as estimates.
   models that shipped in 1.3.0 never existed (`grok-4.2`, `grok-4.1-fast`,
   `grok-4-fast`), several ids were in a format their provider does not use
   (every Anthropic entry), and many context limits were wrong — `gpt-5.5` was
-  listed at 200K against an actual 922K. Removed and renamed ids are migrated
+  listed at 200K against a 1,050,000 window, which is 922K once its 128K of
+  output is reserved. Removed and renamed ids are migrated
   automatically on first run.
 - Context limits are now the **usable input** limit rather than the advertised
   window, so the 80% warning fires at a number that means something.

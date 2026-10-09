@@ -3,14 +3,15 @@
  *
  * Two shapes are published in the wild: a Hugging Face `tokenizer.json` (plus
  * its config), and a bare tiktoken rank table — Moonshot ships the latter for
- * the whole Kimi family. Both are large (2–19 MB) and there are too many models
+ * the whole Kimi family. Both are large (3–35 MB) and there are too many models
  * to bundle, so they are fetched on first use and kept in global storage.
  *
  * A download is never required: callers fall back to the model's heuristic
  * while one is missing or in flight.
  *
- * Only ungated repos are referenced by the registry — Meta's and Google's own
- * repos return 401 without a Hugging Face token, so mirrors are used instead.
+ * Only ungated repos are referenced by the registry — Meta's Llama repos and
+ * Google's Gemma 3 ones return 401 without a Hugging Face token, so mirrors are
+ * used for those.
  */
 
 import * as vscode from 'vscode';

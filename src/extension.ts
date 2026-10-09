@@ -149,6 +149,8 @@ export function resolveInitialModel(
     // without activating: the test host loads the bundle, and an import of this
     // file is a second module instance whose `log` was never assigned.
     channel: vscode.LogOutputChannel = log,
+    // Injectable for the same reason, so a test can see which migrations notify.
+    notify: (message: string) => unknown = message => vscode.window.showInformationMessage(message),
 ): ModelInfo {
     const saved = context.globalState.get<string>(STORAGE_KEY);
     const configured = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('defaultModel');
@@ -171,11 +173,19 @@ export function resolveInitialModel(
         // for anyone who had set it. An aliased setting still resolves below;
         // it just no longer fabricates a stored choice.
         if (model && model.id !== candidate && candidate === saved) {
-            channel.info(`Model "${candidate}" no longer exists; migrated to "${model.id}"`);
-            void context.globalState.update(STORAGE_KEY, model.id);
-            void vscode.window.showInformationMessage(
-                `LLM Tokenizer: "${candidate}" is no longer available. Switched to ${model.label}.`,
+            // A change of case alone is the same model under the id its
+            // provider documents, as with MiniMax's in 2.1.2, so a notice that
+            // it is "no longer available" would be false.
+            const recased = model.id.toLowerCase() === candidate.toLowerCase();
+            channel.info(
+                recased
+                    ? `Model id "${candidate}" is now "${model.id}"; migrated`
+                    : `Model "${candidate}" no longer exists; migrated to "${model.id}"`,
             );
+            void context.globalState.update(STORAGE_KEY, model.id);
+            if (!recased) {
+                void notify(`LLM Tokenizer: "${candidate}" is no longer available. Switched to ${model.label}.`);
+            }
         }
         if (model) {
             return model;
