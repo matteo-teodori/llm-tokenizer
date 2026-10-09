@@ -106,27 +106,45 @@ suite('extension', () => {
     });
 
     test('registers every contributed command', async () => {
+        // The list used to be written out here by hand, so a command added to
+        // the manifest and never registered would still have passed: the class
+        // of bug that blocked 2.1.0, with manifest and code disagreeing and
+        // nothing to catch it. The manifest is now the list.
+        const manifest = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON as {
+            contributes: { commands: { command: string }[] };
+        };
+        const contributed = manifest.contributes.commands.map(c => c.command);
+        assert.ok(contributed.length > 0, 'the manifest contributes no commands');
+
         const registered = new Set(await vscode.commands.getCommands(true));
-        for (const command of [
-            'llm-tokenizer.countTokens',
-            'llm-tokenizer.selectModel',
-            'llm-tokenizer.downloadTokenizer',
-            'llm-tokenizer.clearTokenizerCache',
-        ]) {
+        for (const command of contributed) {
             assert.ok(registered.has(command), `${command} is contributed but not registered`);
         }
     });
 
-    test('every contributed setting is readable with the declared default', () => {
+    test('every contributed setting is readable with its declared type', () => {
         // `llm-tokenizer.defaultModel` was contributed, documented, and offered
         // 69 values in the settings UI while no code ever read it. This asserts
-        // each setting at least resolves.
+        // that each setting the manifest declares resolves to its type, and to
+        // one of its values where it has an enum.
+        const manifest = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON as {
+            contributes: {
+                configuration: { properties: Record<string, { type: string; enum?: unknown[] }> };
+            };
+        };
+        const properties = Object.entries(manifest.contributes.configuration.properties);
+        assert.ok(properties.length > 0, 'the manifest contributes no settings');
+
         const config = vscode.workspace.getConfiguration(CONFIG);
-        assert.strictEqual(typeof config.get<string>('defaultModel'), 'string');
-        assert.strictEqual(typeof config.get<string>('statusBarDisplay'), 'string');
-        assert.strictEqual(typeof config.get<boolean>('ignoreGitignoredFiles'), 'boolean');
-        assert.strictEqual(typeof config.get<boolean>('enableProjectScan'), 'boolean');
-        assert.strictEqual(typeof config.get<boolean>('downloadTokenizers'), 'boolean');
+        for (const [key, schema] of properties) {
+            assert.ok(key.startsWith(`${CONFIG}.`), `${key} is outside the ${CONFIG} section`);
+            const value = config.get<unknown>(key.slice(CONFIG.length + 1));
+            const expected = { integer: 'number', array: 'object' }[schema.type] ?? schema.type;
+            assert.strictEqual(typeof value, expected, `${key} does not resolve to a ${schema.type}`);
+            if (schema.enum) {
+                assert.ok(schema.enum.includes(value), `${key} resolves to ${String(value)}, outside its enum`);
+            }
+        }
     });
 
     test('the contributed default model is one the extension knows about', async () => {
