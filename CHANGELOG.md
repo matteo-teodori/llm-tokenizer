@@ -15,6 +15,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   downloads on starts the current model's download straight away rather
   than at the next reload.
 
+### Internal
+- The bundles that ship are listed once, in `scripts/bundles.mjs`, which
+  the build, the third-party notices and the dependency audit all read. A
+  bundle added to the build alone would otherwise have shipped packages
+  that neither check saw.
+
 ## [2.1.2] - 2026-10-09
 
 ### Added

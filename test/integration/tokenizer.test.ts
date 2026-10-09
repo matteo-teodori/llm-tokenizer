@@ -100,8 +100,7 @@ suite('tokenizer service', () => {
         // build.mjs writes one file per encoding into out/encodings/ and
         // encoders.ts requires them by path at runtime. The two lists are
         // maintained by hand in different files — the TiktokenEncoding union
-        // says "must stay in sync with ENCODINGS in build.mjs" and nothing
-        // checked it. A registry entry naming an encoding that was not built
+        // says it "must stay in sync with ENCODINGS" and nothing checked it. A registry entry naming an encoding that was not built
         // throws MODULE_NOT_FOUND inside the worker, which the service catches
         // and turns into a silent estimate for every OpenAI model.
         const { MODELS } = await import('../../src/tokenizer/registry');

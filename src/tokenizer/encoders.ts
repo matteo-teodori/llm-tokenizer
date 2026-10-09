@@ -25,7 +25,7 @@ import * as path from 'path';
 export type EncoderKind = 'tiktoken' | 'hf' | 'tiktokenModel' | 'heuristic';
 
 /**
- * tiktoken encodings we ship. Must stay in sync with `ENCODINGS` in build.mjs.
+ * tiktoken encodings we ship. Must stay in sync with `ENCODINGS` in scripts/bundles.mjs.
  *
  * `p50k_base` and `r50k_base` are deliberately absent: no model in the registry
  * uses them and they cost ~400 KB gzipped in the VSIX.

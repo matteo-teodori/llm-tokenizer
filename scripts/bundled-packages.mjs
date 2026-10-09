@@ -17,19 +17,14 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 
-// The same three bundles build.mjs produces. Only one encoding is scanned:
-// they are all entry points into the same package.
-const BUNDLES = [
-    { entryPoints: ['src/extension.ts'], external: ['vscode'] },
-    { entryPoints: ['src/worker.ts'], external: ['vscode'] },
-    { entryPoints: ['gpt-tokenizer/encoding/o200k_base'], external: [] },
-];
+import { SHIPPED_BUNDLES } from './bundles.mjs';
 
 /** Package names inlined into the shipped bundles. */
 export async function bundledPackages(root) {
     const bundled = new Set();
 
-    for (const { entryPoints, external } of BUNDLES) {
+    // The same bundles build.mjs builds, from the same list.
+    for (const { entryPoints, external } of SHIPPED_BUNDLES) {
         const result = await esbuild.build({
             entryPoints,
             external,
@@ -41,6 +36,8 @@ export async function bundledPackages(root) {
             metafile: true,
             logLevel: 'silent',
             absWorkingDir: fileURLToPath(root),
+            // Required with several entry points; nothing is written.
+            outdir: 'out',
         });
 
         for (const input of Object.keys(result.metafile.inputs)) {

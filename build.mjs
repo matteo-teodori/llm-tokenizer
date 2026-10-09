@@ -19,6 +19,8 @@
 import * as esbuild from 'esbuild';
 import { rmSync } from 'node:fs';
 
+import { SHIPPED_BUNDLES } from './scripts/bundles.mjs';
+
 const watch = process.argv.includes('--watch');
 const production = process.argv.includes('--production');
 
@@ -28,14 +30,6 @@ const production = process.argv.includes('--production');
 if (production) {
     rmSync('out', { recursive: true, force: true });
 }
-
-/**
- * tiktoken encodings we ship. Keep in sync with `TiktokenEncoding`.
- *
- * `p50k_base` and `r50k_base` are excluded: no model in the 2026 registry uses
- * them, and they would add ~400 KB gzipped to the VSIX for nothing.
- */
-const ENCODINGS = ['o200k_harmony', 'o200k_base', 'cl100k_base'];
 
 /** Reports build results in watch mode, where esbuild otherwise stays silent. */
 const reportProblems = {
@@ -67,30 +61,9 @@ const shared = {
 };
 
 const targets = [
-    {
-        ...shared,
-        entryPoints: ['src/extension.ts'],
-        outfile: 'out/extension.js',
-        // Provided by the extension host at runtime, never bundled.
-        external: ['vscode'],
-    },
-    {
-        ...shared,
-        entryPoints: ['src/worker.ts'],
-        outfile: 'out/worker.js',
-        external: ['vscode'],
-    },
-    {
-        ...shared,
-        entryPoints: Object.fromEntries(
-            ENCODINGS.map(name => [name, `gpt-tokenizer/encoding/${name}`]),
-        ),
-        outdir: 'out/encodings',
-        // Always minified: these are 1–2.6 MB of rank tables and are never
-        // worth debugging.
-        minify: true,
-        sourcemap: false,
-    },
+    // What ships, listed once in scripts/bundles.mjs so the notices and the
+    // audit scan the same bundles this builds.
+    ...SHIPPED_BUNDLES.map(bundle => ({ ...shared, ...bundle })),
     {
         // Plain-CommonJS view of the registry so scripts/sync-manifest.mjs can
         // read it without a TypeScript loader. Deliberately *not* under out/:
