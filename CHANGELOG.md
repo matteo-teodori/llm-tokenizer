@@ -81,6 +81,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   longer logs one error per file.
 - **Counts in the billions read as thousands of millions.** A billion tokens
   showed as "1000.0M". They now read "1.0B".
+- **The extension's description said Claude was counted exactly.** It never
+  was: Anthropic publishes no tokenizer, and every Claude count has always
+  been a labelled estimate. The description now says so.
 
 ### Internal
 - The checks that every contributed command is registered, and that every
@@ -418,7 +421,8 @@ either exact or visibly marked as estimates.
   models that shipped in 1.3.0 never existed (`grok-4.2`, `grok-4.1-fast`,
   `grok-4-fast`), several ids were in a format their provider does not use
   (every Anthropic entry), and many context limits were wrong — `gpt-5.5` was
-  listed at 200K against an actual 922K. Removed and renamed ids are migrated
+  listed at 200K against a 1,050,000 window, which is 922K once its 128K of
+  output is reserved. Removed and renamed ids are migrated
   automatically on first run.
 - Context limits are now the **usable input** limit rather than the advertised
   window, so the 80% warning fires at a number that means something.

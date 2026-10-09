@@ -62,12 +62,16 @@ off with `llm-tokenizer.downloadTokenizers`.
 ## Supported Models
 
 99 models across 13 providers. Every id is checked against the provider's own
-documentation; models that a provider has retired are removed, and your setting
-is migrated automatically.
+documentation, and models that a provider has retired are removed. A model you
+picked from the status bar is migrated automatically; an old id in the
+`defaultModel` setting keeps working, though VS Code flags it until you update
+it.
 
-Ids are the strings the provider's API actually accepts, which are not always
-the marketing names — Mistral Large 3 is `mistral-large-2512`, MiniMax M3 is
-`MiniMax-M3`, capitals included, and Tencent's Hy3 is `hy3`, never `hunyuan-hy3`.
+Where a provider serves the model, the id is the string its API accepts, which
+is not always the marketing name — Mistral Large 3 is `mistral-large-2512`,
+MiniMax M3 is `MiniMax-M3`, capitals included, and Tencent's Hy3 is `hy3`, never
+`hunyuan-hy3`. Open-weight models with no first-party API (Llama, Muse Glimmer,
+Gemma 4 E4B) take their id from their Hugging Face name.
 
 | Provider   | Models | Accuracy |
 |------------|--------|----------|
