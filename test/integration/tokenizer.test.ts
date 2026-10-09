@@ -65,8 +65,19 @@ suite('tokenizer service', () => {
     let storageUri: vscode.Uri;
     let testIndex = 0;
 
-    setup(() => {
+    // One channel for the whole suite. VS Code hands back the existing channel
+    // for a name, and one disposed before it has finished opening — a quick
+    // test can end that soon — stays registered but closed: every later use of
+    // the name throws "Channel has been closed", failing whatever runs next.
+    suiteSetup(() => {
         log = vscode.window.createOutputChannel('LLM Tokenizer (test)', { log: true });
+    });
+
+    suiteTeardown(() => {
+        log.dispose();
+    });
+
+    setup(() => {
         // A fresh directory per test: one of these seeds a tokenizer, and the
         // others assert that nothing has been downloaded.
         storageUri = vscode.Uri.file(
@@ -78,7 +89,6 @@ suite('tokenizer service', () => {
 
     teardown(async () => {
         tokenizer.dispose();
-        log.dispose();
         try {
             await vscode.workspace.fs.delete(storageUri, { recursive: true, useTrash: false });
         } catch {

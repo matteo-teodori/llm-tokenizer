@@ -90,6 +90,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   setting reads back with its declared type, now take the manifest as their
   list instead of a hand-written one. They also catch a default of the
   wrong type and a default outside its own enum. 172 tests.
+- The integration suites no longer depend on the order the test runner
+  finds them in. A log channel disposed while it was still opening stayed
+  registered but closed, so every later channel of the same name threw,
+  failing whichever suite ran next; the tests now share one channel per
+  suite, or use a stand-in.
 - Working notes in `.notes/` are no longer linted. Three comments that
   described the runtime and Llama's special-token baseline wrongly are
   corrected, and so are those on which Meta repositories are gated, on

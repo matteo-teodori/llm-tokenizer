@@ -9,6 +9,19 @@ import { MODEL_ALIASES } from '../../src/tokenizer/registry';
 const EXTENSION_ID = 'matteoteodori.llm-tokenizer';
 const CONFIG = 'llm-tokenizer';
 
+/**
+ * A log channel that only records. VS Code hands back the existing channel for
+ * a name, and a real one disposed before it has finished opening, as a
+ * synchronous test does, stays registered but closed: every later channel of
+ * that name throws "Channel has been closed", failing whatever suite runs next.
+ */
+function recordingChannel(lines: string[] = []): vscode.LogOutputChannel {
+    const record = (message: string): void => {
+        lines.push(message);
+    };
+    return { trace: record, debug: record, info: record, warn: record, error: record } as unknown as vscode.LogOutputChannel;
+}
+
 suite('extension', () => {
     suiteSetup(async () => {
         const extension = vscode.extensions.getExtension(EXTENSION_ID);
@@ -41,7 +54,7 @@ suite('extension', () => {
 
         // This file is a second module instance from the one the host activated,
         // so the module's own channel was never assigned; pass one in.
-        const channel = vscode.window.createOutputChannel('LLM Tokenizer (test)', { log: true });
+        const channel = recordingChannel();
 
         const config = vscode.workspace.getConfiguration(CONFIG);
         const original = config.inspect<string>('defaultModel')?.globalValue;
@@ -62,7 +75,6 @@ suite('extension', () => {
             assert.deepStrictEqual(writes, [[STORAGE_KEY, MODEL_ALIASES[alias]]]);
         } finally {
             await config.update('defaultModel', original, vscode.ConfigurationTarget.Global);
-            channel.dispose();
         }
     });
 
@@ -83,25 +95,23 @@ suite('extension', () => {
                 },
             } as unknown as vscode.ExtensionContext);
         const notify = (message: string) => notices.push(message);
-        const channel = vscode.window.createOutputChannel('LLM Tokenizer (test)', { log: true });
+        const logged: string[] = [];
+        const channel = recordingChannel(logged);
 
         const aliases = Object.entries(MODEL_ALIASES);
         const recased = aliases.find(([from, to]) => from.toLowerCase() === to.toLowerCase());
         const replaced = aliases.find(([from, to]) => from.toLowerCase() !== to.toLowerCase());
         assert.ok(recased && replaced, 'the registry should carry both kinds of alias to test with');
 
-        try {
-            assert.strictEqual(resolveInitialModel(context(recased[0]), channel, notify).id, recased[1]);
-            assert.deepStrictEqual(writes, [[STORAGE_KEY, recased[1]]]);
-            assert.strictEqual(notices.length, 0, `a re-cased id notified: ${JSON.stringify(notices)}`);
+        assert.strictEqual(resolveInitialModel(context(recased[0]), channel, notify).id, recased[1]);
+        assert.deepStrictEqual(writes, [[STORAGE_KEY, recased[1]]]);
+        assert.strictEqual(notices.length, 0, `a re-cased id notified: ${JSON.stringify(notices)}`);
+        assert.ok(logged.some(line => line.includes(`"${recased[0]}" is now "${recased[1]}"`)), logged.join('\n'));
 
-            // A model that really was replaced still says so.
-            resolveInitialModel(context(replaced[0]), channel, notify);
-            assert.strictEqual(notices.length, 1, `expected one notice, got ${JSON.stringify(notices)}`);
-            assert.ok(notices[0].includes(`"${replaced[0]}" is no longer available`), notices[0]);
-        } finally {
-            channel.dispose();
-        }
+        // A model that really was replaced still says so.
+        resolveInitialModel(context(replaced[0]), channel, notify);
+        assert.strictEqual(notices.length, 1, `expected one notice, got ${JSON.stringify(notices)}`);
+        assert.ok(notices[0].includes(`"${replaced[0]}" is no longer available`), notices[0]);
     });
 
     test('repeated summaries reuse one panel instead of stacking up', () => {
