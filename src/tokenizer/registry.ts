@@ -38,6 +38,18 @@ export function findModel(id: string): ModelInfo | undefined {
 }
 
 /**
+ * Look up a model by its exact id, never following an alias.
+ *
+ * For labelling what a model actually did, as opposed to choosing a tokenizer:
+ * an alias maps a retired id onto a different, live model, so following one
+ * would credit a retired model's usage to its replacement. An id the registry
+ * does not list stays unresolved, and is shown as recorded.
+ */
+export function modelById(id: string): ModelInfo | undefined {
+    return BY_ID.get(id);
+}
+
+/**
  * The model used when nothing has been chosen, or the choice no longer exists.
  *
  * Resolved from `DEFAULT_MODEL_ID` rather than being `MODELS[0]`, the first
