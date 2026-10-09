@@ -13,6 +13,7 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 export type RootSource = 'setting' | 'editor-environment' | 'process-environment' | 'claude-settings' | 'default';
@@ -47,6 +48,21 @@ export interface ResolvedRoots {
     roots: RootCandidate[];
     /** Candidates outside `confineTo`, never read. */
     refused: RootCandidate[];
+}
+
+/**
+ * This machine's inputs, besides the two settings. Under test the home is a
+ * folder in the fixtures that does not exist, so `~/.claude` and its settings
+ * file resolve to nothing, and every root must lie in the fixtures or the
+ * temporary folder: no test can read the developer's own records.
+ */
+export function machineRootInputs(test?: { fixtures: string }): Omit<RootInputs, 'setting' | 'editorEnvironment'> {
+    return {
+        env: process.env,
+        home: test ? path.join(test.fixtures, 'claude-home') : os.homedir(),
+        platform: process.platform,
+        confineTo: test ? [test.fixtures, os.tmpdir()] : undefined,
+    };
 }
 
 /** settings.json is read for one key; a file this large is not a settings file. */

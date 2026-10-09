@@ -28,6 +28,7 @@ import {
 } from './scan';
 import { accuracyOf, isDownloadable } from './tokenizer/encoders';
 import { CountCache, isBinaryOutcome } from './countCache';
+import { affectsUsage, registerClaudeCodeUsage } from './usage/usageService';
 import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 
 const CONFIG_SECTION = 'llm-tokenizer';
@@ -109,7 +110,9 @@ export function activate(context: vscode.ExtensionContext): void {
     registerEventListeners(context);
 
     void refreshFileStatusBar(vscode.window.activeTextEditor);
-    void refreshProjectCount();
+    const startupScan = refreshProjectCount();
+    // Off, this registers two commands and a settings listener, nothing more.
+    registerClaudeCodeUsage(context, log, startupScan);
 
     // If the startup model needs a tokenizer and the user has opted into
     // downloads, fetch it now rather than leaving them on an estimate until
@@ -406,10 +409,12 @@ const RESCAN_SETTINGS = ['ignoreGitignoredFiles', 'defaultModel', 'statusBarDisp
  */
 export function settingsChangeEffects(
     event: Pick<vscode.ConfigurationChangeEvent, 'affectsConfiguration'>,
-): { rescan: boolean; download: boolean } {
+): { rescan: boolean; download: boolean; usage: boolean } {
     return {
         rescan: RESCAN_SETTINGS.some(key => event.affectsConfiguration(`${CONFIG_SECTION}.${key}`)),
         download: event.affectsConfiguration(`${CONFIG_SECTION}.downloadTokenizers`),
+        // Handled by the usage service's own listener.
+        usage: affectsUsage(event),
     };
 }
 

@@ -1,0 +1,528 @@
+/**
+ * Claude Code usage, on or off: the one owner of the usage worker, its timers
+ * and its watchers, which the panel and the status item use.
+ *
+ * Off, it registers its commands and one settings listener and touches
+ * nothing else: no file, no worker, no watcher, no timer. On, it imports once
+ * the startup project scan has settled or after 30 s, whichever is first, and
+ * never in the activation tick; then hourly, on the Refresh command, and, while
+ * the panel or the status item holds it, on watcher hints. The import is the
+ * reconcile: an unchanged file costs the worker one stat, so a hint only says
+ * when to look, and the hourly pass keeps the history whole even when every
+ * hint was missed.
+ *
+ * Hourly whatever is shown, because Claude Code deletes its records after
+ * `cleanupPeriodDays`: a history only updated while the panel is open would
+ * lose whatever was written in a month it stayed closed.
+ */
+
+import * as path from 'path';
+import * as vscode from 'vscode';
+
+import { WorkerHost, WorkerHostError } from '../workerHost';
+import type { ImportSummary } from './importer';
+import type { UsageWorkerRequest, UsageWorkerResponse } from './protocol';
+import type { RangeKey, UsageReport } from './report';
+import { machineRootInputs, resolveRoots, type ResolvedRoots, type RootInputs } from './roots';
+
+const CONFIG_SECTION = 'llm-tokenizer';
+
+/** This feature's settings. A change to any of them, or to where Claude Code writes, is handled here. */
+export const USAGE_SETTINGS = ['enableClaudeCodeUsage', 'claudeCodeDataDirectory'] as const;
+
+export function affectsUsage(event: Pick<vscode.ConfigurationChangeEvent, 'affectsConfiguration'>): boolean {
+    return (
+        USAGE_SETTINGS.some(key => event.affectsConfiguration(`${CONFIG_SECTION}.${key}`)) ||
+        event.affectsConfiguration('claudeCode.environmentVariables')
+    );
+}
+
+/** The first import waits at most this long for the startup project scan. */
+export const FIRST_IMPORT_MAX_WAIT_MS = 30_000;
+export const HOURLY_MS = 60 * 60 * 1000;
+/** An idle worker is let go after this long with nothing holding the service. */
+export const IDLE_MS = 10 * 60 * 1000;
+/** Watcher hints are coalesced over this long, and never deferred past the ceiling. */
+export const HINT_DEBOUNCE_MS = 1_000;
+export const HINT_CEILING_MS = 10_000;
+
+export type UsageStatus = 'off' | 'ready' | 'no-roots' | 'no-sqlite' | 'read-only' | 'failing';
+
+export interface UsageSettings {
+    enabled: boolean;
+    dataDirectory: string;
+    /** The user-level `claudeCode.environmentVariables`; only its CLAUDE_CONFIG_DIR is kept. */
+    editorEnvironment: unknown;
+}
+
+/** What the service needs from the editor and the machine, injected so a test can fake each. */
+export interface UsageServiceDeps {
+    log: Pick<vscode.LogOutputChannel, 'info' | 'warn' | 'debug'>;
+    storeFile: string;
+    readSettings(): UsageSettings;
+    /** Everything `resolveRoots` needs besides the two settings. */
+    rootInputs(): Omit<RootInputs, 'setting' | 'editorEnvironment'>;
+    createHost(): UsageHost;
+    /** Watch `projects` folder for transcript changes; each event is only a hint. */
+    watch(projectsFolder: string, onHint: () => void): vscode.Disposable;
+    startupSettled: Thenable<unknown>;
+    clock?: Clock;
+}
+
+/** The part of WorkerHost the service uses. */
+export type UsageHost = Pick<WorkerHost<UsageWorkerRequest, UsageWorkerResponse>, 'send' | 'stop' | 'dispose' | 'running'>;
+
+export interface Clock {
+    setTimeout(callback: () => void, ms: number): unknown;
+    clearTimeout(handle: unknown): void;
+    now(): number;
+}
+
+const realClock: Clock = {
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: handle => clearTimeout(handle as NodeJS.Timeout),
+    now: () => Date.now(),
+};
+
+/** A request's own fields; the host assigns the id. */
+type Ask = UsageWorkerRequest extends infer R ? (R extends { id: number } ? Omit<R, 'id'> : never) : never;
+
+export class UsageService implements vscode.Disposable {
+    private readonly changed = new vscode.EventEmitter<void>();
+    /** Fired when the history or the status may have changed. */
+    readonly onDidChange = this.changed.event;
+
+    private readonly clock: Clock;
+    private host: UsageHost | undefined;
+    private enabled = false;
+    private disposed = false;
+    private currentStatus: UsageStatus = 'off';
+    private summary: ImportSummary | undefined;
+    private resolved: ResolvedRoots | undefined;
+    private runtime: { node: string; electron: string | null } | undefined;
+
+    /** Bumped on every start and stop, so a timer armed before either does nothing. */
+    private generation = 0;
+    private importing: Promise<ImportSummary | undefined> | undefined;
+    private again = false;
+    private holders = 0;
+    private watchers: vscode.Disposable[] = [];
+    private firstTimer: unknown;
+    private hourlyTimer: unknown;
+    private idleTimer: unknown;
+    private hintTimer: unknown;
+    private hintDeadline = 0;
+    private inFlight = 0;
+
+    constructor(private readonly deps: UsageServiceDeps) {
+        this.clock = deps.clock ?? realClock;
+        if (deps.readSettings().enabled) {
+            this.start();
+        }
+    }
+
+    get status(): UsageStatus {
+        return this.currentStatus;
+    }
+
+    /** The last import's summary in this window, for diagnostics. */
+    get lastImport(): ImportSummary | undefined {
+        return this.summary;
+    }
+
+    /** Every root considered at the last import, and where each came from. */
+    get roots(): ResolvedRoots | undefined {
+        return this.resolved;
+    }
+
+    /** The runtime that has no `node:sqlite`, when that is why nothing shows. */
+    get missingSqlite(): { node: string; electron: string | null } | undefined {
+        return this.runtime;
+    }
+
+    /** Re-read the settings: start, stop, or pick up a new data folder. */
+    settingsChanged(): void {
+        const enabled = this.deps.readSettings().enabled;
+        if (enabled && !this.enabled) {
+            this.start();
+        } else if (!enabled && this.enabled) {
+            this.stop();
+        } else if (enabled) {
+            // A data folder or Claude Code's own setting changed: watch the new
+            // roots, and read them now.
+            this.restartWatchers();
+            void this.runImport();
+        }
+    }
+
+    /** Import now, and resolve with the pass that started after this call. */
+    refresh(): Promise<ImportSummary | undefined> {
+        return this.enabled ? this.runImport() : Promise.resolve(undefined);
+    }
+
+    /**
+     * Delete the history. Works while the feature is off, since the history
+     * outlives the switch; records still on disk are read again by the next
+     * import.
+     */
+    async clear(): Promise<boolean> {
+        const response = await this.ask({ type: 'clear', storeFile: this.deps.storeFile });
+        if (response?.type !== 'cleared') {
+            return false;
+        }
+        this.summary = undefined;
+        this.deps.log.info(`Claude Code usage history cleared (generation ${response.generation})`);
+        this.changed.fire();
+        return true;
+    }
+
+    /** The report for one range and scope, or undefined while off or failing. */
+    async report(range: RangeKey, zone: string, workspaceFolders: string[] | null): Promise<UsageReport | undefined> {
+        if (!this.enabled) {
+            return undefined;
+        }
+        const response = await this.ask({ type: 'query', storeFile: this.deps.storeFile, range, zone, workspaceFolders });
+        return response?.type === 'report' ? response.report : undefined;
+    }
+
+    /**
+     * Keep the service attentive: watchers on, the worker resident. The panel
+     * holds it while visible, the status item while shown.
+     */
+    hold(): vscode.Disposable {
+        this.holders++;
+        this.clock.clearTimeout(this.idleTimer);
+        if (this.holders === 1 && this.enabled) {
+            this.restartWatchers();
+        }
+        let released = false;
+        return new vscode.Disposable(() => {
+            if (released) {
+                return;
+            }
+            released = true;
+            this.holders--;
+            if (this.holders === 0) {
+                this.stopWatchers();
+                this.armIdle();
+            }
+        });
+    }
+
+    dispose(): void {
+        this.disposed = true;
+        this.stop();
+        this.host?.dispose();
+        this.host = undefined;
+        this.changed.dispose();
+    }
+
+    private start(): void {
+        this.enabled = true;
+        this.generation++;
+        this.setStatus('ready');
+        if (this.holders > 0) {
+            this.restartWatchers();
+        }
+        const generation = this.generation;
+        const waited = new Promise<void>(resolve => (this.firstTimer = this.clock.setTimeout(resolve, FIRST_IMPORT_MAX_WAIT_MS)));
+        void Promise.race([Promise.resolve(this.deps.startupSettled).then(undefined, () => undefined), waited]).then(() => {
+            this.clock.clearTimeout(this.firstTimer);
+            if (generation === this.generation) {
+                void this.runImport();
+            }
+        });
+    }
+
+    private stop(): void {
+        this.enabled = false;
+        this.generation++;
+        this.again = false;
+        this.stopWatchers();
+        for (const timer of [this.firstTimer, this.hourlyTimer, this.idleTimer, this.hintTimer]) {
+            this.clock.clearTimeout(timer);
+        }
+        // An import in flight is cut short: it is idempotent, and every
+        // checkpoint it committed is kept.
+        this.host?.stop();
+        this.setStatus('off');
+    }
+
+    private runImport(): Promise<ImportSummary | undefined> {
+        if (this.importing) {
+            this.again = true;
+            return this.importing;
+        }
+        const generation = this.generation;
+        const pass = async (): Promise<ImportSummary | undefined> => {
+            let summary: ImportSummary | undefined;
+            do {
+                this.again = false;
+                summary = await this.importOnce();
+            } while (this.again && generation === this.generation);
+            return summary;
+        };
+        this.importing = pass().finally(() => {
+            this.importing = undefined;
+            if (generation === this.generation && this.enabled) {
+                this.clock.clearTimeout(this.hourlyTimer);
+                this.hourlyTimer = this.clock.setTimeout(() => void this.runImport(), HOURLY_MS);
+            }
+        });
+        return this.importing;
+    }
+
+    private async importOnce(): Promise<ImportSummary | undefined> {
+        const settings = this.deps.readSettings();
+        this.resolved = resolveRoots({
+            ...this.deps.rootInputs(),
+            setting: settings.dataDirectory,
+            editorEnvironment: settings.editorEnvironment,
+        });
+        for (const refused of this.resolved.refused) {
+            this.deps.log.warn(`Claude Code usage: refused a root outside the test fixtures (${refused.source})`);
+        }
+        if (this.resolved.roots.length === 0) {
+            this.setStatus('no-roots');
+            return undefined;
+        }
+        const roots = this.resolved.roots.map(r => r.path);
+        this.deps.log.debug(`Claude Code usage: importing ${roots.join(', ')}`);
+        const response = await this.ask({ type: 'import', storeFile: this.deps.storeFile, roots });
+        if (response?.type !== 'imported') {
+            return undefined;
+        }
+        if (response.leaseHeldElsewhere) {
+            // Another window is importing into the same history.
+            this.setStatus('ready');
+            this.changed.fire();
+            return undefined;
+        }
+        const s = response.summary;
+        this.summary = s;
+        this.setStatus('ready');
+        const skipped = Object.values(s.skipped).reduce((sum, n) => sum + (n ?? 0), 0);
+        this.deps.log.info(
+            `Claude Code usage: read ${s.read} of ${s.files} files in ${s.roots} ${s.roots === 1 ? 'root' : 'roots'}, ` +
+                `${s.records} records, ${skipped} skipped, in ${s.elapsedMs} ms${s.cancelled ? ', cancelled' : ''}`,
+        );
+        if (s.read > 0) {
+            this.changed.fire();
+        }
+        return s;
+    }
+
+    /** One request to the worker; a failure becomes a status and a log line, never a throw. */
+    private async ask(request: Ask): Promise<UsageWorkerResponse | undefined> {
+        if (this.disposed) {
+            return undefined;
+        }
+        this.host ??= this.deps.createHost();
+        this.clock.clearTimeout(this.idleTimer);
+        this.inFlight++;
+        try {
+            const response = await this.host.send({ ...request, id: 0 });
+            switch (response.type) {
+                case 'unavailable':
+                    this.runtime = { node: response.node, electron: response.electron };
+                    this.deps.log.warn(
+                        `Claude Code usage needs node:sqlite, which this editor's runtime lacks (Node ${response.node})`,
+                    );
+                    this.setStatus('no-sqlite');
+                    return undefined;
+                case 'failed':
+                    if (response.failure === 'store-read-only') {
+                        this.deps.log.warn('Claude Code usage: the history was created by a newer LLM Tokenizer, so it is read-only here');
+                        this.setStatus('read-only');
+                    } else {
+                        this.deps.log.warn(`Claude Code usage: ${response.failure} (${response.errorName})`);
+                        this.setStatus('failing');
+                    }
+                    return undefined;
+                default:
+                    return response;
+            }
+        } catch (error) {
+            // The worker died, refused to restart, or went silent; the next
+            // trigger tries again.
+            if (!this.disposed && this.enabled) {
+                this.deps.log.warn(`Claude Code usage: ${error instanceof WorkerHostError ? error.message : 'the worker failed'}`);
+                this.setStatus('failing');
+            }
+            return undefined;
+        } finally {
+            this.inFlight--;
+            this.armIdle();
+        }
+    }
+
+    /** Let an idle worker go: its history closed first, then the thread ended. */
+    private armIdle(): void {
+        this.clock.clearTimeout(this.idleTimer);
+        if (!this.host?.running || this.holders > 0 || this.inFlight > 0 || this.disposed) {
+            return;
+        }
+        const after = this.enabled ? IDLE_MS : 0;
+        this.idleTimer = this.clock.setTimeout(() => void this.release(), after);
+    }
+
+    private async release(): Promise<void> {
+        const host = this.host;
+        if (!host?.running || this.holders > 0 || this.inFlight > 0 || this.importing) {
+            return;
+        }
+        this.inFlight++;
+        try {
+            await host.send({ type: 'close', id: 0 });
+        } catch {
+            // Gone already.
+        } finally {
+            this.inFlight--;
+        }
+        if (this.holders === 0 && this.inFlight === 0 && !this.importing) {
+            host.stop();
+        }
+    }
+
+    private restartWatchers(): void {
+        this.stopWatchers();
+        if (!this.enabled || this.holders === 0) {
+            return;
+        }
+        const settings = this.deps.readSettings();
+        const resolved = resolveRoots({ ...this.deps.rootInputs(), setting: settings.dataDirectory, editorEnvironment: settings.editorEnvironment });
+        this.watchers = resolved.roots.map(root => this.deps.watch(path.join(root.path, 'projects'), () => this.hint()));
+    }
+
+    private stopWatchers(): void {
+        for (const watcher of this.watchers) {
+            watcher.dispose();
+        }
+        this.watchers = [];
+        this.clock.clearTimeout(this.hintTimer);
+        this.hintDeadline = 0;
+    }
+
+    /** A transcript changed: import soon, coalescing a burst, never later than the ceiling. */
+    private hint(): void {
+        if (!this.enabled) {
+            return;
+        }
+        const now = this.clock.now();
+        if (this.hintDeadline === 0) {
+            this.hintDeadline = now + HINT_CEILING_MS;
+        }
+        this.clock.clearTimeout(this.hintTimer);
+        const generation = this.generation;
+        this.hintTimer = this.clock.setTimeout(
+            () => {
+                this.hintDeadline = 0;
+                if (generation === this.generation) {
+                    void this.runImport();
+                }
+            },
+            Math.max(0, Math.min(HINT_DEBOUNCE_MS, this.hintDeadline - now)),
+        );
+    }
+
+    private setStatus(status: UsageStatus): void {
+        if (status !== this.currentStatus) {
+            this.currentStatus = status;
+            this.changed.fire();
+        }
+    }
+}
+
+/**
+ * The service as the extension runs it, with its two commands. In the test
+ * host, roots are confined to the fixtures; see `machineRootInputs`.
+ */
+export function registerClaudeCodeUsage(
+    context: vscode.ExtensionContext,
+    log: vscode.LogOutputChannel,
+    startupSettled: Thenable<unknown>,
+): UsageService {
+    const underTest = context.extensionMode === vscode.ExtensionMode.Test;
+    const fixtures = path.join(context.extensionPath, 'test', 'fixtures');
+    const service = new UsageService({
+        log,
+        storeFile: path.join(context.globalStorageUri.fsPath, 'claude-code-usage', 'usage.sqlite'),
+        readSettings: () => {
+            const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+            return {
+                enabled: config.get<boolean>('enableClaudeCodeUsage', false),
+                dataDirectory: config.get<string>('claudeCodeDataDirectory', ''),
+                // The user-level value only: get() returned a cloned repo's
+                // workspace value where Claude Code is not installed.
+                editorEnvironment: vscode.workspace.getConfiguration('claudeCode').inspect('environmentVariables')?.globalValue,
+            };
+        },
+        rootInputs: () => machineRootInputs(underTest ? { fixtures } : undefined),
+        createHost: () =>
+            new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(path.join(context.extensionPath, 'out', 'usageWorker.js'), {
+                name: 'Claude Code usage reader',
+                fallback: 'usage is not updated',
+                log,
+                resourceLimits: { maxOldGenerationSizeMb: 128 },
+            }),
+        watch: (projectsFolder, onHint) => {
+            const watcher = vscode.workspace.createFileSystemWatcher(
+                new vscode.RelativePattern(vscode.Uri.file(projectsFolder), '**/*.jsonl'),
+                false,
+                false,
+                true,
+            );
+            return vscode.Disposable.from(watcher, watcher.onDidCreate(onHint), watcher.onDidChange(onHint));
+        },
+        startupSettled,
+    });
+
+    context.subscriptions.push(
+        service,
+        vscode.workspace.onDidChangeConfiguration(event => {
+            if (affectsUsage(event)) {
+                service.settingsChanged();
+            }
+        }),
+        vscode.commands.registerCommand('llm-tokenizer.refreshClaudeCodeUsage', () => refreshCommand(service)),
+        vscode.commands.registerCommand('llm-tokenizer.clearClaudeCodeUsageHistory', () => clearCommand(service)),
+    );
+    return service;
+}
+
+async function refreshCommand(service: UsageService): Promise<void> {
+    if (service.status === 'off') {
+        const open = await vscode.window.showInformationMessage('Claude Code usage is off.', 'Open Settings');
+        if (open) {
+            await vscode.commands.executeCommand('workbench.action.openSettings', `${CONFIG_SECTION}.enableClaudeCodeUsage`);
+        }
+        return;
+    }
+    const summary = await service.refresh();
+    if (summary) {
+        void vscode.window.showInformationMessage(
+            `LLM Tokenizer: read ${summary.read} changed of ${summary.files} Claude Code transcripts.`,
+        );
+    } else if (service.status !== 'ready') {
+        void vscode.window.showWarningMessage('LLM Tokenizer: Claude Code usage could not be refreshed; see the log.');
+    }
+}
+
+async function clearCommand(service: UsageService): Promise<void> {
+    const choice = await vscode.window.showWarningMessage(
+        'Clear the Claude Code usage history LLM Tokenizer keeps?',
+        {
+            modal: true,
+            detail:
+                "Claude Code's own records are not touched. Those still on disk are read again at the next refresh; anything older is gone for good.",
+        },
+        'Clear History',
+    );
+    if (choice !== 'Clear History') {
+        return;
+    }
+    const cleared = await service.clear();
+    void (cleared
+        ? vscode.window.showInformationMessage('LLM Tokenizer: Claude Code usage history cleared.')
+        : vscode.window.showWarningMessage('LLM Tokenizer: the history could not be cleared; see the log.'));
+}

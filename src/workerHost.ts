@@ -50,6 +50,8 @@ export interface WorkerHostOptions {
     onExit?: () => void;
     /** Injectable so a test can let the crash window run out without waiting. */
     now?: () => number;
+    /** Passed to each Worker: caps its V8 heap, not its native memory. */
+    resourceLimits?: { maxOldGenerationSizeMb?: number };
 }
 
 interface Pending<Response> {
@@ -86,9 +88,23 @@ export class WorkerHost<Request extends { id: number }, Response extends { id: n
 
     public dispose(): void {
         this.disposed = true;
+        this.stop();
+    }
+
+    /**
+     * End the current worker, as dispose does, but leave the host usable: the
+     * next request starts a new worker. For a caller that lets an idle worker
+     * go. Not a crash, so it never counts against the budget.
+     */
+    public stop(): void {
         this.failAllPending(new WorkerHostError(`The ${this.options.name} was shut down`));
         void this.worker?.terminate();
         this.worker = undefined;
+    }
+
+    /** Whether a worker is running now. */
+    public get running(): boolean {
+        return this.worker !== undefined;
     }
 
     /**
@@ -140,7 +156,7 @@ export class WorkerHost<Request extends { id: number }, Response extends { id: n
             );
         }
 
-        const worker = new Worker(this.workerPath);
+        const worker = new Worker(this.workerPath, { resourceLimits: this.options.resourceLimits });
         worker.on('message', (response: Response) => {
             const pending = this.pending.get(response.id);
             if (pending) {

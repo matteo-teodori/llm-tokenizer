@@ -271,4 +271,15 @@ suite('usage history store', () => {
         store.releaseLease('import', 'window-c');
         assert.ok(store.acquireLease('import', 'window-b', 1), 'a released lease stayed held');
     });
+
+    test('a lease whose holder has exited is taken over at once', () => {
+        // A window closed mid-import, or a test run that ended: no need to
+        // wait out the heartbeat.
+        let holderAlive = true;
+        const store = ready(open({ isAlive: () => holderAlive }));
+        assert.ok(store.acquireLease('import', 'window-a', 1));
+        assert.ok(!store.acquireLease('import', 'window-b', 1));
+        holderAlive = false;
+        assert.ok(store.acquireLease('import', 'window-b', 1), 'a dead holder kept the lease');
+    });
 });

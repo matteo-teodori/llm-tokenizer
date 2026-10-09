@@ -139,17 +139,23 @@ suite('extension', () => {
         assert.deepStrictEqual(settingsChangeEffects(changed(`${CONFIG}.downloadTokenizers`)), {
             rescan: false,
             download: true,
+            usage: false,
         });
         for (const key of ['ignoreGitignoredFiles', 'defaultModel', 'statusBarDisplay', 'enableProjectScan']) {
             assert.deepStrictEqual(
                 settingsChangeEffects(changed(`${CONFIG}.${key}`)),
-                { rescan: true, download: false },
+                { rescan: true, download: false, usage: false },
                 key,
             );
+        }
+        // Claude Code usage reads no workspace file, so it never rescans.
+        for (const key of ['llm-tokenizer.enableClaudeCodeUsage', 'llm-tokenizer.claudeCodeDataDirectory', 'claudeCode.environmentVariables']) {
+            assert.deepStrictEqual(settingsChangeEffects(changed(key)), { rescan: false, download: false, usage: true }, key);
         }
         assert.deepStrictEqual(settingsChangeEffects(changed('editor.fontSize')), {
             rescan: false,
             download: false,
+            usage: false,
         });
 
         // A setting added later must be given an effect here too, or changing
@@ -159,7 +165,7 @@ suite('extension', () => {
         };
         for (const key of Object.keys(manifest.contributes.configuration.properties)) {
             const effects = settingsChangeEffects(changed(key));
-            assert.ok(effects.rescan || effects.download, `changing ${key} has no effect`);
+            assert.ok(effects.rescan || effects.download || effects.usage, `changing ${key} has no effect`);
         }
     });
 

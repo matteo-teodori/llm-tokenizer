@@ -101,6 +101,8 @@ export interface OpenOptions {
     attempts?: number;
     /** Treat the file as being on a network filesystem (tests). */
     forceRollbackJournal?: boolean;
+    /** Whether a lease holder's process still runs (tests). */
+    isAlive?: (pid: number) => boolean;
 }
 
 /** A file's checkpoint: how far it has been read, and what it was. */
@@ -310,6 +312,7 @@ export class UsageStore {
         readonly file: string,
         readonly readOnly: boolean,
         private readonly now: () => number,
+        private readonly isAlive: (pid: number) => boolean,
     ) {
         this.upsertStatement = db.prepare(UPSERT_REQUEST);
     }
@@ -355,7 +358,7 @@ export class UsageStore {
                 db.close();
                 db = new sqlite.DatabaseSync(file, { readOnly: true });
                 db.exec('PRAGMA busy_timeout = 5000');
-                return { status: 'read-only', store: new UsageStore(db, file, true, now), reason: 'newer-schema', schema };
+                return { status: 'read-only', store: new UsageStore(db, file, true, now, alive(options)), reason: 'newer-schema', schema };
             }
 
             if (schema > 0) {
@@ -367,7 +370,7 @@ export class UsageStore {
 
             const journal = UsageStore.configure(db, file, options);
             UsageStore.migrate(db, file, schema);
-            return { status: 'ready', store: new UsageStore(db, file, false, now), journal };
+            return { status: 'ready', store: new UsageStore(db, file, false, now, alive(options)), journal };
         } catch (error) {
             db.close();
             throw error;
@@ -736,20 +739,24 @@ export class UsageStore {
      * Hold `role` (one importing window at a time), or keep holding it.
      *
      * Taken when it is free, when its heartbeat is older than
-     * LEASE_TAKEOVER_MS, or when its holder runs an older parser: a window
-     * that was not reloaded after an update must not write rows the newer
-     * parser would replace.
+     * LEASE_TAKEOVER_MS, when its holder's process has exited, or when its
+     * holder runs an older parser: a window that was not reloaded after an
+     * update must not write rows the newer parser would replace.
      *
      * @returns whether `holder` now holds it.
      */
     acquireLease(role: string, holder: string, parserVersion: number): boolean {
         return this.transaction(() => {
             const now = this.now();
-            const current = this.db.prepare('SELECT holder, parser_version, heartbeat FROM lease WHERE role = ?').get(role) as
-                | { holder: string; parser_version: number; heartbeat: number }
+            const current = this.db.prepare('SELECT holder, pid, parser_version, heartbeat FROM lease WHERE role = ?').get(role) as
+                | { holder: string; pid: number; parser_version: number; heartbeat: number }
                 | undefined;
             const mine = current?.holder === holder;
-            const free = !current || now - current.heartbeat > LEASE_TAKEOVER_MS || current.parser_version < parserVersion;
+            const free =
+                !current ||
+                now - current.heartbeat > LEASE_TAKEOVER_MS ||
+                current.parser_version < parserVersion ||
+                !this.isAlive(current.pid);
             if (!mine && !free) {
                 return false;
             }
@@ -826,6 +833,21 @@ function toCheckpoint(row: Record<string, unknown>): FileCheckpoint {
         malformedLines: row.malformed_lines as number,
         newestVersion: row.newest_version as string | null,
     };
+}
+
+function alive(options: OpenOptions): (pid: number) => boolean {
+    return options.isAlive ?? processAlive;
+}
+
+/** Whether `pid` runs on this machine: signal 0 checks without signalling. */
+function processAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        // It exists, but belongs to someone else.
+        return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
 }
 
 /** SQLite's primary result code from an error `node:sqlite` threw, if any. */

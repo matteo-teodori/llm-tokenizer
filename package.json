@@ -48,7 +48,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
-      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed."
+      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records outside the workspace are read too."
     },
     "virtualWorkspaces": {
       "supported": "limited",
@@ -80,6 +80,16 @@
         "command": "llm-tokenizer.clearTokenizerCache",
         "title": "Clear Downloaded Tokenizers",
         "category": "LLM Tokenizer"
+      },
+      {
+        "command": "llm-tokenizer.refreshClaudeCodeUsage",
+        "title": "Refresh Claude Code Usage",
+        "category": "LLM Tokenizer"
+      },
+      {
+        "command": "llm-tokenizer.clearClaudeCodeUsageHistory",
+        "title": "Clear Claude Code Usage History",
+        "category": "LLM Tokenizer"
       }
     ],
     "menus": {
@@ -93,6 +103,12 @@
         {
           "command": "llm-tokenizer.countTokens",
           "group": "1_modification@99"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "llm-tokenizer.refreshClaudeCodeUsage",
+          "when": "config.llm-tokenizer.enableClaudeCodeUsage"
         }
       ]
     },
@@ -436,6 +452,18 @@
           "type": "boolean",
           "default": true,
           "description": "Download a model's real tokenizer the first time it is needed, so counts are exact instead of estimated. Only applies to models whose tokenizer is published; Claude and Grok have none, and stay estimated either way. Downloads come from huggingface.co, are cached on disk, and never include your code."
+        },
+        "llm-tokenizer.enableClaudeCodeUsage": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Show how many tokens Claude Code processed, read from its own session records on this machine (the projects folder in ~/.claude, or in CLAUDE_CONFIG_DIR). Only token counts, model ids, times, session ids and project folders are kept, in a database in this extension's own storage. Prompts, responses and tool contents are never kept, and nothing is sent anywhere. The history is kept after Claude Code deletes its own records; Clear Claude Code Usage History removes it."
+        },
+        "llm-tokenizer.claudeCodeDataDirectory": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Claude Code's configuration folder, the one that contains projects/, for when Claude Code's own rules would not find it. Every folder those rules find is read as well: the CLAUDE_CONFIG_DIR of its environmentVariables setting, CLAUDE_CONFIG_DIR, the one in ~/.claude/settings.json, then ~/.claude. Must be an absolute path."
         }
       }
     }
