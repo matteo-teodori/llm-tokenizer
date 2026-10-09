@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import {
+    CLOSE_GRACE_MS,
     FIRST_IMPORT_MAX_WAIT_MS,
     HINT_CEILING_MS,
     HINT_DEBOUNCE_MS,
@@ -95,6 +96,7 @@ class FakeHost implements UsageHost {
     /** What the service gave as its crash callback. */
     onCrash: () => void = () => undefined;
     stopped = 0;
+    disposed = 0;
     running = false;
     /** Answers each request; an import can be held open by the test. */
     answer: (request: UsageWorkerRequest) => Promise<UsageWorkerResponse> = request => Promise.resolve(defaultAnswer(request));
@@ -115,6 +117,7 @@ class FakeHost implements UsageHost {
     }
 
     dispose(): void {
+        this.disposed++;
         this.running = false;
     }
 }
@@ -383,7 +386,11 @@ suite('usage service', () => {
         await settle();
         const held = service.hold();
         set({ enabled: false });
-        assert.deepStrictEqual([service.status, calls.watching, host.stopped], ['off', 0, 1]);
+        // The history closed first, the thread ended after: ended inside a
+        // SQLite call, it would be ended mid-write.
+        assert.deepStrictEqual([service.status, calls.watching, host.sent.at(-1), host.stopped], ['off', 0, 'close', 0]);
+        await settle();
+        assert.strictEqual(host.stopped, 1);
         const sent = host.sent.length;
         await clock.advance(2 * HOURLY_MS);
         assert.strictEqual(host.sent.length, sent, 'it went on importing while off');
@@ -395,6 +402,53 @@ suite('usage service', () => {
         assert.strictEqual(calls.watching, 1);
         assert.strictEqual(host.sent.at(-1), 'import');
         held.dispose();
+    });
+
+    test('a worker that does not answer the close is ended all the same, soon after', async () => {
+        const { clock, host, set } = make();
+        await settle();
+        host.answer = request => (request.type === 'close' ? new Promise(() => undefined) : Promise.resolve(defaultAnswer(request)));
+        set({ enabled: false });
+        await clock.advance(CLOSE_GRACE_MS - 1);
+        assert.strictEqual(host.stopped, 0);
+        await clock.advance(1);
+        assert.strictEqual(host.stopped, 1);
+    });
+
+    test('turned on again before the close is answered, the worker is kept for the new start', async () => {
+        const { host, set } = make();
+        await settle();
+        let answerClose!: () => void;
+        host.answer = request =>
+            request.type === 'close'
+                ? new Promise(resolve => (answerClose = () => resolve(defaultAnswer(request))))
+                : Promise.resolve(defaultAnswer(request));
+        set({ enabled: false });
+        set({ enabled: true });
+        answerClose();
+        await settle();
+        assert.deepStrictEqual([host.stopped, host.sent.at(-1)], [0, 'import']);
+    });
+
+    test('disposed, it closes the history, then ends the worker for good', async () => {
+        const { service, host } = make();
+        await settle();
+        service.dispose();
+        assert.deepStrictEqual([host.sent.at(-1), host.disposed], ['close', 0]);
+        await settle();
+        assert.strictEqual(host.disposed, 1);
+    });
+
+    test('its start opens once the startup scan settles, or after 30 s, and the status item waits on it too', async () => {
+        const { service, clock } = make({ startupSettled: new Promise<void>(() => undefined) });
+        let started = false;
+        void service.whenStarted().then(() => (started = true));
+        await clock.advance(FIRST_IMPORT_MAX_WAIT_MS - 1);
+        assert.ok(!started);
+        await clock.advance(1);
+        assert.ok(started);
+        // One gate for the first import and the item alike.
+        assert.strictEqual(service.whenStarted(), service.whenStarted());
     });
 
     test('Clear works while off, and lets the worker go at once', async () => {

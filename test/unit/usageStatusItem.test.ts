@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { modelById } from '../../src/tokenizer/registry';
-import { parseLiveSession, readLiveSessions, type LiveSession } from '../../src/usage/liveSessions';
+import { RECENT_MS, parseLiveSession, readLiveSessions, type LiveSession } from '../../src/usage/liveSessions';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import type { ResolvedRoots } from '../../src/usage/roots';
 import { UsageStatusItem, contextWindow, describeLive, type LiveInput, type StatusItemService } from '../../src/usage/statusItem';
@@ -109,18 +109,29 @@ suite('usage status item: running sessions', () => {
 
     test('only the fields it needs are kept, and a dead local process is no live session', () => {
         const alive = () => true;
-        assert.deepStrictEqual(parseLiveSession(record({}), alive, 'darwin'), {
+        // Long after the record's own update.
+        const later = 1_791_000_000_000 + RECENT_MS + 1;
+        assert.deepStrictEqual(parseLiveSession(record({}), alive, 'darwin', later), {
             sessionId: 'abc-123',
             cwd: '/repo',
             status: 'busy',
             updatedAt: 1_791_000_000_000,
         });
-        assert.strictEqual(parseLiveSession(record({}), () => false, 'darwin'), undefined, 'a dead pid read as live');
+        assert.strictEqual(parseLiveSession(record({}), () => false, 'darwin', later), undefined, 'a dead pid read as live');
+        assert.strictEqual(parseLiveSession(record({ updatedAt: undefined }), () => false, 'darwin', later), undefined);
         // Another domain's pid means nothing here: the file is taken at its word.
-        assert.ok(parseLiveSession(record({ pidDomain: 'linux' }), () => false, 'darwin'));
+        assert.ok(parseLiveSession(record({ pidDomain: 'linux' }), () => false, 'darwin', later));
         for (const bad of [record({ cwd: 'relative' }), record({ sessionId: 7 }), record({ cwd: '' }), '[1]', 'not json']) {
-            assert.strictEqual(parseLiveSession(bad, alive, 'darwin'), undefined, bad.slice(0, 40));
+            assert.strictEqual(parseLiveSession(bad, alive, 'darwin', later), undefined, bad.slice(0, 40));
         }
+    });
+
+    test('a session updated in the last 15 minutes is live whatever its pid says here', () => {
+        // A Flatpak editor, or a container's ~/.claude: the pid is another
+        // namespace's, and names no process here while the session runs.
+        const updated = 1_791_000_000_000;
+        assert.ok(parseLiveSession(record({}), () => false, 'darwin', updated + RECENT_MS));
+        assert.strictEqual(parseLiveSession(record({}), () => false, 'darwin', updated + RECENT_MS + 1), undefined);
     });
 
     test('only <pid>.json files are read, newest session first, one entry per session', async () => {
@@ -152,7 +163,9 @@ suite('usage status item: the item', () => {
         });
     }
 
-    function harness(options: { shown?: boolean; sessions?: LiveSession[]; context?: Awaited<ReturnType<StatusItemService['liveContext']>> } = {}) {
+    function harness(
+        options: { shown?: boolean; sessions?: LiveSession[]; context?: Awaited<ReturnType<StatusItemService['liveContext']>>; started?: Promise<void> } = {},
+    ) {
         const calls = { readLive: 0, holds: 0, released: 0, liveContext: 0 };
         const emitter = new vscode.EventEmitter<void>();
         const resolved: ResolvedRoots = { candidates: [], roots: [{ path: '/claude', source: 'default', exists: true }], refused: [], historyDisabled: false, largeContextDisabled: false };
@@ -168,6 +181,7 @@ suite('usage status item: the item', () => {
                 return Promise.resolve('context' in options ? options.context : { latest: latest(), compactions: [] });
             },
             report: () => Promise.resolve(undefined),
+            whenStarted: () => options.started ?? Promise.resolve(),
         };
         let shown = options.shown ?? true;
         const items: ReturnType<typeof fakeItem>[] = [];
@@ -192,6 +206,29 @@ suite('usage status item: the item', () => {
 
     const session = (cwd: string): LiveSession => ({ sessionId: 's1', cwd, status: 'busy', updatedAt: 1 });
 
+    /** Let the item's start and its first look run. */
+    const settle = async () => {
+        for (let i = 0; i < 5; i++) {
+            await new Promise<void>(resolve => setImmediate(resolve));
+        }
+    };
+
+    test('nothing is held, read or shown before the service has started', async () => {
+        // It starts once the startup project scan has settled: never in the
+        // activation tick, where the item is created.
+        let start!: () => void;
+        const started = new Promise<void>(resolve => (start = resolve));
+        const { statusItem, calls, items, emitter } = harness({ sessions: [session('/work/repo')], started });
+        emitter.fire();
+        await statusItem.refresh();
+        await settle();
+        assert.deepStrictEqual([calls.holds, calls.readLive, calls.liveContext, items[0]?.visible], [0, 0, 0, false]);
+        start();
+        await settle();
+        assert.deepStrictEqual([calls.holds, calls.readLive, calls.liveContext, items[0]?.visible], [1, 1, 1, true]);
+        statusItem.dispose();
+    });
+
     test('off, it creates nothing and reads nothing', async () => {
         const { statusItem, calls, items, emitter } = harness({ shown: false, sessions: [session('/work/repo')] });
         emitter.fire();
@@ -202,6 +239,7 @@ suite('usage status item: the item', () => {
 
     test('a session running in this workspace is shown, and one elsewhere is not', async () => {
         const here = harness({ sessions: [session('/work/repo/.claude/worktrees/feat')] });
+        await settle();
         await here.statusItem.refresh();
         assert.ok(here.items[0].visible);
         assert.strictEqual(here.items[0].text, '$(warning) 850.0K · 85%');
@@ -211,6 +249,7 @@ suite('usage status item: the item', () => {
         here.statusItem.dispose();
 
         const elsewhere = harness({ sessions: [session('/work/other')] });
+        await settle();
         await elsewhere.statusItem.refresh();
         assert.deepStrictEqual([elsewhere.items[0].visible, elsewhere.calls.liveContext], [false, 0]);
         elsewhere.statusItem.dispose();
@@ -218,6 +257,7 @@ suite('usage status item: the item', () => {
 
     test('a failure shows a neutral dash; turned off, the item goes and the hold with it', async () => {
         const { statusItem, items, calls, setShown } = harness({ sessions: [session('/work/repo')], context: undefined });
+        await settle();
         await statusItem.refresh();
         assert.deepStrictEqual([items[0].text, items[0].backgroundColor, items[0].visible], ['$(comment-discussion) —', undefined, true]);
         setShown(false);

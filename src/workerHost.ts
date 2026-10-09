@@ -17,13 +17,18 @@
  *   tell a dying worker from a failed request by comparing it before and
  *   after — which also sees a crash when there was no worker beforehand, where
  *   comparing Worker objects compared undefined with undefined.
+ * - **Silence, not duration.** A request is given up when the worker has sent
+ *   nothing at all for the timeout, and any message restarts every request's
+ *   wait. A worker that reports progress, as the usage worker does through a
+ *   long first import, is never cut off for being slow, and a request queued
+ *   behind another is not timed out by the other's length.
  */
 
 import { Worker } from 'worker_threads';
 import type * as vscode from 'vscode';
 
-/** Give up rather than leaking a promise if the worker goes silent. */
-const REQUEST_TIMEOUT_MS = 120_000;
+/** Give up rather than leaking a promise if the worker goes silent this long. */
+const SILENCE_TIMEOUT_MS = 120_000;
 
 /** Worker deaths within CRASH_WINDOW_MS after which the worker is not restarted. */
 const MAX_WORKER_CRASHES = 3;
@@ -52,11 +57,15 @@ export interface WorkerHostOptions {
     now?: () => number;
     /** Passed to each Worker: caps its V8 heap, not its native memory. */
     resourceLimits?: { maxOldGenerationSizeMb?: number };
+    /** How long the worker may send nothing while a request waits; tests shorten it. */
+    silenceTimeoutMs?: number;
 }
 
 interface Pending<Response> {
     resolve(value: Response): void;
     reject(error: Error): void;
+    /** The worker sent something: start the wait again. */
+    heard(): void;
 }
 
 export class WorkerHost<Request extends { id: number }, Response extends { id: number }> {
@@ -119,10 +128,15 @@ export class WorkerHost<Request extends { id: number }, Response extends { id: n
         const id = ++this.nextId;
 
         return new Promise<Response>((resolve, reject) => {
-            const timer = setTimeout(() => {
-                this.pending.delete(id);
-                reject(new WorkerHostError(`The ${this.options.name} did not respond in time`));
-            }, REQUEST_TIMEOUT_MS);
+            let timer: NodeJS.Timeout | undefined;
+            const wait = () => {
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    this.pending.delete(id);
+                    reject(new WorkerHostError(`The ${this.options.name} did not respond in time`));
+                }, this.options.silenceTimeoutMs ?? SILENCE_TIMEOUT_MS);
+            };
+            wait();
 
             this.pending.set(id, {
                 resolve: response => {
@@ -133,6 +147,7 @@ export class WorkerHost<Request extends { id: number }, Response extends { id: n
                     clearTimeout(timer);
                     reject(error);
                 },
+                heard: wait,
             });
 
             worker.postMessage({ ...request, id });
@@ -162,6 +177,10 @@ export class WorkerHost<Request extends { id: number }, Response extends { id: n
             if (pending) {
                 this.pending.delete(response.id);
                 pending.resolve(response);
+            }
+            // Any message, a progress one included, shows the worker alive.
+            for (const waiting of this.pending.values()) {
+                waiting.heard();
             }
         });
         worker.on('error', (error: unknown) => {

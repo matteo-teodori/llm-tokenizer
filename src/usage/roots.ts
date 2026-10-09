@@ -9,7 +9,8 @@
  * `env.CLAUDE_CONFIG_DIR` in `~/.claude/settings.json`. A terminal CLI can
  * write somewhere else again, so every distinct root that exists is read; the
  * global key makes any overlap harmless. Only `<root>/projects` is ever read
- * under a root: `~/.claude/ide` holds auth lock files.
+ * under a root, and from a root's `settings.json` only its `env` entries for
+ * the three variables below: `~/.claude/ide` holds auth lock files.
  */
 
 import * as fs from 'fs';
@@ -50,7 +51,9 @@ export interface ResolvedRoots {
     refused: RootCandidate[];
     /**
      * CLAUDE_CODE_SKIP_PROMPT_HISTORY is set where Claude Code would see it:
-     * then it keeps no transcripts, and there is nothing to read.
+     * the environment, Claude Code's environmentVariables setting, or the
+     * `env` of a root's settings.json. Then it keeps no transcripts, and
+     * there is nothing to read.
      */
     historyDisabled: boolean;
     /** CLAUDE_CODE_DISABLE_1M_CONTEXT is set there: every model is held to a 200K window. */
@@ -72,16 +75,21 @@ export function machineRootInputs(test?: { fixtures: string }): Omit<RootInputs,
     };
 }
 
-/** settings.json is read for one key; a file this large is not a settings file. */
+/** settings.json is read for three keys; a file this large is not a settings file. */
 const MAX_SETTINGS_BYTES = 1 << 20;
+
+/** The only `env` entries of a settings.json that are kept. */
+const SETTINGS_VARIABLES = ['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_SKIP_PROMPT_HISTORY', 'CLAUDE_CODE_DISABLE_1M_CONTEXT'] as const;
+type SettingsEnv = Partial<Record<(typeof SETTINGS_VARIABLES)[number], string>>;
 
 /** The roots to read, with every candidate and where it came from. */
 export function resolveRoots(inputs: RootInputs): ResolvedRoots {
+    const homeSettings = settingsEnv(path.join(inputs.home, '.claude', 'settings.json'));
     const proposed: { path: string | null; source: RootSource }[] = [
         { path: inputs.setting.trim() || null, source: 'setting' },
         { path: editorConfigDir(inputs.editorEnvironment, inputs.platform), source: 'editor-environment' },
         { path: inputs.env.CLAUDE_CONFIG_DIR ?? null, source: 'process-environment' },
-        { path: settingsConfigDir(path.join(inputs.home, '.claude', 'settings.json')), source: 'claude-settings' },
+        { path: homeSettings.CLAUDE_CONFIG_DIR ?? null, source: 'claude-settings' },
         { path: path.join(inputs.home, '.claude'), source: 'default' },
     ];
 
@@ -111,7 +119,11 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
             roots.push(candidate);
         }
     }
-    const flag = (name: string) => [inputs.env[name], editorVariable(inputs.editorEnvironment, inputs.platform, name)].some(isTruthy);
+    // A root is a configuration folder, read with its own settings.json;
+    // ~/.claude's is among them whenever it exists.
+    const rootSettings = roots.map(root => settingsEnv(path.join(root.path, 'settings.json')));
+    const flag = (name: Exclude<(typeof SETTINGS_VARIABLES)[number], 'CLAUDE_CONFIG_DIR'>) =>
+        [inputs.env[name], editorVariable(inputs.editorEnvironment, inputs.platform, name), ...rootSettings.map(e => e[name])].some(isTruthy);
     return {
         candidates,
         roots,
@@ -189,21 +201,29 @@ function editorVariable(
     return found;
 }
 
-/** `env.CLAUDE_CONFIG_DIR` from Claude Code's settings file, and nothing else. */
-function settingsConfigDir(file: string): string | null {
+/** The `env` entries of a Claude Code settings file that are kept, and nothing else from it. */
+function settingsEnv(file: string): SettingsEnv {
+    const kept: SettingsEnv = {};
     try {
         // A regular file only: reading a FIFO would block the extension host.
         const stat = fs.statSync(file);
         if (!stat.isFile() || stat.size > MAX_SETTINGS_BYTES) {
-            return null;
+            return kept;
         }
         const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
         const env = (parsed as { env?: unknown } | null)?.env;
-        const value = typeof env === 'object' && env !== null ? (env as Record<string, unknown>).CLAUDE_CONFIG_DIR : undefined;
-        return typeof value === 'string' ? value : null;
+        if (typeof env === 'object' && env !== null) {
+            for (const name of SETTINGS_VARIABLES) {
+                const value = (env as Record<string, unknown>)[name];
+                if (typeof value === 'string') {
+                    kept[name] = value;
+                }
+            }
+        }
     } catch {
-        return null;
+        // Missing, unreadable or not JSON: nothing set there.
     }
+    return kept;
 }
 
 function isDirectory(candidate: string): boolean {
@@ -214,9 +234,14 @@ function isDirectory(candidate: string): boolean {
     }
 }
 
+/**
+ * The path as the file system holds it. The native call returns the case on
+ * disk, so a folder typed in another case on Windows or macOS, as a picked
+ * folder or the drive letter often is, is still one root.
+ */
 function realPath(candidate: string): string {
     try {
-        return fs.realpathSync(candidate);
+        return fs.realpathSync.native(candidate);
     } catch {
         return candidate;
     }

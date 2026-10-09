@@ -48,4 +48,10 @@ export type UsageWorkerResponse =
     | { type: 'closed'; id: number }
     /** This runtime has no `node:sqlite` binding. */
     | { type: 'unavailable'; id: number; node: string; electron: string | null }
-    | { type: 'failed'; id: number; failure: UsageFailure; errorName: string };
+    | { type: 'failed'; id: number; failure: UsageFailure; errorName: string }
+    /**
+     * Sent every few seconds while the worker works, with an id no request
+     * has: the host gives up on a worker that sends nothing for two minutes,
+     * and a first import can take longer than that.
+     */
+    | { type: 'progress'; id: 0 };

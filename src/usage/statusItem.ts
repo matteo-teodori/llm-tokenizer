@@ -133,7 +133,7 @@ export interface StatusItemDeps {
     createItem(): vscode.StatusBarItem;
 }
 
-export type StatusItemService = Pick<UsageService, 'roots' | 'liveContext' | 'report' | 'onDidChange' | 'hold'>;
+export type StatusItemService = Pick<UsageService, 'roots' | 'liveContext' | 'report' | 'onDidChange' | 'hold' | 'whenStarted'>;
 
 export class UsageStatusItem implements vscode.Disposable {
     private item: vscode.StatusBarItem | undefined;
@@ -154,13 +154,21 @@ export class UsageStatusItem implements vscode.Disposable {
     settingsChanged(): void {
         const shown = this.deps.shown();
         if (shown && !this.item) {
-            this.item = this.deps.createItem();
-            this.item.name = 'LLM Tokenizer: Claude Code usage';
-            this.item.command = 'llm-tokenizer.showClaudeCodeUsage';
-            // Resident while shown: watcher hints keep the session current.
-            this.hold = this.service.hold();
-            this.timer = setInterval(() => void this.refresh(), LIVE_TICK_MS);
-            void this.refresh();
+            const item = this.deps.createItem();
+            this.item = item;
+            item.name = 'LLM Tokenizer: Claude Code usage';
+            item.command = 'llm-tokenizer.showClaudeCodeUsage';
+            // Nothing in the activation tick: the first look waits for the
+            // service's start, as its first import does.
+            void this.service.whenStarted().then(() => {
+                if (item !== this.item) {
+                    return;
+                }
+                // Resident while shown: watcher hints keep the session current.
+                this.hold = this.service.hold();
+                this.timer = setInterval(() => void this.refresh(), LIVE_TICK_MS);
+                void this.refresh();
+            });
         } else if (!shown && this.item) {
             this.remove();
         }
@@ -189,7 +197,8 @@ export class UsageStatusItem implements vscode.Disposable {
     private async look(): Promise<void> {
         const item = this.item;
         const resolved = this.service.roots;
-        if (!item || !resolved) {
+        // Not before its start, whatever asks.
+        if (!item || !resolved || !this.hold) {
             return;
         }
         const folders = this.deps.workspaceFolders();

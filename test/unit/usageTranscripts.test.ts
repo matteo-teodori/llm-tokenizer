@@ -8,6 +8,7 @@ import { importPaths, importRoots, importUnderLease } from '../../src/usage/impo
 import { machineRootInputs, resolveRoots } from '../../src/usage/roots';
 import { UsageStore, loadSqlite, type OpenOptions } from '../../src/usage/store';
 import { execFileSync } from 'child_process';
+import { Worker } from 'worker_threads';
 
 import { queryReport } from '../../src/usage/queries';
 import {
@@ -211,6 +212,27 @@ suite('usage transcripts', () => {
             assert.strictEqual(replaced.restarted, 'replaced');
         }
         assert.ok(replaced.restarted !== null);
+    });
+
+    test('a pass says it is at work between files, and within a long read', async () => {
+        // The usage worker turns these calls into messages, so its host never
+        // takes a long first import for a silent worker.
+        const files = transcripts(5);
+        const record = line(assistant('m1', 5, { pad: 'x'.repeat(1_000) }));
+        fs.writeFileSync(files[0], record.repeat(Math.ceil((3 << 20) / record.length)));
+        let calls = 0;
+        readTranscript(mainFile(files[0]), undefined, () => calls++);
+        assert.ok(calls >= 3, `${calls} calls for 3 MiB`);
+
+        // Once per file and once per MiB read: 5 + 3 at least.
+        const store = freshStore();
+        calls = 0;
+        await importRoots(store, [tmp], { progress: () => calls++ });
+        assert.ok(calls >= files.length + 3, `${calls} calls reading ${files.length} files`);
+        // Nothing to read, and still once per file.
+        calls = 0;
+        await importRoots(store, [tmp], { progress: () => calls++ });
+        assert.ok(calls >= files.length, `${calls} calls for ${files.length} unchanged files`);
     });
 
     test('a line too long to be a record is skipped, and reading carries on', () => {
@@ -674,6 +696,30 @@ suite('usage worker', () => {
         return path.join(tmp, 'root');
     }
 
+    test('while it imports it keeps telling its host it is at work', async () => {
+        // The host gives up on a worker silent for two minutes, and a first
+        // import of a large history can take longer than that.
+        const root = manyTranscripts();
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const worker = new Worker(WORKER);
+        try {
+            const seen: string[] = [];
+            const imported = new Promise<void>(resolve =>
+                worker.on('message', (message: UsageWorkerResponse) => {
+                    seen.push(`${message.type}:${message.id}`);
+                    if (message.type === 'imported') {
+                        resolve();
+                    }
+                }),
+            );
+            worker.postMessage({ type: 'import', id: 7, storeFile, roots: [root] } satisfies UsageWorkerRequest);
+            await imported;
+            assert.ok(seen.includes('progress:0') && seen.indexOf('progress:0') < seen.indexOf('imported:7'), seen.join(' '));
+        } finally {
+            await worker.terminate();
+        }
+    });
+
     test('requests are handled one at a time: a second import waits for the first', async () => {
         // Unqueued, the second would start in the first one's yield and read
         // the files the first had not reached yet.
@@ -869,6 +915,41 @@ suite('usage roots', () => {
         assert.deepStrictEqual(resolved.roots.map(r => r.source), ['editor-environment']);
         assert.ok(!resolved.candidates.some(c => c.source === 'setting'), 'a relative path was considered');
         assert.ok(resolved.candidates.some(c => c.source === 'default' && !c.exists));
+    });
+
+    test('a folder named in another case is one root, where the file system folds case', () => {
+        // Choose Folder can give `c:\…` where the default is `C:\…`. Where
+        // case matters, the other spelling is simply not found.
+        const real = dir('CaseDir');
+        const resolved = resolveRoots({
+            setting: path.join(home, 'casedir'),
+            editorEnvironment: undefined,
+            env: { CLAUDE_CONFIG_DIR: real },
+            home,
+            platform: process.platform,
+        });
+        assert.strictEqual(resolved.roots.length, 1, JSON.stringify(resolved.roots));
+    });
+
+    test("Claude Code's two flags are read wherever it reads them, its settings files included", () => {
+        const custom = dir('custom');
+        const read = (env: NodeJS.ProcessEnv, editorEnvironment: unknown = undefined) => {
+            const r = resolveRoots({ setting: '', editorEnvironment, env, home, platform: 'linux' });
+            return [r.historyDisabled, r.largeContextDisabled];
+        };
+        assert.deepStrictEqual(read({}), [false, false]);
+        assert.deepStrictEqual(read({ CLAUDE_CODE_SKIP_PROMPT_HISTORY: '1', CLAUDE_CODE_DISABLE_1M_CONTEXT: 'true' }), [true, true]);
+        assert.deepStrictEqual(read({}, [{ name: 'CLAUDE_CODE_DISABLE_1M_CONTEXT', value: 'on' }]), [false, true]);
+
+        // ~/.claude/settings.json, and a root's own.
+        dir('.claude');
+        const settings = (folder: string, env: object) => fs.writeFileSync(path.join(folder, 'settings.json'), JSON.stringify({ env }));
+        settings(path.join(home, '.claude'), { CLAUDE_CODE_SKIP_PROMPT_HISTORY: '1' });
+        assert.deepStrictEqual(read({}), [true, false]);
+        settings(path.join(home, '.claude'), { CLAUDE_CODE_SKIP_PROMPT_HISTORY: '0' });
+        settings(custom, { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' });
+        assert.deepStrictEqual(read({}), [false, false], 'a folder that is not a root was read');
+        assert.deepStrictEqual(read({ CLAUDE_CONFIG_DIR: custom }), [false, true]);
     });
 
     test("on Windows the editor setting's names are case-insensitive", () => {

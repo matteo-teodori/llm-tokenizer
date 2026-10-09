@@ -81,6 +81,8 @@ export interface ImportOptions {
      * must not keep one of the largest sessions out for a day.
      */
     countCrashes?: boolean;
+    /** Called between files and within long reads: the worker tells its host it is still at work. */
+    progress?: () => void;
 }
 
 /**
@@ -212,6 +214,7 @@ async function runImport(
                 summary.cancelled = true;
                 return false;
             }
+            options.progress?.();
             summary.files++;
             const previous = store.getFile(PROVIDER, file.path);
             if (previous && previous.parserVersion > PARSER_VERSION) {
@@ -243,7 +246,7 @@ async function runImport(
 
             let result: ReadResult;
             try {
-                result = readTranscript(file, previous);
+                result = readTranscript(file, previous, options.progress);
             } catch (error) {
                 if (guard) {
                     // A failure the reader caught is not a crash.

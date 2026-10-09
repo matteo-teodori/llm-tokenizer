@@ -340,7 +340,7 @@ export interface ReadResult {
  *
  * @throws the file system's error, for the caller to count as a skip reason.
  */
-export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | undefined): ReadResult {
+export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | undefined, progress?: () => void): ReadResult {
     // Non-blocking, so that a FIFO under the projects folder cannot hang the
     // worker in open(); anything but a regular file is then refused.
     const fd = fs.openSync(file.path, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
@@ -382,7 +382,7 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
         const start = result.restarted === null ? (previous?.offset ?? 0) : 0;
         result.checkpoint.offset = start;
 
-        readLines(fd, start, state.size, file, result);
+        readLines(fd, start, state.size, file, result, progress);
         result.checkpoint.tailHash = tailHash(fd, result.checkpoint.offset);
         return result;
     } finally {
@@ -428,7 +428,7 @@ function tailHash(fd: number, offset: number): string | null {
  * newline arrives, never on every read: joining on every chunk is quadratic
  * on a long line.
  */
-function readLines(fd: number, start: number, size: number, file: TranscriptFile, result: ReadResult): void {
+function readLines(fd: number, start: number, size: number, file: TranscriptFile, result: ReadResult, progress?: () => void): void {
     const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
     let position = start;
     let lineStart = start;
@@ -438,6 +438,7 @@ function readLines(fd: number, start: number, size: number, file: TranscriptFile
     let needCwd = file.kind === 'main';
 
     while (position < size) {
+        progress?.();
         const read = fs.readSync(fd, chunk, 0, Math.min(CHUNK_BYTES, size - position), position);
         if (read <= 0) {
             break;

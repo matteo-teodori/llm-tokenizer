@@ -55,6 +55,8 @@ export const HINT_CEILING_MS = 10_000;
 export const MAX_HINT_PATHS = 200;
 /** A pass refused because another window holds the import lease is tried again after this. */
 export const LEASE_RETRY_MS = 5_000;
+/** A worker asked to close its history is ended after this, answered or not. */
+export const CLOSE_GRACE_MS = 2_000;
 
 export type UsageStatus = 'off' | 'ready' | 'no-roots' | 'no-sqlite' | 'read-only' | 'failing';
 
@@ -126,7 +128,7 @@ export class UsageService implements vscode.Disposable {
     private recovered: string | undefined;
     private holders = 0;
     private watchers: vscode.Disposable[] = [];
-    private firstTimer: unknown;
+    private startupGate: Promise<void> | undefined;
     private hourlyTimer: unknown;
     private idleTimer: unknown;
     private hintTimer: unknown;
@@ -168,6 +170,24 @@ export class UsageService implements vscode.Disposable {
     /** The name of the file a corrupt history was moved to, until Clear removes it. */
     get recoveredFrom(): string | undefined {
         return this.recovered;
+    }
+
+    /**
+     * Resolves once the startup project scan has settled, or 30 s after it
+     * was first asked for: the first import waits for it, and so does the
+     * status item's first look, so nothing is read in the activation tick.
+     */
+    whenStarted(): Promise<void> {
+        if (!this.startupGate) {
+            let timer: unknown;
+            const ceiling = new Promise<void>(resolve => (timer = this.clock.setTimeout(resolve, FIRST_IMPORT_MAX_WAIT_MS)));
+            const scan = Promise.resolve(this.deps.startupSettled).then(
+                () => undefined,
+                () => undefined,
+            );
+            this.startupGate = Promise.race([scan, ceiling]).then(() => this.clock.clearTimeout(timer));
+        }
+        return this.startupGate;
     }
 
     /** Re-read the settings: start, stop, or pick up a new data folder. */
@@ -268,7 +288,6 @@ export class UsageService implements vscode.Disposable {
     dispose(): void {
         this.disposed = true;
         this.stop();
-        this.host?.dispose();
         this.host = undefined;
         this.changed.dispose();
     }
@@ -281,9 +300,7 @@ export class UsageService implements vscode.Disposable {
             this.restartWatchers();
         }
         const generation = this.generation;
-        const waited = new Promise<void>(resolve => (this.firstTimer = this.clock.setTimeout(resolve, FIRST_IMPORT_MAX_WAIT_MS)));
-        void Promise.race([Promise.resolve(this.deps.startupSettled).then(undefined, () => undefined), waited]).then(() => {
-            this.clock.clearTimeout(this.firstTimer);
+        void this.whenStarted().then(() => {
             if (generation === this.generation) {
                 void this.runImport();
             }
@@ -295,13 +312,45 @@ export class UsageService implements vscode.Disposable {
         this.generation++;
         this.pending = undefined;
         this.stopWatchers();
-        for (const timer of [this.firstTimer, this.hourlyTimer, this.idleTimer, this.hintTimer, this.retryTimer]) {
+        for (const timer of [this.hourlyTimer, this.idleTimer, this.hintTimer, this.retryTimer]) {
             this.clock.clearTimeout(timer);
         }
-        // An import in flight is cut short: it is idempotent, and every
-        // checkpoint it committed is kept.
-        this.host?.stop();
+        // An import in flight stops at its next file, and every checkpoint it
+        // committed is kept.
+        void this.endWorker(this.generation);
         this.setStatus('off');
+    }
+
+    /**
+     * Close the worker's history, then end the thread: a thread ended in the
+     * middle of a SQLite call is ended mid-write. Ended all the same if it
+     * has not answered within CLOSE_GRACE_MS, and left be if the feature was
+     * turned on again meanwhile.
+     */
+    private async endWorker(generation: number): Promise<void> {
+        const host = this.host;
+        if (!host?.running) {
+            if (this.disposed) {
+                host?.dispose();
+            }
+            return;
+        }
+        let timer: unknown;
+        try {
+            await Promise.race([
+                host.send({ type: 'close', id: 0 }),
+                new Promise<void>(resolve => (timer = this.clock.setTimeout(resolve, CLOSE_GRACE_MS))),
+            ]);
+        } catch {
+            // Gone already.
+        } finally {
+            this.clock.clearTimeout(timer);
+        }
+        if (this.disposed) {
+            host.dispose();
+        } else if (generation === this.generation) {
+            host.stop();
+        }
     }
 
     /**

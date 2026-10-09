@@ -59,6 +59,19 @@ function reply(response: UsageWorkerResponse): void {
     port.postMessage(response);
 }
 
+/** The longest the worker goes without a word while it works. */
+const BEAT_MS = 5_000;
+let lastBeat = -BEAT_MS;
+
+/** Tell the host this worker is still at work, at most every BEAT_MS. */
+function beat(): void {
+    const now = performance.now();
+    if (now - lastBeat >= BEAT_MS) {
+        lastBeat = now;
+        reply({ type: 'progress', id: 0 });
+    }
+}
+
 /** The store at `file`, opened once and kept for the worker's lifetime. */
 function storeAt(file: string): OpenResult {
     if (!sqlite) {
@@ -139,7 +152,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 store,
                 request.roots,
                 holderOf(request),
-                { isCancelled, countCrashes: request.crashed === true },
+                { isCancelled, countCrashes: request.crashed === true, progress: beat },
                 paths,
             );
             reply(
@@ -157,7 +170,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
             const paths = request.roots.flatMap(root => sessionTranscripts(root, request.sessionId));
             if (paths.length > 0 && !store.outdated(PARSER_VERSION)) {
                 // Null when another window holds the lease: what is stored is read all the same.
-                await importUnderLease(store, request.roots, holderOf(request), { isCancelled, countCrashes: request.crashed === true }, paths);
+                await importUnderLease(store, request.roots, holderOf(request), { isCancelled, countCrashes: request.crashed === true, progress: beat }, paths);
             }
             reply({
                 type: 'liveContext',
