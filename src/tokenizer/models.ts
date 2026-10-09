@@ -21,8 +21,10 @@ import type { ModelInfo } from './registry';
 // ─────────────────────────────────────────────────────────────────────────────
 // Heuristic ratios
 //
-// Used only where no public tokenizer exists. Each is a chars-per-token figure
-// for English prose and code, not a marketing number.
+// Characters per token: for the models whose own tokenizer is unpublished, and
+// as the estimate a downloadable model shows until its vocabulary arrives. Each
+// constant records where its figure comes from; the bare figures passed to
+// `hf()` below are placeholders, explained there.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -52,6 +54,16 @@ const CLAUDE_LEGACY = 3.3;
  */
 const GROK = 3.7;
 
+// GPT6_UNMAPPED and the five after it are measured, each on the published
+// vocabulary closest to the models it stands in for, with the bundled
+// gpt-tokenizer or @huggingface/tokenizers (each Hugging Face count less its
+// empty-string baseline, as hfEncoder does). The corpus is this repository's
+// own TypeScript, JSON, YAML, .mjs and Markdown at e706b82, test fixtures and
+// the lockfile excluded: 51 files and 433,335 UTF-16 units. Each ratio is
+// rounded down to one decimal, which puts the corpus total 0.1 to 1.5% high.
+// Single files still stray either way: on this corpus 12 to 23 of the 51 come
+// out low, the worst by up to a third.
+
 /**
  * The GPT-6 models. Estimated, deliberately, even though every other OpenAI
  * model here is exact.
@@ -63,24 +75,17 @@ const GROK = 3.7;
  * Claiming o200k_base here would be a guess dressed as an exact count, which is
  * the one thing this file exists to prevent.
  *
- * The ratio is measured rather than assumed: 4.119 chars/token for o200k_base
- * over a mixed corpus of this repository's own TypeScript, JSON, YAML and
- * Markdown. Move these entries to a `tiktoken` encoder the moment tiktoken
- * ships a gpt-6 mapping.
+ * The ratio is measured rather than assumed: o200k_base gives 4.132
+ * chars/token on the corpus described above. Move these entries to a
+ * `tiktoken` encoder the moment tiktoken ships a gpt-6 mapping.
  */
 const GPT6_UNMAPPED = 4.1;
-
-// The next five stand in for models that publish no tokenizer but have a close
-// relative that does. Each is that relative's ratio, measured with the bundled
-// @huggingface/tokenizers on the same kind of corpus as GPT6_UNMAPPED — this
-// repository's own TypeScript, JSON, YAML, .mjs and Markdown at e706b82, 51
-// files and 433,335 UTF-16 units, on which o200k_base gives 4.132 — and
-// rounded down, so the estimate errs high.
 
 /**
  * Gemini releases that Google's SDK does not yet map to a Gemma vocabulary.
  * Every release it does map uses one, and Gemma 4's measures 3.652 (Gemma 3's
- * 3.655).
+ * 3.655). Also the estimate every downloadable Gemini and Gemma model shows
+ * until its vocabulary arrives.
  */
 const GEMINI_UNMAPPED = 3.6;
 
@@ -106,7 +111,10 @@ const MINIMAX_UNPUBLISHED = 4.1;
  */
 const MISTRAL_UNPUBLISHED = 3.8;
 
-/** Only used until Kimi's rank table has been downloaded. */
+/**
+ * Only used until Kimi's rank table has been downloaded. A placeholder, like
+ * the bare figures passed to `hf()`: the table itself measures 4.155.
+ */
 const KIMI = 3.6;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,8 +123,8 @@ const KIMI = 3.6;
 // Meta's Llama repos (meta-llama/) and Google's Gemma 3 repos are gated (HTTP
 // 401 without an account), so ungated mirrors are used. Meta's meta-models org
 // and Google's Gemma 4 repos are not gated, which is why HF.museGlimmer and
-// HF.gemma4 point at them directly. Every repo below was checked to serve
-// tokenizer.json anonymously.
+// HF.gemma4 point at them directly. Every repo below was checked to serve its
+// vocabulary anonymously: tokenizer.json, or tiktoken.model for Kimi.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HF = {
@@ -134,8 +142,9 @@ const HF = {
     /**
      * V4.1 Flash keeps V4's vocabulary and merges but repurposes nine of its
      * added-token slots: it gains `<｜System｜>` (one token here, five under V4)
-     * and loses V4's image and table tokens. So its file differs (sha256
-     * c90dfa01…) and it cannot share V4 Pro's repo.
+     * and `<｜deepseek_image｜>`, and loses V4's `<｜image｜>`, `<｜image2｜>`
+     * and table tokens. So its file differs (sha256 c90dfa01…) and it cannot
+     * share V4 Pro's repo.
      */
     deepseek41: 'deepseek-ai/DeepSeek-V4.1-Flash',
     qwen: 'Qwen/Qwen3.6-27B',
@@ -181,9 +190,8 @@ const HF = {
     hunyuan: 'tencent/Hy3',
     hunyuan4: 'tencent/Hy4-preview',
     /**
-     * Meta's current open-weight model. The Llama fallback ratio is right for
-     * it (measured 4.207 chars/token against Llama 3.3's 4.225 on identical
-     * text).
+     * Meta's current open-weight model. The Llama placeholder suits it: on the
+     * corpus above it measures 4.155 chars/token, Llama 3.3 4.137.
      */
     museGlimmer: 'meta-models/Muse-Glimmer-30B',
     /**
@@ -201,7 +209,15 @@ function rankTable(repo: string, charsPerToken: number): ModelInfo['encoder'] {
     return { kind: 'tiktokenModel', repo, fallback: { kind: 'heuristic', charsPerToken } };
 }
 
-/** An `hf` encoder with the fallback used until the download completes. */
+/**
+ * An `hf` encoder with the estimate shown until the download completes.
+ *
+ * Where that estimate is a bare figure, it is a placeholder rather than a
+ * calibration. Each sits below what its family's vocabulary measures on the
+ * corpus above (Llama 3.3 4.137, Llama 4 and Muse Glimmer 4.155, DeepSeek
+ * 3.931, Tekken 3.855, GLM-5 4.128, MiniMax 4.114, MiMo 4.058, Hy 3.950 and
+ * 3.993), so a count shown before the download leans high.
+ */
 function hf(repo: string, charsPerToken: number): ModelInfo['encoder'] {
     return { kind: 'hf', repo, fallback: { kind: 'heuristic', charsPerToken } };
 }
@@ -209,10 +225,10 @@ function hf(repo: string, charsPerToken: number): ModelInfo['encoder'] {
 /**
  * The model a user gets before they choose one.
  *
- * Deliberately not `MODELS[0]`: the registry is ordered newest-first, and the
- * newest OpenAI models are the GPT-6 family, which has no published tokenizer
- * yet. A token counter's default should be one it can count *exactly*, so this
- * is the newest exact model instead. It is also the value `scripts/sync-manifest.mjs`
+ * Deliberately not `MODELS[0]`: the registry is ordered roughly newest-first,
+ * and the newest OpenAI models are the GPT-6 family, which has no published
+ * tokenizer yet. A token counter's default should be one it can
+ * count *exactly*, so this is the newest exact model instead. It is also the value `scripts/sync-manifest.mjs`
  * writes into the settings dropdown, so the manifest and the code cannot drift.
  */
 export const DEFAULT_MODEL_ID = 'gpt-5.6-sol';
@@ -260,15 +276,19 @@ export const MODELS: ModelInfo[] = [
     // OpenAI shuts both down on 2026-10-23 (replacements gpt-5.6-sol and
     // gpt-5.6-terra). They are kept for Azure OpenAI, which retires models on
     // its own schedule, but that is unconfirmed: Azure's retirement schedule
-    // (updated 2026-09-21) and its retired-models page list neither as retired
-    // or due to retire. Check again at the first refresh after the 23rd, and
-    // if gpt-4-turbo goes, re-point the `gpt-4` alias with it.
+    // (updated 2026-09-21) has no row for either, and its retired-models page
+    // retires only their older versions (gpt-35-turbo 0301 and 0613, gpt-4
+    // 0314 and 0613), naming gpt-35-turbo 0125 as a replacement. Check again
+    // at the first refresh after the 23rd, and if gpt-4-turbo goes, re-point
+    // the `gpt-4` alias with it.
     { id: 'gpt-4-turbo', label: 'GPT-4 Turbo (legacy)', provider: 'OpenAI', contextLimit: 128_000, encoder: { kind: 'tiktoken', encoding: 'cl100k_base' } },
     { id: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo (legacy)', provider: 'OpenAI', contextLimit: 16_385, encoder: { kind: 'tiktoken', encoding: 'cl100k_base' } },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Anthropic — estimated. No Claude tokenizer has ever been published, and
-    // Anthropic's own guidance, in the claude-api skill it publishes
+    // Anthropic — estimated. Anthropic has published no tokenizer since Claude
+    // 3: its archived @anthropic-ai/tokenizer package says that "as of the
+    // Claude 3 models, this algorithm is no longer accurate". Its own guidance,
+    // in the claude-api skill it publishes
     // (github.com/anthropics/skills, skills/claude-api/shared/token-counting.md),
     // is not to use tiktoken, which "undercounts Claude tokens by ~15-20% on
     // typical text, and by much more on code or non-English input". The only
@@ -352,9 +372,9 @@ export const MODELS: ModelInfo[] = [
     { id: 'llama-3.1-8b', label: 'Llama 3.1 8B Instruct', provider: 'Meta', contextLimit: 131_072, encoder: hf(HF.llama3, 3.8) },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Mistral — exact, except Large 4 until its weights ship. The Tekken
-    // tokenizer is markedly denser than cl100k; the old proxy undercounted by up
-    // to 23%.
+    // Mistral — exact, except Large 4 until its weights ship. Tekken is denser
+    // than cl100k on code: the old cl100k proxy undercounted the TypeScript in
+    // the ratio corpus by 7.5%, and one file by 21%.
     // ─────────────────────────────────────────────────────────────────────────
     // The ids are the strings Mistral's API actually accepts, which are not the
     // marketing names: Large 3 predates the major-minor convention and kept a
@@ -481,18 +501,19 @@ export const MODELS: ModelInfo[] = [
 ];
 
 /**
- * Ids the registry no longer lists — from v1.x and from later refreshes —
- * mapped to the nearest model it does.
+ * Ids the registry does not list, mapped to the nearest model it does: old ids
+ * from v1.x and from later refreshes, and providers' own aliases of listed
+ * models (`mistral-large-latest`, `mistral-large-4`).
  *
- * Most no longer exist: some were renamed (the whole Anthropic block, the
- * MiniMax case), some were retired by their provider, and some never existed
- * at all. A few are still served but were curated out as an older generation
- * or a superseded variant: gemini-2.5-flash-lite, the GLM-4 models, and
- * OpenAI's gpt-4, o1, o3-mini and o3-pro ahead of their shutdowns. A saved
- * choice is migrated on first run rather than silently reset to the default,
- * with a one-time notice unless only the case changed. `findModel` follows a
- * single hop, so when a target is itself retired, every alias pointing at it
- * is re-pointed in the same change.
+ * Most of the old ids no longer exist: some were renamed (the whole Anthropic
+ * block, the MiniMax case), some were retired by their provider, and some
+ * never existed at all. A few are still served but were curated out as an
+ * older generation or a superseded variant: gemini-2.5-flash-lite, the GLM-4
+ * models, and OpenAI's gpt-4, o1, o3-mini and o3-pro ahead of their shutdowns.
+ * A saved choice is migrated on first run rather than silently reset to the
+ * default, with a one-time notice unless only the case changed. `findModel`
+ * follows a single hop, so when a target is itself retired, every alias
+ * pointing at it is re-pointed in the same change.
  */
 export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     // Anthropic: v1.3.0 invented a `claude-<major>.<minor>-<tier>` format.

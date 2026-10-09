@@ -71,7 +71,8 @@ Where a provider serves the model, the id is the string its API accepts, which
 is not always the marketing name — Mistral Large 3 is `mistral-large-2512`,
 MiniMax M3 is `MiniMax-M3`, capitals included, and Tencent's Hy3 is `hy3`, never
 `hunyuan-hy3`. Open-weight models with no first-party API (Llama, Muse Glimmer,
-Gemma 4 E4B) take their id from their Hugging Face name.
+Gemma 4 E4B) use a lowercase form of their Hugging Face name, shortened for
+Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 
 | Provider   | Models | Accuracy |
 |------------|--------|----------|
@@ -95,18 +96,22 @@ Gemma 4 E4B) take their id from their Hugging Face name.
 | Xiaomi     | MiMo V2.6 Pro, V2.6 Flash, V2.5 Pro, V2.5 | Exact¹ |
 | Tencent    | Hy4 preview, Hy3 | Exact¹ |
 
-¹ after a one-time tokenizer download
-² these releases are too recent for Google's SDK to map them to a published
-vocabulary, so they fall back to a character estimate
+¹ After a one-time tokenizer download.
+
+² Google's SDK does not map these releases to a published vocabulary yet, so
+they fall back to a character estimate.
+
 ³ OpenAI has not published which encoding the GPT-6 models use — `tiktoken`'s
 own model table stops at `gpt-5` — so they are estimated rather than counted
 with an encoding they may not use. They move to exact as soon as that mapping
 ships.
-⁴ previews whose tokenizer is not published yet: Mistral has announced Large
+
+⁴ Previews whose tokenizer is not published yet: Mistral has announced Large
 4's open weights but not released them, and MiniMax does not say whether M3.1
-reuses M3's vocabulary
+reuses M3's vocabulary.
+
 ⁵ Zhipu publishes no tokenizer for GLM-5-Turbo and does not say which
-vocabulary it shares with the rest of GLM-5
+vocabulary it shares with the rest of GLM-5.
 
 ## Usage
 
@@ -149,30 +154,35 @@ and both are read.
 tokenizer for any current model, and Anthropic's own guidance is not to
 approximate Claude with OpenAI's tokenizer, which
 [it says](https://github.com/anthropics/skills/blob/main/skills/claude-api/shared/token-counting.md)
-undercounts Claude by about 15–20%. An honest estimate is better than a
-confident wrong number, so those models are marked rather than dressed up.
+undercounts Claude by about 15–20% on typical text, and by much more on code or
+non-English input. An honest estimate is better than a confident wrong number,
+so those models are marked rather than dressed up.
 
-Where a related tokenizer is published, the ratio is measured on it and rounded
-down, so the estimate errs high: o200k_base for GPT-6, Gemma's vocabulary for
-recent Gemini, the open Qwen3.6 vocabulary for closed Qwen, and the family's
-published vocabulary for GLM-5-Turbo and the two previews. Claude's two ratios
-come from Anthropic's own figures for its two tokenizers. Grok is the
-exception: no Grok tokenizer has ever been published, so its ratio is inferred
-rather than measured, and it is the least reliable number here.
+Where a close relative publishes a vocabulary, the ratio is measured on it,
+over this repository's own code and docs, and rounded down: o200k_base for
+GPT-6, Gemma's vocabulary for recent Gemini, the open Qwen3.6 vocabulary for
+closed Qwen, and the family's published vocabulary for GLM-5-Turbo and the two
+previews. That puts the total for the measured files slightly high, but a
+single file can still read well below its real count, by up to a third.
+Claude's two ratios come from Anthropic's own figures for its two tokenizers.
+Grok is the exception: xAI has published tokenizers only for Grok-1 and
+Grok-2, none for a current model, so its ratio is inferred rather than
+measured, and it is the least reliable number here.
 
-One limitation worth stating plainly: the ratios are calibrated on English prose
-and code and are applied per UTF-16 code unit, so an estimate for CJK text reads
-substantially low. Exact models are unaffected — this only applies to counts
-already shown with a `≈`.
+One limitation worth stating plainly: the measured ratios come from English
+prose and code, and every ratio is applied per UTF-16 code unit, so an estimate
+for CJK text reads substantially low. Exact models are unaffected — this only
+applies to counts already shown with a `≈`.
 
 **Known limitation:** only the `.gitignore` at the root of each workspace
 folder is read, plus `.git/info/exclude`. Nested `.gitignore` files deeper in
 the tree are not applied.
 
-Earlier versions approximated everything with `cl100k_base` and a fudge factor.
-Measured against the real tokenizers, that undercounted Gemini on JSON by 27%
-and Mistral on source code by 24% — errors in the direction that tells you your
-prompt fits when it does not.
+Versions before 2.0 approximated every non-OpenAI model, with `cl100k_base`
+and a fudge factor or a flat characters-per-token figure. Measured on this
+repository's own code and docs, that undercounted Gemini on JSON by 16.5%, and
+Mistral on TypeScript by 7.5% (21% on the worst file) — errors in the direction
+that tells you your prompt fits when it does not.
 
 ## Requirements
 

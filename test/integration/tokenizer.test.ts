@@ -190,8 +190,8 @@ suite('tokenizer service', () => {
     });
 
     test('models with no public tokenizer are counted, but marked estimated', async () => {
-        // Anthropic and xAI publish no tokenizer. Returning a number is fine;
-        // presenting it as exact is not.
+        // Anthropic and xAI publish no tokenizer for a current model. Returning
+        // a number is fine; presenting it as exact is not.
         for (const id of ['claude-opus-5', 'grok-4.5']) {
             const result = await tokenizer.count('some text to count', model(id));
             assert.ok(result.count > 0);
@@ -565,8 +565,8 @@ suite('tokenizer service', () => {
     test('forgetting loaded vocabularies reverts counts to estimates', async () => {
         // Clearing the store alone left the worker holding its parsed
         // tokenizer, so the download command afterwards said "already
-        // downloaded" and did nothing, while the ~150 MB rank table stayed
-        // resident until the window reloaded.
+        // downloaded" and did nothing, while the rank table stayed resident
+        // until the window reloaded.
         const kimi = model('kimi-k3');
         assert.strictEqual(kimi.encoder.kind, 'tiktokenModel');
         await seedRankTable(storageUri, kimi.encoder.repo);

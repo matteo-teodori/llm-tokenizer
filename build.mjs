@@ -8,9 +8,10 @@
  *   out/encodings/*.js    one self-contained tiktoken encoding each
  *
  * The encodings are separate files on purpose. Each one builds its rank tables
- * at module load, so bundling all five into the worker would cost ~250 ms and
- * ~200 MB of heap at startup; loading only the active model's encoding costs
- * ~70 ms and ~30 MB. The worker requires them by path at runtime.
+ * at module load, so bundling all three into the worker would cost about
+ * 120 ms and 34 MB of heap at startup, measured; loading only the active
+ * model's encoding costs 25-60 ms and 9-16 MB. The worker requires them by path
+ * at runtime.
  *
  * Usage: node build.mjs [--watch] [--production]
  */

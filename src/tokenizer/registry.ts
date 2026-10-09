@@ -40,10 +40,11 @@ export function findModel(id: string): ModelInfo | undefined {
 /**
  * The model used when nothing has been chosen, or the choice no longer exists.
  *
- * Resolved from `DEFAULT_MODEL_ID` rather than being `MODELS[0]`, which is the
- * newest model and not necessarily one that can be counted exactly. The same
- * constant is written into the manifest's `defaultModel` setting, and an
- * invariant test asserts the two agree.
+ * Resolved from `DEFAULT_MODEL_ID` rather than being `MODELS[0]`, the first
+ * row of a registry ordered roughly newest-first, which need not be one that
+ * can be counted exactly. The same constant is written into the
+ * manifest's `defaultModel` setting, and an invariant test asserts the two
+ * agree.
  */
 export function defaultModel(): ModelInfo {
     return BY_ID.get(DEFAULT_MODEL_ID) ?? MODELS[0];

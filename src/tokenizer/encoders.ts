@@ -9,8 +9,10 @@
  *   3. `tiktokenModel`  a tiktoken rank table where the provider publishes one
  *                       instead of a tokenizer.json — Moonshot's Kimi family.
  *                       Also exact, also downloaded.
- *   4. `heuristic`      characters ÷ ratio. Only where no tokenizer is public
- *                       (Claude, Grok). Always reported as an estimate.
+ *   4. `heuristic`      characters ÷ ratio. For models whose tokenizer is not
+ *                       published (Claude, Grok, GPT-6 and a few others), and
+ *                       for any other until its vocabulary is downloaded.
+ *                       Always reported as an estimate.
  *
  * The encoders themselves run inside the worker; the host imports this module
  * only for the spec types and the `isDownloadable` / `supportsRankTables`
@@ -64,10 +66,12 @@ export interface HeuristicSpec {
      * Characters per token, for English prose and code.
      *
      * Each constant records where its figure comes from at its definition in
-     * `models.ts` — some are measured against the family's real tokenizer, and
-     * some (Grok, most plainly) are openly uncalibrated because no tokenizer
-     * exists to measure against. This used to cite a `docs/calibration.md` that
-     * was never written, which read as provenance the ratios did not have.
+     * `models.ts` — most are measured on a related published vocabulary, and
+     * Grok's is openly uncalibrated because no current Grok tokenizer exists
+     * to measure against. The bare figures passed to `hf()` there are
+     * placeholders shown until a download completes, and its docstring says
+     * so. This used to cite a `docs/calibration.md` that was never written,
+     * which read as provenance the ratios did not have.
      *
      * Note the unit: `length` is UTF-16 code units, so the ratio is only
      * meaningful for Latin-script text. See `heuristicEncoder`.
@@ -121,8 +125,8 @@ export interface Encoder {
  * `build.mjs`) and required by path at runtime.
  *
  * This matters: the rank tables are constructed at module load, so importing
- * all five costs ~250 ms and ~200 MB of heap. Loading only the active model's
- * encoding costs ~70 ms and ~30 MB.
+ * all three costs about 120 ms and 34 MB of heap, measured, against 25-60 ms
+ * and 9-16 MB for the active model's encoding alone.
  */
 type GptTokenizerModule = {
     countTokens(text: string, options?: { disallowedSpecial?: ReadonlySet<string> }): number;
@@ -330,7 +334,10 @@ export function tiktokenModelEncoder(repo: string, file: TiktokenModelFile): Enc
     return encoder;
 }
 
-/** Free the memory held by a downloaded tokenizer (each costs ~120 MB of heap). */
+/**
+ * Free the memory held by a downloaded vocabulary: from 13 MB of heap for
+ * Kimi's rank table to about 130 MB for Gemma 3's tokenizer.json, measured.
+ */
 export function evictDownloadedEncoder(repo: string): void {
     hfCache.delete(repo);
     rankCache.delete(repo);
@@ -339,14 +346,15 @@ export function evictDownloadedEncoder(repo: string): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Heuristic (no public tokenizer exists for this model)
+// Heuristic (no tokenizer published, or none downloaded yet)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Characters ÷ ratio, for models with no published tokenizer.
+ * Characters ÷ ratio: for models with no published tokenizer, and for any other
+ * until its vocabulary is downloaded.
  *
  * Known limitation, recorded rather than silently carried: `length` counts
- * UTF-16 code units and the ratios are calibrated on English prose and code, so
+ * UTF-16 code units and the measured ratios come from English prose and code, so
  * the further the input is from that, the worse the estimate. A BMP CJK
  * character is one code unit but costs roughly one token, so Chinese and
  * Japanese are under-counted substantially; an emoji is two code units and is

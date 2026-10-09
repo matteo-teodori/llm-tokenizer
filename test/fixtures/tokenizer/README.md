@@ -1,5 +1,5 @@
 A deliberately tiny byte-level BPE tokenizer, used to exercise the Hugging Face
-code path in tests without downloading a real 2–19 MB `tokenizer.json`.
+code path in tests without downloading a real 6–33 MB `tokenizer.json`.
 
 Its vocabulary is `a b c ab` with a single merge (`a` + `b` → `ab`), so counts
 are small and predictable:

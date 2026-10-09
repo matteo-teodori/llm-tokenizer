@@ -73,8 +73,11 @@ For the encoder:
   Qwen's "official version based on", Zhipu documenting FlashX under Flash's
   model code, Google's SDK mapping a Gemini model to a Gemma vocabulary.
 - **`heuristic`** if no tokenizer is public. Say so in a comment, and give a
-  ratio you have actually measured: on a published relative's vocabulary if
-  there is one, rounded down so the estimate errs high.
+  ratio you have actually measured the way the others are: on a published
+  relative's vocabulary if there is one, counted with the bundled libraries
+  over the corpus `models.ts` describes (UTF-16 code units divided by tokens,
+  less each tokenizer's empty-string baseline), and rounded down to one
+  decimal.
 
 Never present an estimate as exact. Counts that quietly disagree with the
 provider's billing are worse than no counts.

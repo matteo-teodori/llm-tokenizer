@@ -252,9 +252,10 @@ export class TokenizerService implements vscode.Disposable {
      * Forget every loaded vocabulary, in the worker as well as here.
      *
      * Clearing the store alone left the worker holding its parsed tokenizers —
-     * a rank table is ~150 MB of heap — and left `loadedRepos` populated, so
-     * the download command afterwards reported "already downloaded" and did
-     * nothing, while counts quietly reverted to estimates on the next reload.
+     * measured, from 13 MB of heap for Kimi's rank table to 130 MB for Gemma
+     * 3's tokenizer.json — and left `loadedRepos` populated, so the download
+     * command afterwards reported "already downloaded" and did nothing, while
+     * counts quietly reverted to estimates on the next reload.
      */
     public async forgetLoaded(): Promise<void> {
         const repos = [...this.loadedRepos];
@@ -323,7 +324,7 @@ export class TokenizerService implements vscode.Disposable {
 
         try {
             const asset = await this.store.fetch(repo, kind, token);
-            // On disk now, whatever a count recorded while it was downloading.
+            // Fetched now, whatever a count recorded while it was downloading.
             // Left in place, that "not on disk" outlived a load the crash budget
             // refused, and the model stayed an estimate for the session.
             this.unavailable.delete(repo);

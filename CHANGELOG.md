@@ -37,15 +37,18 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   without a notice, since the model has not changed. An old id in the
   `defaultModel` setting keeps working, though VS Code flags it until it is
   updated.
-- **Estimates use a measured ratio wherever a related tokenizer exists.**
-  Each is the related vocabulary's characters per token on this
-  repository's own code and docs, rounded down so the estimate errs high.
+- **Estimated models use a measured ratio wherever a close relative
+  publishes a vocabulary.** Each is that vocabulary's characters per token
+  on this repository's own code and docs, rounded down, which puts the
+  total for those files slightly high. A single file can still read low,
+  by up to a third.
   - Gemini 3.8, 3.7 and 3.6 Flash and 3.5 Flash-Lite now use Gemma's
     ratio, so their estimates rise by about 11%. The old figure had never
     been measured and undercounted by about 9%, which is the direction that
     says a prompt fits when it does not.
-  - Qwen3.7-Max, Plus and Flash and Qwen3.6-Plus now use the open Qwen3.6
-    vocabulary's ratio, so their estimates drop by about 5%.
+  - Qwen3.7-Max and Plus and Qwen3.6-Plus now use the open Qwen3.6
+    vocabulary's ratio, so their estimates drop by about 5%. The new
+    Qwen3.7-Flash uses it too.
   - GLM-5-Turbo uses the GLM-5 vocabulary's ratio, the MiniMax M3.1 Flash
     preview M3's, and the Mistral Large 4 preview Tekken's.
   - Claude Opus 4.6, Sonnet 4.6 and earlier now use 3.3 characters a token
@@ -55,7 +58,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
     typical 30%.
 
   The downloadable Gemini, Gemma and Qwen models show the same estimates
-  until their vocabulary arrives.
+  until their vocabulary arrives. The other downloadable models keep the
+  placeholder they show before their download: a ratio below the one their
+  vocabulary measures, so that count reads high.
 - **DeepSeek V4 Flash has been replaced by V4.1 Flash.** DeepSeek retired
   V4 Flash on 10 September and routes its id to V4.1 Flash
   (`deepseek-flash`), which has a tokenizer file of its own. A saved V4
@@ -78,7 +83,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   started a replacement, and the extension threw the replacement away. That
   count came back as an estimate. The replacement thread was left running,
   outside anything the extension could stop. It held whatever vocabulary
-  it had loaded, and a rank table is about 150 MB.
+  it had loaded, which for the larger ones is over 100 MB.
 - **A worker that failed as it started was restarted for every file.** A
   scan of 50 files started it 50 times, and each attempt ended in an
   estimate anyway. After three failures within a minute, counts now go
@@ -87,8 +92,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - **Counts in the billions read as thousands of millions.** A billion tokens
   showed as "1000.0M". They now read "1.0B".
 - **The extension's description said Claude was counted exactly.** It never
-  was: Anthropic publishes no tokenizer, and every Claude count has always
-  been a labelled estimate. The description now says so.
+  was: Anthropic publishes no tokenizer for a current Claude model, and
+  since 2.0 every Claude count has been labelled as an estimate. The description now says which models
+  are estimated: Claude, Grok, GPT-6 and a few others.
 
 ### Internal
 - The checks that every contributed command is registered, and that every
@@ -103,8 +109,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - Working notes in `.notes/` are no longer linted. Three comments that
   described the runtime and Llama's special-token baseline wrongly are
   corrected, and so are those on which Meta repositories are gated, on
-  vocabulary sizes, on DeepSeek V4.1's added tokens and on which Claude
-  models use the newer tokenizer.
+  vocabulary sizes and the memory they take, on DeepSeek V4.1's added
+  tokens, and on which Claude models use the newer tokenizer.
 - CONTRIBUTING now says when an API model may use an open checkpoint's
   vocabulary, and how a heuristic ratio is measured.
 
