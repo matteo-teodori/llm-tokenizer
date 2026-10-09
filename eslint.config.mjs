@@ -13,6 +13,9 @@ export default tseslint.config(
             'node_modules/**',
             '.vscode-test/**',
             'test/fixtures/**',
+            // Gitignored working notes. Flat config does not read .gitignore,
+            // so a measurement script kept there failed `npm run lint`.
+            '.notes/**',
         ],
     },
 
