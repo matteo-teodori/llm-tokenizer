@@ -41,6 +41,19 @@ interface Pending {
 /** Give up rather than leaking a promise if the worker goes silent. */
 const REQUEST_TIMEOUT_MS = 120_000;
 
+/**
+ * Worker deaths within CRASH_WINDOW_MS after which the service stops
+ * respawning it until the oldest of them ages out.
+ *
+ * A worker that dies as it loads — a damaged bundle, or a host whose runtime
+ * lacks something it needs — used to be respawned by every request: measured
+ * at 50 spawns for 50 counts in 1.2 s, each failing over to the estimate it
+ * would have ended in anyway. Past the budget, counts go straight to that
+ * estimate instead.
+ */
+const MAX_WORKER_CRASHES = 3;
+const CRASH_WINDOW_MS = 60_000;
+
 export class TokenizerService implements vscode.Disposable {
     private worker: Worker | undefined;
     private nextId = 0;
@@ -73,6 +86,9 @@ export class TokenizerService implements vscode.Disposable {
      * it iterates `loadedRepos`, which the in-flight load had not joined yet.
      */
     private loadGeneration = 0;
+
+    /** When the worker died, oldest first; see MAX_WORKER_CRASHES. */
+    private readonly crashTimes: number[] = [];
 
     private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
     /** Fires when a tokenizer finishes downloading, so counts can be refreshed. */
@@ -118,6 +134,15 @@ export class TokenizerService implements vscode.Disposable {
         // measured 8 M here and sailed past the guard the constant exists to
         // enforce, which is the allocation profile that took the host down.
         if (Buffer.byteLength(text, 'utf8') > MAX_TOKENIZED_FILE_BYTES) {
+            return { count: estimate(text, model), exact: false };
+        }
+
+        // A worker that keeps dying has nothing to answer with. Going straight
+        // to the estimate also keeps the rest of this method from running:
+        // every count would otherwise log the same failure, and re-hydration
+        // would record a downloaded vocabulary as unusable when it is the
+        // worker that is.
+        if (this.recentCrashes() >= MAX_WORKER_CRASHES) {
             return { count: estimate(text, model), exact: false };
         }
 
@@ -319,6 +344,9 @@ export class TokenizerService implements vscode.Disposable {
         if (this.disposed) {
             throw new TokenizerWorkerError('The tokenizer has been disposed');
         }
+        if (this.recentCrashes() >= MAX_WORKER_CRASHES) {
+            throw new TokenizerWorkerError('The tokenizer worker keeps failing; using estimates for now');
+        }
 
         const worker = new Worker(this.workerPath);
         worker.on('message', (response: WorkerResponse) => {
@@ -328,14 +356,24 @@ export class TokenizerService implements vscode.Disposable {
                 pending.resolve(response);
             }
         });
+        // Both handlers ignore a worker that has already been replaced. A worker
+        // that throws asynchronously emits 'error', and its 'exit' follows a
+        // turn later — by which time the next count has spawned a replacement.
+        // Unguarded, the dead worker's 'exit' discarded that replacement: it
+        // rejected the replacement's request into an estimate, and orphaned a
+        // live thread that dispose() never terminated.
         worker.on('error', (error: unknown) => {
+            if (this.worker !== worker) {
+                return;
+            }
             this.log.error(`Tokenizer worker crashed: ${describe(error)}`);
             this.handleWorkerExit(toError(error));
         });
         worker.on('exit', code => {
-            if (code !== 0 && !this.disposed) {
-                this.handleWorkerExit(new TokenizerWorkerError(`worker exited with code ${code}`));
+            if (this.worker !== worker || code === 0 || this.disposed) {
+                return;
             }
+            this.handleWorkerExit(new TokenizerWorkerError(`worker exited with code ${code}`));
         });
 
         this.worker = worker;
@@ -352,6 +390,23 @@ export class TokenizerService implements vscode.Disposable {
         // Still on disk — let the next count re-send them.
         this.unavailable.clear();
         this.failAllPending(error);
+
+        this.crashTimes.push(Date.now());
+        if (this.recentCrashes() === MAX_WORKER_CRASHES) {
+            this.log.warn(
+                `The tokenizer worker failed ${MAX_WORKER_CRASHES} times within a minute; ` +
+                'counting with estimates until it can be restarted',
+            );
+        }
+    }
+
+    /** Worker deaths within the last CRASH_WINDOW_MS. */
+    private recentCrashes(): number {
+        const cutoff = Date.now() - CRASH_WINDOW_MS;
+        while (this.crashTimes.length > 0 && this.crashTimes[0] <= cutoff) {
+            this.crashTimes.shift();
+        }
+        return this.crashTimes.length;
     }
 
     private failAllPending(error: Error): void {

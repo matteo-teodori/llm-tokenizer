@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -11,6 +12,9 @@ import { MAX_TOKENIZED_FILE_BYTES } from '../../src/constants';
 
 /** The bundled worker, as the extension host loads it. */
 const WORKER = path.join(__dirname, '..', '..', '..', 'out', 'worker.js');
+
+/** Workers that crash on purpose; see test/fixtures/workers/README.md. */
+const CRASHING_WORKERS = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'workers');
 
 function model(id: string): ModelInfo {
     const found = findModel(id);
@@ -249,6 +253,63 @@ suite('tokenizer service', () => {
         const result = await tokenizer.count('still answers', model('gpt-5.6-sol'));
         assert.ok(result.count > 0);
         assert.strictEqual(result.exact, false, 'a fallback count is an estimate');
+    });
+
+    test("a crashed worker's late exit does not discard its replacement", async () => {
+        // A worker that throws asynchronously emits 'error', and its 'exit'
+        // arrives a turn later — after the next count has already spawned a
+        // replacement. The unguarded 'exit' handler then discarded the
+        // replacement: its answer was rejected into an estimate, and its thread
+        // was orphaned, still running after dispose().
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-async.js'), store, log);
+        const gpt = model('gpt-5.6-sol');
+
+        const warm = await tokenizer.count('warm', gpt);
+        assert.strictEqual(warm.exact, true, 'the stand-in worker answers exactly');
+
+        const crashed = await tokenizer.count('CRASH', gpt);
+        assert.strictEqual(crashed.exact, false, 'a crashed request falls back to an estimate');
+
+        const after = await tokenizer.count('after', gpt);
+        assert.strictEqual(after.exact, true, "the replacement worker's answer was thrown away");
+        assert.strictEqual(after.count, 'after'.length);
+    });
+
+    test('a worker that dies as it loads is not respawned for every count', async () => {
+        // Every request used to spawn a fresh worker, so a bundle that fails at
+        // load cost one thread start per file — 50 spawns for 50 counts,
+        // measured — and each one ended in the estimate anyway.
+        const spawnLog = path.join(os.tmpdir(), `llm-tokenizer-spawns-${process.pid}-${testIndex}`);
+        process.env.LLM_TOKENIZER_TEST_SPAWN_LOG = spawnLog;
+        // Counts the errors logged: once the service has stopped respawning, a
+        // count must not log a failure of its own, or a scan logs one per file.
+        let errors = 0;
+        const countingLog = {
+            error: () => { errors++; },
+            warn: () => undefined,
+            info: () => undefined,
+            debug: () => undefined,
+            trace: () => undefined,
+        } as unknown as vscode.LogOutputChannel;
+        try {
+            tokenizer.dispose();
+            tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-load.js'), store, countingLog);
+
+            for (let i = 0; i < 20; i++) {
+                const result = await tokenizer.count(`file ${i}`, model('gpt-5.6-sol'));
+                assert.strictEqual(result.exact, false, `count ${i} should fall back to an estimate`);
+                assert.ok(result.count > 0);
+            }
+
+            const spawned = (await fs.readFile(spawnLog, 'utf8')).length;
+            assert.strictEqual(spawned, 3, `the worker was started ${spawned} times for 20 counts`);
+            // Two per crash: the worker's own error, and the count it failed.
+            assert.ok(errors <= 6, `${errors} errors logged for 3 crashes and 20 counts`);
+        } finally {
+            delete process.env.LLM_TOKENIZER_TEST_SPAWN_LOG;
+            await fs.rm(spawnLog, { force: true });
+        }
     });
 
     test('an undownloaded model stays an estimate, and never fetches mid-count', async () => {
