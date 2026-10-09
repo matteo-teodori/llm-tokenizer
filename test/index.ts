@@ -7,7 +7,8 @@
  * immediately errors. Having it means tests can be run with breakpoints from
  * the editor.
  *
- * Keep the Mocha options here in step with `.vscode-test.mjs`.
+ * Keep the Mocha options here in step with `.vscode-test.mjs`, and the launch
+ * configuration's arguments and environment in step with its own.
  */
 
 import * as fs from 'fs';
@@ -31,6 +32,19 @@ function findTests(root: string, prefix = ''): string[] {
 }
 
 export function run(): Promise<void> {
+    // The launch configuration points CLAUDE_CONFIG_DIR at a fixture. A host
+    // started some other way would read the developer's own Claude Code data.
+    const fixtures = path.resolve(__dirname, '..', '..', 'test', 'fixtures');
+    const configDir = process.env.CLAUDE_CONFIG_DIR;
+    if (!configDir || !path.resolve(configDir).startsWith(fixtures + path.sep)) {
+        return Promise.reject(
+            new Error(
+                `Refusing to run the tests: CLAUDE_CONFIG_DIR must point into ${fixtures}, ` +
+                    `so they cannot read your own Claude Code data (it is ${configDir ?? 'unset'}).`,
+            ),
+        );
+    }
+
     const mocha = new Mocha({
         ui: 'tdd',
         color: true,

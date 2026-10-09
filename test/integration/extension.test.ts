@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { showMultiFileSummary, type MultiFileSummaryConfig } from '../../src/webview';
@@ -31,6 +32,18 @@ suite('extension', () => {
 
     test('activates', () => {
         assert.strictEqual(vscode.extensions.getExtension(EXTENSION_ID)?.isActive, true);
+    });
+
+    test('the test host reads a stand-in Claude Code config, never the real one', () => {
+        // .vscode-test.mjs points CLAUDE_CONFIG_DIR at a fixture, and passes
+        // --force-disable-user-env so the login shell's environment cannot
+        // override it. Without both, a test could read ~/.claude.
+        const fixtures = path.resolve(__dirname, '..', '..', '..', 'test', 'fixtures');
+        const configDir = process.env.CLAUDE_CONFIG_DIR;
+        assert.ok(
+            configDir && path.resolve(configDir).startsWith(fixtures + path.sep),
+            `CLAUDE_CONFIG_DIR is ${configDir ?? 'unset'}, not inside ${fixtures}`,
+        );
     });
 
     test('a legacy id in the setting does not fabricate a stored choice', async () => {

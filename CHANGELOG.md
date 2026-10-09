@@ -20,6 +20,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   the build, the third-party notices and the dependency audit all read. A
   bundle added to the build alone would otherwise have shipped packages
   that neither check saw.
+- The test host keeps away from the developer's own profile and home.
+  Every test configuration gets a user-data directory of its own, skips
+  the login shell's environment, and points `CLAUDE_CONFIG_DIR` at a
+  fixture, and the F5 entry point refuses to run if it points anywhere
+  else.
 
 ## [2.1.2] - 2026-10-09
 
