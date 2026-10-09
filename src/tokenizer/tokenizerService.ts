@@ -88,8 +88,8 @@ export class TokenizerService implements vscode.Disposable {
     private loadGeneration = 0;
 
     /**
-     * When the worker died, oldest first, on the monotonic clock so a wall-clock
-     * step back cannot stretch the window; see MAX_WORKER_CRASHES.
+     * When the worker died, oldest first, on `now` (the monotonic clock, so a
+     * wall-clock step back cannot stretch the window); see MAX_WORKER_CRASHES.
      */
     private readonly crashTimes: number[] = [];
 
@@ -109,6 +109,9 @@ export class TokenizerService implements vscode.Disposable {
         private readonly workerPath: string,
         private readonly store: TokenizerStore,
         private readonly log: vscode.LogOutputChannel,
+        // Injectable so a test can let the crash window run out without
+        // waiting a minute for it.
+        private readonly now: () => number = () => performance.now(),
     ) {}
 
     public dispose(): void {
@@ -200,11 +203,6 @@ export class TokenizerService implements vscode.Disposable {
             return;
         }
 
-        if (!(await this.store.isDownloaded(repo, kind))) {
-            this.unavailable.add(repo);
-            return;
-        }
-
         // `unavailable` means "this vocabulary cannot be used", which is a
         // statement about the file, not about the worker. A worker crash mid-load
         // rejects the pending request, and `handleWorkerExit` clears the set so
@@ -212,7 +210,20 @@ export class TokenizerService implements vscode.Disposable {
         // *after* that clear and put the repo straight back, permanently
         // degrading the model to an estimate for the rest of the session. Only
         // record the failure if no worker died while it was being loaded.
+        //
+        // Read before the first await, so nothing runs between count()'s
+        // budget check and this. Read after the disk check instead, it missed
+        // a crash landing during that check — the first read of a large
+        // tokenizer.json takes a quarter of a second — and when that crash
+        // tripped the budget, the load the budget refused was recorded here as
+        // a vocabulary that cannot be used.
         const epoch = this.workerEpoch;
+
+        if (!(await this.store.isDownloaded(repo, kind))) {
+            this.unavailable.add(repo);
+            return;
+        }
+
         if (!(await this.ensureExact(model)) && this.workerEpoch === epoch) {
             this.unavailable.add(repo);
         }
@@ -312,6 +323,10 @@ export class TokenizerService implements vscode.Disposable {
 
         try {
             const asset = await this.store.fetch(repo, kind, token);
+            // On disk now, whatever a count recorded while it was downloading.
+            // Left in place, that "not on disk" outlived a load the crash budget
+            // refused, and the model stayed an estimate for the session.
+            this.unavailable.delete(repo);
             const response = await this.send({ type: 'loadTokenizer', id: 0, repo, asset });
 
             if (response.type === 'error') {
@@ -403,7 +418,7 @@ export class TokenizerService implements vscode.Disposable {
         this.unavailable.clear();
         this.failAllPending(error);
 
-        this.crashTimes.push(performance.now());
+        this.crashTimes.push(this.now());
         if (this.recentCrashes() === MAX_WORKER_CRASHES) {
             this.log.warn(
                 `The tokenizer worker failed ${MAX_WORKER_CRASHES} times within a minute; ` +
@@ -414,7 +429,7 @@ export class TokenizerService implements vscode.Disposable {
 
     /** Worker deaths within the last CRASH_WINDOW_MS. */
     private recentCrashes(): number {
-        const cutoff = performance.now() - CRASH_WINDOW_MS;
+        const cutoff = this.now() - CRASH_WINDOW_MS;
         while (this.crashTimes.length > 0 && this.crashTimes[0] <= cutoff) {
             this.crashTimes.shift();
         }

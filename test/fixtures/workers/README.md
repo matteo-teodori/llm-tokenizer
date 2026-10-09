@@ -11,3 +11,7 @@ on purpose:
 - `crash-first-start.js` throws on its first start only, counted the same way,
   and runs the real bundled `out/worker.js` on every later start. It
   reproduces a crash in the middle of loading a downloaded vocabulary.
+- `crash-on-demand.js` runs the real bundled worker, but throws asynchronously,
+  without replying, on a count of the text `CRASH`. That count settles only
+  once the service has handled the crash, so a test can crash the worker at a
+  moment of its choosing between real loads and counts.

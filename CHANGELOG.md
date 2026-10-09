@@ -89,7 +89,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - The checks that every contributed command is registered, and that every
   setting reads back with its declared type, now take the manifest as their
   list instead of a hand-written one. They also catch a default of the
-  wrong type and a default outside its own enum. 172 tests.
+  wrong type and a default outside its own enum. 174 tests.
 - The integration suites no longer depend on the order the test runner
   finds them in. A log channel disposed while it was still opening stayed
   registered but closed, so every later channel of the same name threw,

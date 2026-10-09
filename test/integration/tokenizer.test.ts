@@ -358,6 +358,98 @@ suite('tokenizer service', () => {
         }
     });
 
+    test('a crash that trips the budget mid re-hydration does not shelve the vocabulary', async () => {
+        // Re-hydration compares the crash epoch to tell a vocabulary that cannot
+        // be used from a worker that is dying. It read the epoch after checking
+        // the disk, so it missed a crash during that check — the first read of
+        // a large tokenizer.json takes a quarter of a second. When that crash
+        // tripped the budget, the load the budget refused was recorded as an
+        // unusable vocabulary, and the model stayed an estimate after the
+        // budget ran out.
+        const llama = model('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        // The disk check is held open until the third crash has landed.
+        let release = (): void => undefined;
+        const held = new Promise<void>(resolve => { release = resolve; });
+        const isDownloaded = store.isDownloaded.bind(store);
+        store.isDownloaded = async (repo, kind) => {
+            await held;
+            return isDownloaded(repo, kind);
+        };
+
+        let now = 0;
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-on-demand.js'), store, log, () => now);
+        const gpt = model('gpt-5.6-sol');
+
+        for (let crash = 1; crash <= 2; crash++) {
+            assert.strictEqual((await tokenizer.count('CRASH', gpt)).exact, false, `crash ${crash}`);
+        }
+        const during = tokenizer.count('abc', llama);
+        assert.strictEqual((await tokenizer.count('CRASH', gpt)).exact, false, 'crash 3');
+        release();
+        assert.strictEqual((await during).exact, false, 'counted while the budget was tripped');
+
+        now += 61_000;
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        const after = await tokenizer.count('abc', llama);
+        assert.strictEqual(after.exact, true, 'the vocabulary was shelved once the budget ran out');
+        assert.strictEqual(after.count, 2);
+    });
+
+    test('a download the crash budget refused to load is loaded once the budget runs out', async () => {
+        // A count while a download is in flight finds nothing on disk and
+        // records the vocabulary as missing. When a crash in that same moment
+        // tripped the budget, the finished download was refused, and the stale
+        // "missing" outlived the budget: the model stayed an estimate.
+        const llama = model('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        const { repo } = llama.encoder;
+
+        // The count's disk check is held until the third crash, and the
+        // download until after it; the download then lands the fixture where a
+        // real one would write.
+        let releaseCheck = (): void => undefined;
+        let releaseDownload = (): void => undefined;
+        const checkHeld = new Promise<void>(resolve => { releaseCheck = resolve; });
+        const downloadHeld = new Promise<void>(resolve => { releaseDownload = resolve; });
+        const isDownloaded = store.isDownloaded.bind(store);
+        store.isDownloaded = async (r, kind) => {
+            await checkHeld;
+            return isDownloaded(r, kind);
+        };
+        const fetchAsset = store.fetch.bind(store);
+        store.fetch = async (r, kind, token) => {
+            await downloadHeld;
+            await seedTokenizer(storageUri, repo);
+            return fetchAsset(r, kind, token);
+        };
+
+        let now = 0;
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-on-demand.js'), store, log, () => now);
+        const gpt = model('gpt-5.6-sol');
+
+        for (let crash = 1; crash <= 2; crash++) {
+            assert.strictEqual((await tokenizer.count('CRASH', gpt)).exact, false, `crash ${crash}`);
+        }
+        const download = tokenizer.ensureExact(llama);
+        const during = tokenizer.count('abc', llama);
+        assert.strictEqual((await tokenizer.count('CRASH', gpt)).exact, false, 'crash 3');
+        releaseCheck();
+        assert.strictEqual((await during).exact, false, 'counted mid-download');
+        releaseDownload();
+        assert.strictEqual(await download, false, 'the budget let the finished download load');
+
+        now += 61_000;
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        const after = await tokenizer.count('abc', llama);
+        assert.strictEqual(after.exact, true, 'the downloaded vocabulary was never loaded');
+        assert.strictEqual(after.count, 2);
+    });
+
     test('an undownloaded model stays an estimate, and never fetches mid-count', async () => {
         const llama = model('llama-3.3-70b');
         assert.strictEqual(llama.encoder.kind, 'hf');
