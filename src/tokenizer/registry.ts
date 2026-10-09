@@ -20,6 +20,14 @@ export interface ModelInfo {
     encoder: EncoderSpec;
     /** Input context window in tokens. Omitted when the model has no published limit. */
     contextLimit?: number;
+    /**
+     * The window Claude Code runs the model with when its `[1m]`
+     * extended-context variant is not selected, set only where that is smaller
+     * than `contextLimit`. A session's share of its window needs it: the same
+     * id can then run with either window, and only the record's variant says
+     * which.
+     */
+    claudeCodeBaseContext?: number;
 }
 
 export { MODELS, MODEL_ALIASES, DEFAULT_MODEL_ID };

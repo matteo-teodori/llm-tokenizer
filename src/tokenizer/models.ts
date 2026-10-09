@@ -307,8 +307,15 @@ export const MODELS: ModelInfo[] = [
     { id: 'claude-fable-5', label: 'Claude Fable 5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-opus-4-7', label: 'Claude Opus 4.7', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
-    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
-    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
+    // On the API both run with 1M by default ("For every model with a
+    // 1M-token context window, 1M is the default", build-with-claude/
+    // context-windows). Claude Code differs: "Opus 4.6 and Sonnet 4.6 reach 1M
+    // only through their [1m] variant", and without it "compact at the 200K
+    // boundary" (code.claude.com/docs/en/model-config). Every other model here
+    // has one window in Claude Code: "No effect when opus already resolves to
+    // Opus 4.7 or later with its native 1M window". Both read 2026-10-10.
+    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', provider: 'Anthropic', contextLimit: 1_000_000, claudeCodeBaseContext: 200_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
+    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'Anthropic', contextLimit: 1_000_000, claudeCodeBaseContext: 200_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
     { id: 'claude-opus-4-5', label: 'Claude Opus 4.5', provider: 'Anthropic', contextLimit: 200_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_LEGACY } },
     // Deprecated on 2026-09-30: Anthropic retires it on 2026-11-30 and names
     // claude-sonnet-5-5 as the replacement. Remove it, with that alias, after.
