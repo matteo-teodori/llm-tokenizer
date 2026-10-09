@@ -13,17 +13,24 @@ import type { LatestRequest } from './store';
 import type { Compaction } from './types';
 
 export type UsageWorkerRequest =
-    /** With `paths`, only those transcripts: the ones a watcher reported changed. */
-    | { type: 'import'; id: number; storeFile: string; roots: string[]; paths?: string[] }
+    /**
+     * With `paths`, only those transcripts: the ones a watcher reported
+     * changed. `holder` names the window, so that a worker it restarts is
+     * the same holder of the import lease as the one that died.
+     */
+    | { type: 'import'; id: number; storeFile: string; roots: string[]; paths?: string[]; holder?: string }
     /** `workspaceFolders` null reports every project. */
     | { type: 'query'; id: number; storeFile: string; range: RangeKey; zone: string; workspaceFolders: string[] | null }
     /** Bring one session's main transcript up to date, then read its latest request and compactions. */
-    | { type: 'liveContext'; id: number; storeFile: string; roots: string[]; sessionId: string }
+    | { type: 'liveContext'; id: number; storeFile: string; roots: string[]; sessionId: string; holder?: string }
     | { type: 'clear'; id: number; storeFile: string }
     | { type: 'close'; id: number };
 
-/** Why the worker could not do what it was asked, as fixed strings. */
-export type UsageFailure = 'store-busy' | 'store-io' | 'store-read-only' | 'import-failed' | 'bad-request' | 'unknown';
+/**
+ * Why the worker could not do what it was asked, as fixed strings.
+ * `outdated`: a newer LLM Tokenizer, in another window, writes this history.
+ */
+export type UsageFailure = 'store-busy' | 'store-io' | 'store-read-only' | 'outdated' | 'import-failed' | 'bad-request' | 'unknown';
 
 export type UsageWorkerResponse =
     | { type: 'imported'; id: number; summary: ImportSummary; leaseHeldElsewhere: false }

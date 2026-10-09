@@ -268,8 +268,10 @@ suite('usage history store', () => {
         assert.ok(store.acquireLease('import', 'window-c', 2));
         assert.ok(!store.acquireLease('import', 'window-b', 1));
 
+        // Released, it is free, for that parser or a newer one: not for the older.
         store.releaseLease('import', 'window-c');
-        assert.ok(store.acquireLease('import', 'window-b', 1), 'a released lease stayed held');
+        assert.ok(!store.acquireLease('import', 'window-b', 1), 'an older parser took the lease back');
+        assert.ok(store.acquireLease('import', 'window-d', 2), 'a released lease stayed held');
     });
 
     test('a window that read an old version while another migrated skips what is already applied', () => {
@@ -288,6 +290,37 @@ suite('usage history store', () => {
         } finally {
             db.close();
         }
+    });
+
+    test("a holder's pid is judged only on its own host", () => {
+        // On a home shared over a network filesystem, another machine's pid
+        // looks dead here; its lease must stand until its heartbeat ages.
+        let now = 1_000_000;
+        const store = ready(open({ now: () => now, isAlive: () => false }));
+        assert.ok(sqlite);
+        const raw = new sqlite.DatabaseSync(file);
+        try {
+            raw.prepare('INSERT OR REPLACE INTO lease (role, holder, host, pid, parser_version, heartbeat) VALUES (?, ?, ?, ?, ?, ?)')
+                .run('import', 'remote-window', 'some-other-host', 4242, 1, now);
+        } finally {
+            raw.close();
+        }
+        assert.ok(!store.acquireLease('import', 'this-window', 1), "another host's lease was taken on a local pid check");
+        now += LEASE_TAKEOVER_MS + 1;
+        assert.ok(store.acquireLease('import', 'this-window', 1), 'a stale remote lease was never released');
+    });
+
+    test('once a newer parser has held the lease, an older one never takes it again, Clear or not', () => {
+        let now = 1_000_000;
+        const store = ready(open({ now: () => now }));
+        assert.ok(store.acquireLease('import', 'reloaded-window', 2));
+        store.releaseLease('import', 'reloaded-window');
+        assert.ok(!store.acquireLease('import', 'old-window', 1), 'the older parser took a free lease');
+        now += LEASE_TAKEOVER_MS * 10;
+        assert.ok(!store.acquireLease('import', 'old-window', 1), 'the older parser took it once the heartbeat aged');
+        assert.deepStrictEqual([store.outdated(1), store.outdated(2)], [true, false]);
+        store.clear();
+        assert.ok(store.outdated(1), 'Clear let the older parser back in');
     });
 
     test('a lease whose holder has exited is taken over at once', () => {

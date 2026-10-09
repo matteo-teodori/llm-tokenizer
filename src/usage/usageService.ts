@@ -52,6 +52,8 @@ export const HINT_DEBOUNCE_MS = 1_000;
 export const HINT_CEILING_MS = 10_000;
 /** Past this many changed files, one full pass is cheaper than naming each. */
 export const MAX_HINT_PATHS = 200;
+/** A pass refused because another window holds the import lease is tried again after this. */
+export const LEASE_RETRY_MS = 5_000;
 
 export type UsageStatus = 'off' | 'ready' | 'no-roots' | 'no-sqlite' | 'read-only' | 'failing';
 
@@ -113,6 +115,10 @@ export class UsageService implements vscode.Disposable {
     private importing: Promise<ImportSummary | undefined> | undefined;
     /** What the next pass must cover: named files, or everything. */
     private pending: Set<string> | 'all' | undefined;
+    /** This window, as the holder of the import lease, whichever worker runs for it. */
+    private readonly holder = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    private elsewhere = false;
+    private retryTimer: unknown;
     private holders = 0;
     private watchers: vscode.Disposable[] = [];
     private firstTimer: unknown;
@@ -147,6 +153,11 @@ export class UsageService implements vscode.Disposable {
     /** The runtime that has no `node:sqlite`, when that is why nothing shows. */
     get missingSqlite(): { node: string; electron: string | null } | undefined {
         return this.runtime;
+    }
+
+    /** Whether the last pass found another window importing, and is waiting to try again. */
+    get updatingElsewhere(): boolean {
+        return this.elsewhere;
     }
 
     /** Re-read the settings: start, stop, or pick up a new data folder. */
@@ -195,7 +206,7 @@ export class UsageService implements vscode.Disposable {
             return undefined;
         }
         const roots = (this.resolved ?? this.resolveNow()).roots.map(r => r.path);
-        const response = await this.ask({ type: 'liveContext', storeFile: this.deps.storeFile, roots, sessionId });
+        const response = await this.ask({ type: 'liveContext', storeFile: this.deps.storeFile, roots, sessionId, holder: this.holder });
         return response?.type === 'liveContext' ? { latest: response.latest, compactions: response.compactions } : undefined;
     }
 
@@ -262,7 +273,7 @@ export class UsageService implements vscode.Disposable {
         this.generation++;
         this.pending = undefined;
         this.stopWatchers();
-        for (const timer of [this.firstTimer, this.hourlyTimer, this.idleTimer, this.hintTimer]) {
+        for (const timer of [this.firstTimer, this.hourlyTimer, this.idleTimer, this.hintTimer, this.retryTimer]) {
             this.clock.clearTimeout(timer);
         }
         // An import in flight is cut short: it is idempotent, and every
@@ -277,17 +288,27 @@ export class UsageService implements vscode.Disposable {
      * a hint during a full pass never becomes a second full pass.
      */
     private runImport(paths?: readonly string[]): Promise<ImportSummary | undefined> {
+        this.want(paths);
+        return this.drain();
+    }
+
+    /** Note what the next pass must cover: the named files, or everything. */
+    private want(paths?: readonly string[]): void {
         if (!paths || this.pending === 'all') {
             this.pending = 'all';
-        } else {
-            this.pending ??= new Set();
-            for (const p of paths) {
-                this.pending.add(p);
-            }
-            if (this.pending.size > MAX_HINT_PATHS) {
-                this.pending = 'all';
-            }
+            return;
         }
+        this.pending ??= new Set();
+        for (const p of paths) {
+            this.pending.add(p);
+        }
+        if (this.pending.size > MAX_HINT_PATHS) {
+            this.pending = 'all';
+        }
+    }
+
+    /** Run passes, one at a time, until nothing is pending. */
+    private drain(): Promise<ImportSummary | undefined> {
         if (this.importing) {
             return this.importing;
         }
@@ -297,16 +318,27 @@ export class UsageService implements vscode.Disposable {
             while (this.pending && generation === this.generation) {
                 const take = this.pending;
                 this.pending = undefined;
-                summary = await this.importOnce(take === 'all' ? undefined : [...take]);
+                const outcome = await this.importOnce(take === 'all' ? undefined : [...take]);
+                if (outcome === 'held') {
+                    // Another window is importing: keep what this pass was
+                    // for, and try again once its pass is likely over.
+                    this.want(take === 'all' ? undefined : [...take]);
+                    this.clock.clearTimeout(this.retryTimer);
+                    this.retryTimer = this.clock.setTimeout(() => void this.drain(), LEASE_RETRY_MS);
+                    break;
+                }
+                // Hourly from the last full pass: a hint's pass covers only
+                // its files, so it must not put the next full one off.
+                if (take === 'all' && generation === this.generation && this.enabled) {
+                    this.clock.clearTimeout(this.hourlyTimer);
+                    this.hourlyTimer = this.clock.setTimeout(() => void this.runImport(), HOURLY_MS);
+                }
+                summary = outcome;
             }
             return summary;
         };
         this.importing = pass().finally(() => {
             this.importing = undefined;
-            if (generation === this.generation && this.enabled) {
-                this.clock.clearTimeout(this.hourlyTimer);
-                this.hourlyTimer = this.clock.setTimeout(() => void this.runImport(), HOURLY_MS);
-            }
         });
         return this.importing;
     }
@@ -322,27 +354,35 @@ export class UsageService implements vscode.Disposable {
         return this.resolved;
     }
 
-    private async importOnce(paths?: string[]): Promise<ImportSummary | undefined> {
+    /** One pass; 'held' when another window holds the import lease. */
+    private async importOnce(paths?: string[]): Promise<ImportSummary | 'held' | undefined> {
         const resolved = this.resolveNow();
         for (const refused of resolved.refused) {
             this.deps.log.warn(`Claude Code usage: refused a root outside the test fixtures (${refused.source})`);
         }
         if (resolved.roots.length === 0) {
+            if (this.currentStatus !== 'no-roots') {
+                this.deps.log.info(`Claude Code usage: no Claude Code data folder found, of ${resolved.candidates.length} places looked at`);
+                this.deps.log.debug(`Claude Code usage: looked at ${resolved.candidates.map(c => c.path).join(', ')}`);
+            }
             this.setStatus('no-roots');
             return undefined;
         }
         const roots = resolved.roots.map(r => r.path);
         this.deps.log.debug(`Claude Code usage: importing ${paths ? `${paths.length} changed files in ` : ''}${roots.join(', ')}`);
-        const response = await this.ask({ type: 'import', storeFile: this.deps.storeFile, roots, paths });
+        const response = await this.ask({ type: 'import', storeFile: this.deps.storeFile, roots, paths, holder: this.holder });
         if (response?.type !== 'imported') {
             return undefined;
         }
         if (response.leaseHeldElsewhere) {
-            // Another window is importing into the same history.
+            // Another window is importing into the same history; what it
+            // writes shows here too.
+            this.elsewhere = true;
             this.setStatus('ready');
             this.changed.fire();
-            return undefined;
+            return 'held';
         }
+        this.elsewhere = false;
         const s = response.summary;
         this.summary = s;
         this.setStatus('ready');
@@ -378,6 +418,13 @@ export class UsageService implements vscode.Disposable {
                 case 'failed':
                     if (response.failure === 'store-read-only') {
                         this.deps.log.warn('Claude Code usage: the history was created by a newer LLM Tokenizer, so it is read-only here');
+                        this.setStatus('read-only');
+                    } else if (response.failure === 'outdated') {
+                        if (this.currentStatus !== 'read-only') {
+                            this.deps.log.warn(
+                                'Claude Code usage: a newer LLM Tokenizer, in another window, updates this history; reload this window to update it here',
+                            );
+                        }
                         this.setStatus('read-only');
                     } else {
                         this.deps.log.warn(`Claude Code usage: ${response.failure} (${response.errorName})`);
@@ -572,6 +619,10 @@ async function refreshCommand(service: UsageService): Promise<void> {
     if (summary) {
         void vscode.window.showInformationMessage(
             `LLM Tokenizer: read ${summary.read} changed of ${summary.files} Claude Code transcripts.`,
+        );
+    } else if (service.updatingElsewhere) {
+        void vscode.window.showInformationMessage(
+            'LLM Tokenizer: another window is updating the Claude Code usage history; this one shows it as it goes.',
         );
     } else if (service.status !== 'ready') {
         void vscode.window.showWarningMessage('LLM Tokenizer: Claude Code usage could not be refreshed; see the log.');

@@ -36,7 +36,11 @@ import type { SessionSighting } from './types';
 const PROVIDER = 'claude-code';
 
 /** Why a file was not read this pass. */
-export type SkipReason = 'missing' | 'unreadable' | 'busy' | 'crashed' | 'error';
+/**
+ * Why a file was not read this pass. `newer`: a newer parser read it, in a
+ * window running a newer LLM Tokenizer, and this one must not rewrite it.
+ */
+export type SkipReason = 'missing' | 'unreadable' | 'busy' | 'crashed' | 'newer' | 'error';
 
 export interface ImportSummary {
     roots: number;
@@ -152,6 +156,28 @@ async function runImport(
         elapsedMs: 0,
     };
 
+    // A Clear in another window, mid-pass, empties the store under this one:
+    // rows read against the old checkpoints would then be written after the
+    // rows before them were deleted, and the file checkpointed at its end, so
+    // that the deleted rows never came back. Every write therefore checks,
+    // under the write lock, that the store is still the one the pass began
+    // with; once it is not, nothing more is written and the pass ends, so the
+    // next one reads every file from its start.
+    const generation = store.generation();
+    let cleared = false;
+    const writeIfCurrent = (work: () => void): boolean => {
+        if (!cleared) {
+            store.transaction(() => {
+                if (store.generation() !== generation) {
+                    cleared = true;
+                    return;
+                }
+                work();
+            });
+        }
+        return !cleared;
+    };
+
     let batch: { file: TranscriptFile; result: ReadResult; previous: FileCheckpoint | undefined; guarded: boolean }[] = [];
     const flush = () => {
         if (batch.length === 0) {
@@ -159,7 +185,7 @@ async function runImport(
         }
         const pending = batch;
         batch = [];
-        store.transaction(() => {
+        writeIfCurrent(() => {
             for (const { file, result, previous, guarded } of pending) {
                 write(store, file, result, previous);
                 if (guarded) {
@@ -174,12 +200,16 @@ async function runImport(
         // A fixed order, so that equal records always resolve the same way.
         const files = [...unsorted].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
         for (const file of files) {
-            if (options.isCancelled?.()) {
+            if (cleared || options.isCancelled?.()) {
                 summary.cancelled = true;
                 return false;
             }
             summary.files++;
             const previous = store.getFile(PROVIDER, file.path);
+            if (previous && previous.parserVersion > PARSER_VERSION) {
+                increment(summary.skipped, 'newer');
+                continue;
+            }
 
             let state: FileState;
             try {
@@ -196,7 +226,7 @@ async function runImport(
             let guard: ReadGuard | undefined;
             if (state.size > largeFileBytes) {
                 flush();
-                guard = guardRead(store, file.path, now());
+                guard = guardRead(store, file.path, now(), writeIfCurrent);
                 if (!guard) {
                     increment(summary.skipped, 'crashed');
                     continue;
@@ -209,14 +239,14 @@ async function runImport(
             } catch (error) {
                 if (guard) {
                     // A failure the reader caught is not a crash.
-                    settleGuard(store, guard);
+                    settleGuard(store, guard, writeIfCurrent);
                 }
                 increment(summary.skipped, skipReason(error));
                 continue;
             }
             if (result.unchanged) {
                 if (guard) {
-                    settleGuard(store, guard);
+                    settleGuard(store, guard, writeIfCurrent);
                 }
                 summary.unchanged++;
                 continue;
@@ -251,6 +281,7 @@ async function runImport(
 
     await plan(importFiles, summary);
     flush();
+    summary.cancelled ||= cleared;
 
     summary.elapsedMs = Math.round(performance.now() - started);
     return summary;
@@ -283,14 +314,25 @@ export async function importUnderLease(
         },
         isCancelled: () => lost || (options.isCancelled?.() ?? false),
     };
-    return paths ? importPaths(store, roots, paths, leased) : importRoots(store, roots, leased);
+    try {
+        return await (paths ? importPaths(store, roots, paths, leased) : importRoots(store, roots, leased));
+    } finally {
+        // Held only for the pass: another window's hint should not wait out
+        // a heartbeat to import its own changes.
+        store.releaseLease('import', holder);
+    }
 }
 
 /**
  * Before a large file is read: its guard, committed so that a crash during
  * the read is counted by the next pass, or undefined to skip the file.
  */
-function guardRead(store: UsageStore, filePath: string, now: number): ReadGuard | undefined {
+function guardRead(
+    store: UsageStore,
+    filePath: string,
+    now: number,
+    writeIfCurrent: (work: () => void) => boolean,
+): ReadGuard | undefined {
     const previous = store.getReadGuard(PROVIDER, filePath);
     // A read that never finished counts as a crash of this file.
     const crashed = previous?.inProgress === true;
@@ -303,17 +345,16 @@ function guardRead(store: UsageStore, filePath: string, now: number): ReadGuard 
     };
     if (guard.crashCount >= MAX_FILE_CRASHES && guard.lastCrash !== null && now - guard.lastCrash < CRASH_RETRY_MS) {
         if (crashed) {
-            settleGuard(store, guard);
+            settleGuard(store, guard, writeIfCurrent);
         }
         return undefined;
     }
-    store.transaction(() => store.putReadGuard(guard));
-    return guard;
+    return writeIfCurrent(() => store.putReadGuard(guard)) ? guard : undefined;
 }
 
 /** Record that a guarded read ended without crashing, keeping its count. */
-function settleGuard(store: UsageStore, guard: ReadGuard): void {
-    store.transaction(() =>
+function settleGuard(store: UsageStore, guard: ReadGuard, writeIfCurrent: (work: () => void) => boolean): void {
+    writeIfCurrent(() =>
         guard.crashCount === 0
             ? store.deleteReadGuard(PROVIDER, guard.path)
             : store.putReadGuard({ ...guard, inProgress: false }),

@@ -309,6 +309,61 @@ suite('usage transcripts', () => {
         assert.ok(store.getFile('claude-code', s1));
     });
 
+    test('a Clear in another window mid-pass leaves nothing behind it: every file is read again', async () => {
+        // Window B reads files against their checkpoints, then window A
+        // clears, then B writes. Unchecked, B's tails landed under end-of-file
+        // checkpoints and the rows before them never came back.
+        const files = transcripts(3);
+        const a = freshStore();
+        const b = freshStore();
+        await importRoots(b, [tmp]);
+        for (const [i, file] of files.entries()) {
+            fs.appendFileSync(file, line(assistant(`late${i}`, 1)));
+        }
+        let seen = 0;
+        const summary = await importRoots(b, [tmp], {
+            isCancelled: () => {
+                if (++seen === 3) {
+                    a.clear();
+                }
+                return false;
+            },
+        });
+        assert.ok(summary.cancelled, 'the pass went on after the Clear');
+        assert.strictEqual([...b.requests()].length, 0, 'rows were written after the Clear');
+
+        await importRoots(b, [tmp]);
+        assert.deepStrictEqual([...b.requests()].map(r => r.messageId).sort(), ['late0', 'late1', 'late2', 'm0', 'm1', 'm2']);
+    });
+
+    test("a file a newer parser read is left alone, and no parser restart goes downward", async () => {
+        const [file] = transcripts(1);
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        const checkpoint = store.getFile('claude-code', file);
+        assert.ok(checkpoint);
+        const [row] = [...store.requests()];
+        store.transaction(() => {
+            store.putFile({ ...checkpoint, parserVersion: PARSER_VERSION + 1 });
+            store.upsertRequests([{ ...row, parserVersion: PARSER_VERSION + 1 }]);
+        });
+        fs.appendFileSync(file, line(assistant('later', 1)));
+
+        const summary = await importRoots(store, [tmp]);
+        assert.deepStrictEqual([summary.read, summary.skipped], [0, { newer: 1 }]);
+        assert.deepStrictEqual([...store.requests()].map(r => [r.messageId, r.parserVersion]), [['m0', PARSER_VERSION + 1]]);
+        const read = readTranscript(mainFile(file), { ...checkpoint, parserVersion: PARSER_VERSION + 1 });
+        assert.deepStrictEqual([read.unchanged, read.restarted], [true, null]);
+    });
+
+    test('the import lease is held for the pass, and free as soon as it ends', async () => {
+        transcripts(2);
+        const a = freshStore();
+        const b = freshStore();
+        assert.ok(await importUnderLease(a, [tmp], 'window-a'));
+        assert.ok(b.acquireLease('import', 'window-b', PARSER_VERSION), "the finished pass kept the lease");
+    });
+
     test('a newer parser drops the rows its file no longer gives', async () => {
         const [file] = transcripts(1);
         const store = freshStore();
@@ -479,17 +534,19 @@ suite('usage worker', () => {
         fs.rmSync(tmp, { recursive: true, force: true });
     });
 
-    test('imports in its own thread, and a second window defers to the lease holder', async () => {
+    test("imports in its own thread, and a finished pass leaves the next window's free to run", async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const a = host();
         const b = host();
 
-        const first = await a.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        const first = await a.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-a' });
         assert.strictEqual(first.type, 'imported', JSON.stringify(first));
         assert.ok(first.type === 'imported' && !first.leaseHeldElsewhere && first.summary.read === 4);
 
-        const second = await b.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
-        assert.ok(second.type === 'imported' && second.leaseHeldElsewhere, JSON.stringify(second));
+        // The lease lasts one pass: the second window imports at once, and
+        // finds nothing left to read.
+        const second = await b.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-b' });
+        assert.ok(second.type === 'imported' && !second.leaseHeldElsewhere && second.summary.unchanged === 4, JSON.stringify(second));
 
         const cleared = await a.send({ type: 'clear', id: 0, storeFile });
         assert.deepStrictEqual(cleared, { type: 'cleared', id: cleared.id, generation: 1 });
@@ -552,6 +609,37 @@ suite('usage worker', () => {
             const response = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: paths as string[] });
             assert.deepStrictEqual(response.type === 'failed' && response.failure, 'bad-request', JSON.stringify(paths).slice(0, 40));
         }
+    });
+
+    test('a failed open is tried again on the next request, not kept', async () => {
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        fs.mkdirSync(storeFile, { recursive: true });
+        const worker = host();
+        const first = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        assert.deepStrictEqual(first.type === 'failed' && first.failure, 'store-io', JSON.stringify(first));
+        fs.rmSync(storeFile, { recursive: true });
+        const second = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        assert.ok(second.type === 'imported' && second.summary?.read === 4, JSON.stringify(second));
+    });
+
+    test("a worker holds the lease as its window, and an older parser's import is refused as outdated", async () => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const opened = UsageStore.open(sqlite, storeFile);
+        assert.strictEqual(opened.status, 'ready');
+        // The window's earlier worker died holding it.
+        assert.ok(opened.store.acquireLease('import', 'window-1', PARSER_VERSION));
+        const worker = host();
+        const other = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-2' });
+        assert.ok(other.type === 'imported' && other.leaseHeldElsewhere, JSON.stringify(other));
+        const same = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-1' });
+        assert.ok(same.type === 'imported' && !same.leaseHeldElsewhere && same.summary.read === 4, JSON.stringify(same));
+
+        assert.ok(opened.store.acquireLease('import', 'reloaded', PARSER_VERSION + 1));
+        opened.store.releaseLease('import', 'reloaded');
+        opened.store.close();
+        const outdated = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-1' });
+        assert.deepStrictEqual(outdated.type === 'failed' && outdated.failure, 'outdated', JSON.stringify(outdated));
     });
 
     test('nothing a record says reaches a message or the log', async () => {

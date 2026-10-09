@@ -11,6 +11,7 @@ import {
     HINT_DEBOUNCE_MS,
     HOURLY_MS,
     IDLE_MS,
+    LEASE_RETRY_MS,
     MAX_HINT_PATHS,
     UsageService,
     type Clock,
@@ -240,6 +241,48 @@ suite('usage service', () => {
         release();
         await Promise.all(calls);
         assert.deepStrictEqual(host.sent, ['import', 'import']);
+    });
+
+    test('a pass refused because another window holds the lease is tried again, for the same files', async () => {
+        const { service, clock, host, hints } = make();
+        await settle();
+        const held = service.hold();
+        let refusals = 1;
+        host.answer = request =>
+            request.type === 'import' && refusals-- > 0
+                ? Promise.resolve({ type: 'imported', id: request.id, summary: null, leaseHeldElsewhere: true })
+                : Promise.resolve(defaultAnswer(request));
+        host.imports.length = 0;
+        hints[0]('/r/projects/p/a.jsonl');
+        await clock.advance(HINT_DEBOUNCE_MS);
+        assert.ok(service.updatingElsewhere);
+        await clock.advance(LEASE_RETRY_MS);
+        assert.deepStrictEqual(host.imports, [['/r/projects/p/a.jsonl'], ['/r/projects/p/a.jsonl']]);
+        assert.ok(!service.updatingElsewhere);
+        held.dispose();
+    });
+
+    test('hints never put the hourly full pass off', async () => {
+        // A hint's pass covers only its files: were it to re-arm the hourly
+        // timer, steady hints would mean no full pass at all.
+        const { service, clock, host, hints } = make();
+        await settle();
+        const held = service.hold();
+        host.imports.length = 0;
+        for (let minute = 0; minute < 3 * 60; minute += 30) {
+            hints[0]('/r/projects/p/a.jsonl');
+            await clock.advance(30 * 60_000);
+        }
+        assert.ok(host.imports.filter(i => i === 'all').length >= 2, JSON.stringify(host.imports));
+        held.dispose();
+    });
+
+    test("an older window, outdated by a newer one's parser, shows the history read-only", async () => {
+        const { service, host } = make();
+        host.answer = request =>
+            Promise.resolve(request.type === 'import' ? { type: 'failed', id: request.id, failure: 'outdated', errorName: 'StoreError' } : defaultAnswer(request));
+        await settle();
+        assert.strictEqual(service.status, 'read-only');
     });
 
     test('an idle worker is let go after 10 minutes, its history closed first', async () => {

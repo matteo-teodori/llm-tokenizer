@@ -18,6 +18,7 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
@@ -260,6 +261,7 @@ CREATE TABLE limit_hits (
 CREATE TABLE lease (
     role TEXT PRIMARY KEY,
     holder TEXT NOT NULL,
+    host TEXT NOT NULL,
     pid INTEGER NOT NULL,
     parser_version INTEGER NOT NULL,
     heartbeat INTEGER NOT NULL
@@ -800,32 +802,56 @@ export class UsageStore {
      * Hold `role` (one importing window at a time), or keep holding it.
      *
      * Taken when it is free, when its heartbeat is older than
-     * LEASE_TAKEOVER_MS, when its holder's process has exited, or when its
-     * holder runs an older parser: a window that was not reloaded after an
-     * update must not write rows the newer parser would replace.
+     * LEASE_TAKEOVER_MS, when its holder's process has exited on this host
+     * (a pid means nothing on another one, as with a home on a network
+     * filesystem), or when its holder runs an older parser.
+     *
+     * Never taken by an older parser than one that has held it before: a
+     * window not reloaded after an update would otherwise read every file
+     * again, its way, and the two windows would take turns undoing each
+     * other's rows. See `outdated`.
      *
      * @returns whether `holder` now holds it.
      */
     acquireLease(role: string, holder: string, parserVersion: number): boolean {
         return this.transaction(() => {
+            const newest = this.maxParserVersion();
+            if (parserVersion < newest) {
+                return false;
+            }
             const now = this.now();
-            const current = this.db.prepare('SELECT holder, pid, parser_version, heartbeat FROM lease WHERE role = ?').get(role) as
-                | { holder: string; pid: number; parser_version: number; heartbeat: number }
+            const current = this.db.prepare('SELECT holder, host, pid, parser_version, heartbeat FROM lease WHERE role = ?').get(role) as
+                | { holder: string; host: string; pid: number; parser_version: number; heartbeat: number }
                 | undefined;
             const mine = current?.holder === holder;
             const free =
                 !current ||
                 now - current.heartbeat > LEASE_TAKEOVER_MS ||
                 current.parser_version < parserVersion ||
-                !this.isAlive(current.pid);
+                (current.host === os.hostname() && !this.isAlive(current.pid));
             if (!mine && !free) {
                 return false;
             }
             this.db
-                .prepare('INSERT OR REPLACE INTO lease (role, holder, pid, parser_version, heartbeat) VALUES (?, ?, ?, ?, ?)')
-                .run(role, holder, process.pid, parserVersion, now);
+                .prepare('INSERT OR REPLACE INTO lease (role, holder, host, pid, parser_version, heartbeat) VALUES (?, ?, ?, ?, ?, ?)')
+                .run(role, holder, os.hostname(), process.pid, parserVersion, now);
+            if (parserVersion > newest) {
+                this.db
+                    .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('max_parser_version', ?)")
+                    .run(String(parserVersion));
+            }
             return true;
         });
+    }
+
+    /** Whether a newer parser than `parserVersion` has written this history: then this one must not. */
+    outdated(parserVersion: number): boolean {
+        return parserVersion < this.maxParserVersion();
+    }
+
+    private maxParserVersion(): number {
+        const row = this.db.prepare("SELECT value FROM meta WHERE key = 'max_parser_version'").get() as { value: string } | undefined;
+        return row ? Number(row.value) : 0;
     }
 
     releaseLease(role: string, holder: string): void {

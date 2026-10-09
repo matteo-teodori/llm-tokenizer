@@ -343,7 +343,9 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
             },
         };
 
-        if (previous && isUnchanged(previous, state)) {
+        // A newer parser's checkpoint is that parser's to move; nothing here
+        // rewrites it.
+        if (previous && (isUnchanged(previous, state) || previous.parserVersion > PARSER_VERSION)) {
             return { ...result, unchanged: true, checkpoint: previous };
         }
 
@@ -360,7 +362,7 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
 }
 
 function restartReason(fd: number, state: FileState, previous: ReadCheckpoint): ReadResult['restarted'] {
-    if (previous.parserVersion !== PARSER_VERSION) {
+    if (previous.parserVersion < PARSER_VERSION) {
         return 'parser';
     }
     if (previous.ino !== null && state.ino !== null && (state.ino !== previous.ino || state.dev !== previous.dev)) {

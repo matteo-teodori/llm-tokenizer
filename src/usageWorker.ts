@@ -20,7 +20,7 @@ import { isTimeZone } from './usage/aggregate';
 import { importUnderLease } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS } from './usage/report';
-import { sessionTranscripts } from './usage/transcripts';
+import { PARSER_VERSION, sessionTranscripts } from './usage/transcripts';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import type { UsageFailure, UsageWorkerRequest, UsageWorkerResponse } from './usage/protocol';
 
@@ -35,8 +35,12 @@ const MAX_PATHS = 1000;
 /** A session id becomes part of a file name, so only what Claude Code's ids are made of. */
 const SESSION_ID = /^[A-Za-z0-9_-]{1,200}$/;
 
-/** Identifies this worker in the import lease, unique per thread. */
-const holder = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+/** Holds the import lease when the window does not name itself; unique per thread. */
+const ownHolder = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+function holderOf(request: { holder?: unknown }): string {
+    return typeof request.holder === 'string' && request.holder.length > 0 && request.holder.length <= 100 ? request.holder : ownHolder;
+}
 
 const sqlite = loadSqlite();
 let opened: { file: string; result: OpenResult } | undefined;
@@ -56,7 +60,13 @@ function storeAt(file: string): OpenResult {
         }
         opened = { file, result: UsageStore.open(sqlite, file) };
     }
-    return opened.result;
+    const result = opened.result;
+    // A failure is not kept: a store busy or briefly unreachable at the first
+    // request would otherwise fail every request after it.
+    if (result.status === 'failed') {
+        opened = undefined;
+    }
+    return result;
 }
 
 function failure(result: OpenResult): UsageFailure {
@@ -108,7 +118,11 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
             }
-            const summary = await importUnderLease(store, request.roots, holder, { isCancelled }, paths);
+            if (store.outdated(PARSER_VERSION)) {
+                reply({ type: 'failed', id: request.id, failure: 'outdated', errorName: 'StoreError' });
+                return;
+            }
+            const summary = await importUnderLease(store, request.roots, holderOf(request), { isCancelled }, paths);
             reply(
                 summary
                     ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false }
@@ -122,9 +136,9 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 return;
             }
             const paths = request.roots.flatMap(root => sessionTranscripts(root, request.sessionId));
-            if (paths.length > 0) {
+            if (paths.length > 0 && !store.outdated(PARSER_VERSION)) {
                 // Null when another window holds the lease: what is stored is read all the same.
-                await importUnderLease(store, request.roots, holder, { isCancelled }, paths);
+                await importUnderLease(store, request.roots, holderOf(request), { isCancelled }, paths);
             }
             reply({
                 type: 'liveContext',
