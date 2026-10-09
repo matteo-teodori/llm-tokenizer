@@ -1,5 +1,6 @@
 import * as assert from 'assert';
-import { contentSecurityPolicy, createNonce, escapeHtml } from '../../src/html';
+import * as vm from 'vm';
+import { PAGE_TEXT_HELPERS, contentSecurityPolicy, createNonce, embed, escapeHtml } from '../../src/html';
 
 suite('escapeHtml', () => {
     test('neutralises the script-injection payloads a file name can carry', () => {
@@ -53,5 +54,55 @@ suite('content security policy', () => {
         const nonces = new Set(Array.from({ length: 50 }, () => createNonce()));
         assert.strictEqual(nonces.size, 50);
         assert.ok([...nonces].every(n => n.length >= 16));
+    });
+});
+
+suite('embed', () => {
+    test('data cannot close the script block it is embedded in', () => {
+        const embedded = embed({ name: '</script><script>alert(1)</script>' });
+        assert.ok(!embedded.includes('</script'), embedded);
+        assert.ok(!embedded.includes('<'), embedded);
+    });
+
+    test('line and paragraph separators cannot end a statement early', () => {
+        // Legal inside a JSON string, but line terminators in JavaScript.
+        const embedded = embed('a\u2028b\u2029c');
+        assert.ok(!/[\u2028\u2029]/.test(embedded), 'a raw separator survived');
+    });
+
+    test('what is embedded reads back unchanged', () => {
+        const value = { path: 'src/<a>.ts', tokens: 12, note: 'x\u2028y', nested: [1, null, 'é'] };
+        assert.deepStrictEqual(JSON.parse(embed(value)), value);
+    });
+});
+
+suite('page text helpers', () => {
+    // The snippet runs inside the page, so it is tested by running it.
+    const helpers = vm.runInNewContext(`${PAGE_TEXT_HELPERS}; ({ escapeText, cell, csv })`) as {
+        escapeText(s: string): string;
+        cell(value: unknown): string;
+        csv(value: unknown): string;
+    };
+
+    test('escapeText escapes exactly as escapeHtml does', () => {
+        for (const text of ['<img src=x onerror=alert(1)>', '" onmouseover="x', "' x", '&lt;', 'plain/path.ts']) {
+            assert.strictEqual(helpers.escapeText(text), escapeHtml(text), text);
+        }
+    });
+
+    test('a tab or line break in a name cannot act as a separator', () => {
+        assert.strictEqual(helpers.cell('a\tb'), 'a b');
+        assert.strictEqual(helpers.cell('a\r\nb\n\nc'), 'a b c');
+        assert.strictEqual(helpers.cell(42), '42');
+    });
+
+    test('a CSV field is quoted and cannot be read as a formula', () => {
+        for (const lead of ['=', '+', '-', '@']) {
+            assert.strictEqual(helpers.csv(`${lead}cmd`), `"'${lead}cmd"`, lead);
+        }
+        assert.strictEqual(helpers.csv('a=b'), '"a=b"', 'only a leading sign is defused');
+        assert.strictEqual(helpers.csv('say "hi"'), '"say ""hi"""');
+        assert.strictEqual(helpers.csv('a\tb\nc'), '"a b c"');
+        assert.strictEqual(helpers.csv(7), '"7"');
     });
 });
