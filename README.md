@@ -166,21 +166,37 @@ the conversation again with every turn and the cache serves it. A total marked
 
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
 the context of the Claude Code session running in this workspace is, with the
-80% and 100% colours where the model's window is known. It reads Claude
-Code's running-session files too.
+80% and 100% colours where the model's window is known. The window follows
+Claude Code's own rules, `CLAUDE_CODE_DISABLE_1M_CONTEXT` included, wherever
+that is set. It reads Claude Code's running-session files too.
 
 **Export CSV** gives, per day and model, every input a hand-made cost
 calculation needs: requests, input, cache writes (5-minute and 1-hour), cache
 reads, output, thinking, web searches and fetches. It gives no prices.
 
-**What is kept, and where.** Token counts, model ids, times, session ids and
-project folders, in a database in this extension's own storage
+**What is kept, and where.** A database in this extension's own storage
 (`claude-code-usage/usage.sqlite` under VS Code's global storage for LLM
-Tokenizer). Prompts, responses, thinking and tool contents are never kept,
-and nothing is sent anywhere. The history outlives Claude Code's own records,
-which Claude Code deletes after 30 days by default.
-**Clear Claude Code Usage History** removes it; anything still on disk is read
-again at the next refresh.
+Tokenizer) keeps:
+- each request's token counts, model, effort, time and Claude Code version,
+  and its ids: message, request, session, and the subagent or workflow run it
+  came from;
+- the folder each session started in;
+- each transcript's path, size, file id and how far it was read, with a hash
+  of the last 64 bytes read, to tell what changed;
+- compactions' sizes, and the usage limits reached, with when they reset;
+- while an import runs, the window's process id and this machine's name, so
+  that two windows never import at once.
+
+Prompts, responses, thinking and tool inputs or results are never kept, and
+nothing is sent anywhere. The history outlives Claude Code's own records,
+which Claude Code deletes after 30 days by default. A history that can no
+longer be read is moved aside and a new one started, and the panel says so.
+**Clear Claude Code Usage History** removes the history and any copy moved
+aside; anything still on disk is read again at the next refresh.
+
+Its settings are machine settings, so a repository's settings cannot turn it
+on or point it at another folder. In a dev container, though, the container's
+settings can come from the repository's `devcontainer.json`.
 
 ### What it counts, and what it cannot see
 

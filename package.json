@@ -462,7 +462,7 @@
           "type": "boolean",
           "default": false,
           "scope": "machine",
-          "description": "Show how many tokens Claude Code processed, read from its own session records on this machine (the projects folder in ~/.claude, or in CLAUDE_CONFIG_DIR). Only token counts, model ids, times, session ids and project folders are kept, in a database in this extension's own storage. Prompts, responses and tool contents are never kept, and nothing is sent anywhere. The history is kept after Claude Code deletes its own records; Clear Claude Code Usage History removes it."
+          "description": "Show how many tokens Claude Code processed, read from its own session records on this machine (the projects folder in ~/.claude, or in CLAUDE_CONFIG_DIR). Kept, in a database in this extension's own storage: each request's token counts, model, effort, time, ids and Claude Code version, the folder each session started in, and which transcripts were read and how far. Prompts, responses, thinking and tool contents are never kept, and nothing is sent anywhere. The history is kept after Claude Code deletes its own records; Clear Claude Code Usage History removes it."
         },
         "llm-tokenizer.claudeCodeDataDirectory": {
           "type": "string",

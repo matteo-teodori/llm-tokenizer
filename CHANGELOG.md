@@ -21,14 +21,21 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   - Each request is counted once, from its most complete record: Claude Code
     writes a line per streaming update, and summing them would count about
     twice the tokens.
-  - Only counts, model ids, times, session ids and project folders are kept,
-    in a database in this extension's storage. Prompts, responses and tool
-    contents are never kept, and nothing is sent anywhere. **Clear Claude
-    Code Usage History** removes it.
+  - Kept, in a database in this extension's storage: each request's token
+    counts, model, effort, time, ids and Claude Code version, the folder
+    each session started in, and which transcripts were read and how far.
+    Prompts, responses, thinking and tool contents are never kept, and
+    nothing is sent anywhere. **Clear Claude Code Usage History** removes
+    it. The README lists everything kept.
   - Every setting is machine-scoped, so a repository's own settings cannot
-    turn it on.
+    turn it on; in a dev container, the container's settings can.
   - A history written by a later version of LLM Tokenizer opens read-only in
     this one.
+  - It needs the editor's `node:sqlite`, which every VS Code this version
+    supports has; an editor without it is told why nothing shows. Tested on
+    VS Code 1.141.0 and 1.105.0, on macOS.
+  - **Before going back to 2.1.2:** its Clear Downloaded Tokenizers deletes
+    this extension's whole storage, and this history with it.
 
 ### Fixed
 - **Clear Downloaded Tokenizers deletes only the tokenizers.** It deleted
@@ -58,9 +65,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   and before every release.
 - CONTRIBUTING's layout and commands cover what exists now, and its
   changelog rule matches the dated sections this file uses.
-- `WorkerHost` takes a heap limit, and can let a worker go without being
-  disposed. The registry records the window Claude Code gives Opus 4.6 and
-  Sonnet 4.6 without their `[1m]` variant.
+- `WorkerHost` takes a heap limit, can let a worker go without being
+  disposed, and resolves its stop once the thread has ended. It gives up on
+  a request when the worker goes silent, no longer when it is slow: any
+  message from the worker restarts every request's wait. The registry
+  records the window Claude Code gives Opus 4.6 and Sonnet 4.6 without
+  their `[1m]` variant.
 
 ## [2.1.2] - 2026-10-09
 

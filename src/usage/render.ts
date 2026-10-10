@@ -94,7 +94,7 @@ function emptyState(view: PanelView): string | undefined {
                 <p>Turned on, LLM Tokenizer reads Claude Code's own session records on this machine${view.where ? ` (${escapeHtml(view.where)})` : ''},
                 and shows how many tokens Claude Code processed: by day, project, session and model.</p>
                 <ul>
-                    <li>Kept: token counts, model ids, times, session ids and project folders, in a database in this extension's own storage.</li>
+                    <li>Kept, in a database in this extension's own storage: each request's token counts, model, effort, time, ids and Claude Code version; the folder each session started in; and which transcripts were read, and how far.</li>
                     <li>Never kept: prompts, responses, thinking, tool inputs or results.</li>
                     <li>Nothing is sent anywhere.</li>
                     <li>The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Claude Code Usage History removes it.</li>
