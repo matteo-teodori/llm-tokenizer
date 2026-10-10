@@ -6,8 +6,8 @@
  * session records after `cleanupPeriodDays` (30 by default), so nothing here
  * may be treated as a cache that can be thrown away and rebuilt. Hence
  * forward-only migrations with a backup before each, a read-only mode for a
- * database a newer version created, and, for a corrupt file, a rename rather
- * than a delete.
+ * database a newer version created, and, for a corrupt file, a new history
+ * started beside it, which is left as it is rather than deleted.
  *
  * Measured, on the stand-in schema: a full import of about 4 GB of records in
  * 6.49 s on the engines floor's runtime, a 9.5 MB database for about 133,000
@@ -23,7 +23,7 @@ import * as path from 'path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 import { BUCKET_MS } from './aggregate';
-import { copiesBeside } from './historyFiles';
+import { copiesBeside, currentHistory, ownFiles } from './historyFiles';
 import { isComplete } from './provenance';
 import type {
     BucketSums,
@@ -580,11 +580,11 @@ export class UsageStore {
 
     /**
      * Request sums by 15-minute UTC bucket, session, model, variant, kind and
-     * effort, from `sinceMs` on. Every current UTC offset is a multiple of 15
+     * effort, from `sinceMs` on and before `untilMs`. Every current UTC offset is a multiple of 15
      * minutes, so no bucket straddles a local midnight, and the caller folds
      * them into days in any zone exactly.
      */
-    bucketSums(sinceMs: number): BucketSums[] {
+    bucketSums(sinceMs: number, untilMs = Number.MAX_SAFE_INTEGER): BucketSums[] {
         return this.db
             .prepare(
                 `SELECT ts / ${BUCKET_MS} AS bucket, session_id, model, variant, kind, effort,
@@ -595,10 +595,10 @@ export class UsageStore {
                         coalesce(sum(thinking), 0) AS thinking, coalesce(sum(web_search), 0) AS web_search,
                         coalesce(sum(web_fetch), 0) AS web_fetch
                  FROM requests
-                 WHERE ts >= ?
+                 WHERE ts >= ? AND ts < ?
                  GROUP BY bucket, session_id, model, variant, kind, effort`,
             )
-            .all(sinceMs)
+            .all(sinceMs, untilMs)
             .map(row => ({
                 bucket: row.bucket as number,
                 sessionId: row.session_id as string,
@@ -622,15 +622,15 @@ export class UsageStore {
             }));
     }
 
-    /** A session's latest request in its main conversation: what its context held then. */
-    latestMainRequest(sessionId: string): LatestRequest | undefined {
+    /** A session's latest request in its main conversation before `untilMs`: what its context held then. */
+    latestMainRequest(sessionId: string, untilMs = Number.MAX_SAFE_INTEGER): LatestRequest | undefined {
         const row = this.db
             .prepare(
                 `SELECT ts, model, variant, input, cache_creation, cache_read FROM requests
-                 WHERE session_id = ? AND kind = 'main' AND is_main = 1
+                 WHERE session_id = ? AND kind = 'main' AND is_main = 1 AND ts < ?
                  ORDER BY ts DESC, byte_offset DESC LIMIT 1`,
             )
-            .get(sessionId);
+            .get(sessionId, untilMs);
         return row
             ? {
                   timestamp: row.ts as number,
@@ -643,14 +643,14 @@ export class UsageStore {
             : undefined;
     }
 
-    /** A session's compactions of its main conversation, newest first. */
-    sessionCompactions(sessionId: string): Compaction[] {
+    /** A session's compactions of its main conversation before `untilMs`, newest first. */
+    sessionCompactions(sessionId: string, untilMs = Number.MAX_SAFE_INTEGER): Compaction[] {
         return this.db
             .prepare(
                 `SELECT uuid, session_id, kind, ts, trigger, pre_tokens, post_tokens FROM compactions
-                 WHERE session_id = ? AND kind = 'main' ORDER BY ts DESC, uuid`,
+                 WHERE session_id = ? AND kind = 'main' AND ts < ? ORDER BY ts DESC, uuid`,
             )
-            .all(sessionId)
+            .all(sessionId, untilMs)
             .map(row => ({
                 uuid: row.uuid as string,
                 sessionId: row.session_id as string,
@@ -662,13 +662,18 @@ export class UsageStore {
             }));
     }
 
-    /** The span and size of the whole history, whatever range is shown. */
-    coverage(): StoreCoverage {
-        const requests = this.db.prepare('SELECT min(ts) AS start, max(ts) AS newest, count(*) AS n FROM requests').get() as {
-            start: number | null;
-            newest: number | null;
-            n: number;
-        };
+    /**
+     * The span and size of the whole history, whatever range is shown: its
+     * span before `untilMs`, and how many requests are dated later.
+     */
+    coverage(untilMs = Number.MAX_SAFE_INTEGER): StoreCoverage {
+        const requests = this.db
+            .prepare(
+                `SELECT min(ts) FILTER (WHERE ts < :until) AS start, max(ts) FILTER (WHERE ts < :until) AS newest,
+                        count(*) AS n, count(*) FILTER (WHERE ts >= :until) AS ahead
+                 FROM requests`,
+            )
+            .get({ until: untilMs }) as { start: number | null; newest: number | null; n: number; ahead: number };
         const files = this.db
             .prepare('SELECT count(*) AS n, coalesce(sum(oversize_lines), 0) AS oversize, coalesce(sum(malformed_lines), 0) AS malformed FROM files')
             .get() as { n: number; oversize: number; malformed: number };
@@ -676,16 +681,17 @@ export class UsageStore {
             start: requests.start,
             newest: requests.newest,
             requests: requests.n,
+            ahead: requests.ahead,
             files: files.n,
             oversizeLines: files.oversize,
             malformedLines: files.malformed,
         };
     }
 
-    compactions(sinceMs = 0): Compaction[] {
+    compactions(sinceMs = 0, untilMs = Number.MAX_SAFE_INTEGER): Compaction[] {
         return this.db
-            .prepare('SELECT uuid, session_id, kind, ts, trigger, pre_tokens, post_tokens FROM compactions WHERE ts >= ? ORDER BY ts, uuid')
-            .all(sinceMs)
+            .prepare('SELECT uuid, session_id, kind, ts, trigger, pre_tokens, post_tokens FROM compactions WHERE ts >= ? AND ts < ? ORDER BY ts, uuid')
+            .all(sinceMs, untilMs)
             .map(row => ({
                 uuid: row.uuid as string,
                 sessionId: row.session_id as string,
@@ -697,10 +703,10 @@ export class UsageStore {
             }));
     }
 
-    limitHits(sinceMs = 0): LimitHit[] {
+    limitHits(sinceMs = 0, untilMs = Number.MAX_SAFE_INTEGER): LimitHit[] {
         return this.db
-            .prepare('SELECT uuid, session_id, ts, limit_type, resets_at FROM limit_hits WHERE ts >= ? ORDER BY ts, uuid')
-            .all(sinceMs)
+            .prepare('SELECT uuid, session_id, ts, limit_type, resets_at FROM limit_hits WHERE ts >= ? AND ts < ? ORDER BY ts, uuid')
+            .all(sinceMs, untilMs)
             .map(row => ({
                 uuid: row.uuid as string,
                 sessionId: row.session_id as string,
@@ -796,12 +802,16 @@ export class UsageStore {
      * rows are overwritten (secure_delete), VACUUM returns the space when no
      * other window is busy with the database, and the write-ahead log, which
      * holds every page written since the last checkpoint, is folded into the
-     * file and emptied.
+     * file and emptied. The copies beside it, which hold the same history,
+     * are removed: a corrupt history set aside, an older one, the backup each
+     * migration starts from.
+     *
+     * What another window holds off, a read the checkpoint waits for or a
+     * copy it has open, is recorded in the history itself, and finished by
+     * `finishClear` at the next request of whichever window uses it.
      *
      * @returns `settled`: false while another window's read holds the
-     * checkpoint off, for `checkpoint()` to finish later; `copiesLeft`: the
-     * copies beside it that could not be removed (one that another process
-     * holds open, on Windows).
+     * checkpoint off; `copiesLeft`: the copies not removed yet.
      */
     clear(): { settled: boolean; copiesLeft: number } {
         const secure = (this.db.prepare('PRAGMA secure_delete').get() as { secure_delete: number }).secure_delete;
@@ -812,6 +822,7 @@ export class UsageStore {
                     this.db.exec(`DELETE FROM ${table}`);
                 }
                 this.db.exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
+                this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('clear_pending', ?)").run(JSON.stringify(copiesBeside(this.file)));
             });
         } finally {
             this.db.exec(`PRAGMA secure_delete = ${secure === 2 ? 'FAST' : secure === 1 ? 'ON' : 'OFF'}`);
@@ -823,19 +834,61 @@ export class UsageStore {
                 throw error;
             }
         }
-        const settled = this.checkpoint();
-        // The copies set aside beside it hold the same history: a corrupt
-        // file moved away, and the backup each migration starts from. Clear
-        // means all of it, as far as it can be removed.
-        let copiesLeft = 0;
-        for (const name of copiesBeside(this.file)) {
-            try {
-                fs.rmSync(path.join(path.dirname(this.file), name), { force: true });
-            } catch {
-                copiesLeft++;
-            }
+        return this.finishClear();
+    }
+
+    /**
+     * Finish the last Clear, as far as it can be now: remove the copies it
+     * listed that are still there, and still copies, then fold the log into
+     * the file and empty it. Cheap when there is nothing to finish: one
+     * lookup.
+     */
+    finishClear(): { settled: boolean; copiesLeft: number } {
+        const row = this.db.prepare("SELECT value FROM meta WHERE key = 'clear_pending'").get() as { value: string } | undefined;
+        if (!row) {
+            return { settled: true, copiesLeft: 0 };
         }
-        return { settled, copiesLeft };
+        const listed = pendingCopies(row.value);
+        const folder = path.dirname(this.file);
+        const copies = new Set(copiesBeside(this.file));
+        // Never the history in use now, which another window may have just started.
+        let inUse: Set<string> | undefined;
+        try {
+            const current = currentHistory(folder);
+            inUse = new Set(current === undefined ? [] : ownFiles(current));
+        } catch {
+            inUse = undefined;
+        }
+        const left = listed.filter(name => {
+            if (!copies.has(name) || inUse?.has(name)) {
+                // Gone already, or in use again: nothing to remove.
+                return false;
+            }
+            if (inUse === undefined) {
+                // Which history is in use cannot be told now: later.
+                return true;
+            }
+            try {
+                fs.rmSync(path.join(folder, name), { force: true });
+                return false;
+            } catch {
+                // Open in another window, on Windows: removed once it lets go.
+                return true;
+            }
+        });
+        if (left.length > 0) {
+            if (left.length !== listed.length) {
+                this.db.prepare("UPDATE meta SET value = ? WHERE key = 'clear_pending'").run(JSON.stringify(left));
+            }
+        } else {
+            this.db.exec("DELETE FROM meta WHERE key = 'clear_pending'");
+        }
+        const settled = this.checkpoint();
+        if (!settled && left.length === 0) {
+            // The checkpoint is still owed.
+            this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('clear_pending', '[]')").run();
+        }
+        return { settled, copiesLeft: left.length };
     }
 
     /**
@@ -858,10 +911,19 @@ export class UsageStore {
         this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('set_aside', ?)").run(name);
     }
 
-    /** The history this one replaced, while its file is still beside it. */
+    /**
+     * The history this one replaced, while its file is still beside it; or
+     * the newest one earlier builds set aside by renaming it, beside the
+     * name they gave the history.
+     */
     setAside(): string | undefined {
+        const copies = copiesBeside(this.file);
         const row = this.db.prepare("SELECT value FROM meta WHERE key = 'set_aside'").get() as { value: string } | undefined;
-        return row && copiesBeside(this.file).includes(row.value) ? row.value : undefined;
+        if (row && copies.includes(row.value)) {
+            return row.value;
+        }
+        const renamed = `${path.basename(this.file)}.corrupt-`;
+        return copies.filter(name => name.startsWith(renamed)).sort().pop();
     }
 
     /** Run `work` as one read, on one snapshot, whatever other windows commit meanwhile. */
@@ -1001,6 +1063,16 @@ function toCheckpoint(row: Record<string, unknown>): FileCheckpoint {
         malformedLines: row.malformed_lines as number,
         newestVersion: row.newest_version as string | null,
     };
+}
+
+/** The copy names a Clear left to remove, as it recorded them; anything else in the row is ignored. */
+function pendingCopies(value: string): string[] {
+    try {
+        const names = JSON.parse(value) as unknown;
+        return Array.isArray(names) ? names.filter((name): name is string => typeof name === 'string' && path.basename(name) === name) : [];
+    } catch {
+        return [];
+    }
 }
 
 function alive(options: OpenOptions): (pid: number) => boolean {

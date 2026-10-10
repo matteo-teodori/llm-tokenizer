@@ -47,7 +47,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
         dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, totals: t }],
         limitWindows: [{ limitType: HOSTILE, resetsAt: 1791561600, hits: 2, firstTs: Date.UTC(2026, 9, 9, 10, 6), date: '2026-10-09' }],
         omitted: { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 },
-        coverage: { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 3, files: 4, oversizeLines: 0, malformedLines: 0 },
+        coverage: { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 3, ahead: 0, files: 4, oversizeLines: 0, malformedLines: 0 },
         ...overrides,
     };
 }
@@ -281,6 +281,14 @@ suite('usage page', () => {
         const body = renderFragments(view({ report: ahead })).body;
         assert.ok(body.includes('<span>2026-10-07</span><span>2026-10-09</span>'), 'the columns went past the range');
         assert.ok(body.includes('A later day, from a clock ahead of this one, is in the totals.'));
+    });
+
+    test('requests dated more than a day ahead are said to be kept, and counted once this clock reaches them', () => {
+        assert.ok(!renderFragments(view()).diagnostics.includes('Dated ahead'));
+        const one = renderFragments(view({ report: report({ coverage: { ...report().coverage, ahead: 1 } }) })).diagnostics;
+        assert.ok(one.includes("1 request dated more than a day after this machine's clock, kept and counted once it reaches it"), one);
+        const two = renderFragments(view({ report: report({ coverage: { ...report().coverage, ahead: 2 } }) })).diagnostics;
+        assert.ok(two.includes('2 requests dated more than a day after'), two);
     });
 
     test('lines too long to read are called that, whatever made them so', () => {

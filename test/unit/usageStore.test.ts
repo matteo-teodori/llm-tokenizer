@@ -5,6 +5,7 @@ import * as path from 'path';
 
 import { dedupe } from '../../src/usage/accounting';
 import { totalsOf } from '../../src/usage/aggregate';
+import { createHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { LEASE_TAKEOVER_MS, SCHEMA_VERSION, UsageStore, loadSqlite, type FileCheckpoint, type OpenResult } from '../../src/usage/store';
 import type { UsageRequest } from '../../src/usage/types';
 
@@ -226,7 +227,8 @@ suite('usage history store', () => {
         const copies = [path.join(folder, 'usage-0a1b2c3d4e.sqlite'), path.join(folder, 'usage-0a1b2c3d4e.sqlite-wal'), `${file}.corrupt-1791000000000`, `${file}.bak-v0`];
         const others = [`${file}.notes`, path.join(folder, 'other.sqlite.corrupt-1'), path.join(folder, 'usage.current'), path.join(dir, 'usage.sqlite.bak-v0')];
         for (const f of [...copies, ...others]) {
-            fs.writeFileSync(f, 'x');
+            // The pointer names this history.
+            fs.writeFileSync(f, f.endsWith('usage.current') ? 'usage.sqlite' : 'x');
         }
         assert.ok(copies.every(f => fs.existsSync(f)));
         store.clear();
@@ -235,6 +237,17 @@ suite('usage history store', () => {
         // Its own journal is not a copy: the history still works.
         store.transaction(() => store.upsertRequests([req()]));
         assert.strictEqual([...store.requests()].length, 1);
+    });
+
+    test('Clear never removes the history another window has just started in its place', () => {
+        const store = ready(open());
+        const folder = path.dirname(file);
+        // Started after this window found its history, before its Clear removed the copies.
+        const theirs = createHistory(folder);
+        assert.strictEqual(publishHistory(folder, theirs, resolveHistory(folder).pointer), theirs);
+        fs.writeFileSync(`${file}.bak-v0`, 'x');
+        assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 0 });
+        assert.deepStrictEqual([fs.existsSync(theirs), fs.existsSync(`${file}.bak-v0`)], [true, false]);
     });
 
     /** Files in the history's folder whose bytes hold `marker`. */
@@ -257,7 +270,7 @@ suite('usage history store', () => {
         assert.strictEqual([...other.requests()].length, 0);
     });
 
-    test("a Clear another window's read holds off is settled by a checkpoint once that read ends", () => {
+    test("a Clear another window's read holds off is finished, once that read ends, by whichever window comes next", () => {
         const store = ready(open({ busyTimeoutMs: 50 }));
         const reader = ready(open({ busyTimeoutMs: 50 }));
         store.transaction(() => store.upsertRequests(marked('Secret-Client-0xBEEF', 400)));
@@ -266,17 +279,40 @@ suite('usage history store', () => {
             assert.strictEqual([...reader.requests()].length, 400);
             assert.strictEqual(store.clear().settled, false);
         });
-        assert.ok(store.checkpoint(), 'still held off once the read had ended');
+        // The other window's own next request: it was told nothing, the history was.
+        assert.deepStrictEqual(reader.finishClear(), { settled: true, copiesLeft: 0 });
         assert.deepStrictEqual(holding('Secret-Client-0xBEEF'), []);
+        // Finished: nothing is left to do, in either window.
+        assert.deepStrictEqual(store.finishClear(), { settled: true, copiesLeft: 0 });
     });
 
-    test('a copy beside the history that cannot be removed leaves the Clear done, and is counted', () => {
+    test('a copy beside the history that cannot be removed leaves the Clear done; it is counted, and removed later', () => {
         const store = ready(open());
         store.transaction(() => store.upsertRequests([req()]));
         // A folder where a file was expected stands in for one held open elsewhere.
         fs.mkdirSync(`${file}.corrupt-1/inside`, { recursive: true });
         assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 1 });
         assert.strictEqual([...store.requests()].length, 0);
+        assert.deepStrictEqual(store.finishClear(), { settled: true, copiesLeft: 1 }, 'tried again, and counted again');
+        // Let go of; and a copy set aside after the Clear, which is not the Clear's to remove.
+        fs.rmSync(`${file}.corrupt-1`, { recursive: true });
+        fs.writeFileSync(`${file}.corrupt-1`, 'x');
+        fs.writeFileSync(`${file}.corrupt-2`, 'y');
+        assert.deepStrictEqual(store.finishClear(), { settled: true, copiesLeft: 0 });
+        assert.deepStrictEqual([fs.existsSync(`${file}.corrupt-1`), fs.existsSync(`${file}.corrupt-2`)], [false, true]);
+        fs.writeFileSync(`${file}.corrupt-1`, 'x');
+        store.finishClear();
+        assert.ok(fs.existsSync(`${file}.corrupt-1`), 'a finished Clear went on removing files');
+    });
+
+    test('a copy an earlier build set aside by renaming it is named, the newest first, until Clear removes it', () => {
+        const store = ready(open());
+        assert.strictEqual(store.setAside(), undefined);
+        fs.writeFileSync(`${file}.corrupt-1790000000000`, 'old');
+        fs.writeFileSync(`${file}.corrupt-1791000000000`, 'older history, newer copy');
+        assert.strictEqual(store.setAside(), 'usage.sqlite.corrupt-1791000000000');
+        store.clear();
+        assert.strictEqual(store.setAside(), undefined);
     });
 
     test('a read sees one snapshot, whatever another window commits during it', () => {

@@ -38,10 +38,10 @@ export type UsageWorkerRequest =
 export type UsageFailure = 'store-busy' | 'store-io' | 'store-read-only' | 'outdated' | 'import-failed' | 'bad-request' | 'unknown';
 
 /**
- * `recovered`, on the first answer after it happened: the file a corrupt
- * history was moved to, its name only, before a new one was started. A
- * report's `aside` names the newest such file while one is there, so every
- * window, and every reload, says so until Clear removes it.
+ * `recovered`, on the first answer after it happened: the name of a corrupt
+ * history this worker set aside, left where it was, when it started a new
+ * one. A report's `aside` names the one set aside while its file is there,
+ * so every window, and every reload, says so until Clear removes it.
  */
 export type UsageWorkerResponse =
     | { type: 'imported'; id: number; summary: ImportSummary; leaseHeldElsewhere: false; recovered?: string }
@@ -51,8 +51,8 @@ export type UsageWorkerResponse =
     | { type: 'liveContext'; id: number; latest: LatestRequest | null; compactions: Compaction[]; recovered?: string }
     /**
      * `settled`: false while another window's read keeps what was deleted in
-     * the file, until a later request finishes it; `copiesLeft`: copies set
-     * aside that could not be removed.
+     * the file; `copiesLeft`: copies of the history not removed yet. Either
+     * is finished by a later request, in whichever window uses the history.
      */
     | { type: 'cleared'; id: number; generation: number; settled: boolean; copiesLeft: number }
     | { type: 'closed'; id: number }

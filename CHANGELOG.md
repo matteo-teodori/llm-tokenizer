@@ -24,8 +24,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   - Kept, in a database in this extension's storage: each request's token
     counts, model, effort, time, ids and Claude Code version; the folder
     each session started in; compactions' sizes and the usage limits
-    reached; which transcripts were read and how far; and, while an import
-    runs, this machine's name. Prompts, responses, thinking and tool
+    reached; which transcripts were read and how far; and this machine's
+    name, which each import writes. Prompts, responses, thinking and tool
     contents are never kept, and nothing is sent anywhere. **Clear Claude
     Code Usage History** removes it, and leaves nothing of it readable on
     disk. The README lists everything kept.

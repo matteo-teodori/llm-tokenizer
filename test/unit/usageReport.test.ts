@@ -9,7 +9,7 @@ import { comparablePath, isWithin, projectLabel, sessionRoot } from '../../src/u
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import { queryReport, reportSessions, type ReportQuery } from '../../src/usage/queries';
 import { buildReport, rangeSince, type RangeKey } from '../../src/usage/report';
-import { currentHistory, startHistory } from '../../src/usage/historyFiles';
+import { createHistory, currentHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
 import type { UsageRequest } from '../../src/usage/types';
 import { WorkerHost } from '../../src/workerHost';
@@ -19,6 +19,27 @@ const sqlite = loadSqlite();
 
 /** The history a worker keeps in `storeFile`'s folder: the one in use there. */
 const historyIn = (storeFile: string) => currentHistory(path.dirname(storeFile)) ?? storeFile;
+
+/** Permissions hold here: not on Windows, and not for root. */
+const permissionsHold = process.platform !== 'win32' && process.getuid?.() !== 0;
+
+/** Another window starting a new history in `storeFile`'s folder, as it does for one it finds corrupt. */
+function replaceHistory(storeFile: string): string {
+    assert.ok(sqlite, 'this runtime has no node:sqlite');
+    const folder = path.dirname(storeFile);
+    const over = resolveHistory(folder).pointer;
+    const file = createHistory(folder);
+    const fresh = UsageStore.open(sqlite, file);
+    assert.strictEqual(fresh.status, 'ready');
+    fresh.store.close();
+    return publishHistory(folder, file, over);
+}
+
+/** Files in `storeFile`'s folder whose bytes hold `marker`. */
+function holdingMarker(storeFile: string, marker: string): string[] {
+    const folder = path.dirname(storeFile);
+    return fs.readdirSync(folder).filter(name => fs.statSync(path.join(folder, name)).isFile() && fs.readFileSync(path.join(folder, name)).includes(marker));
+}
 
 /** The day the fixture's requests fall on, at noon UTC: R4 is already the 10th in Rome. */
 const FIXTURE_NOW = Date.UTC(2026, 9, 10, 12);
@@ -611,7 +632,13 @@ suite('usage worker queries', () => {
         assert.ok(again.type === 'report' && !('recovered' in again), JSON.stringify(again).slice(0, 200));
     });
 
-    test("a Clear another window's read held off is finished by the worker's next request", async () => {
+    /**
+     * A history of 50 sessions whose folders carry a marker, cleared by
+     * `worker` while another window's read holds the checkpoint off. That
+     * window stays connected, as its status item keeps it, and reading
+     * again it holds nothing off.
+     */
+    async function clearHeldOff(): Promise<{ storeFile: string; worker: WorkerHost<UsageWorkerRequest, UsageWorkerResponse>; other: { close(): void } }> {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const projects = path.join(tmp, 'root', 'projects', 'p');
         fs.mkdirSync(projects, { recursive: true });
@@ -620,18 +647,127 @@ suite('usage worker queries', () => {
         }
         const worker = host({ busyTimeoutMs: 50 });
         await worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] });
-        // Another window, in the middle of a read.
         assert.ok(sqlite, 'this runtime has no node:sqlite');
-        const reader = new sqlite.DatabaseSync(historyIn(storeFile));
-        reader.exec('BEGIN');
-        reader.prepare('SELECT count(*) FROM requests').get();
+        const other = new sqlite.DatabaseSync(historyIn(storeFile));
+        other.exec('BEGIN');
+        other.prepare('SELECT count(*) FROM requests').get();
         const cleared = await worker.send({ type: 'clear', id: 0, storeFile });
-        reader.exec('COMMIT');
-        reader.close();
+        other.exec('COMMIT');
         assert.ok(cleared.type === 'cleared' && !cleared.settled, JSON.stringify(cleared));
+        assert.ok(holdingMarker(storeFile, 'Secret-Client-0xFACE').length > 0, 'nothing held off: the test shows nothing');
+        return { storeFile, worker, other };
+    }
+
+    test("a Clear another window's read held off is finished by the worker's next request", async () => {
+        const { storeFile, worker, other } = await clearHeldOff();
+        try {
+            await worker.send(ask(storeFile));
+            assert.deepStrictEqual(holdingMarker(storeFile, 'Secret-Client-0xFACE'), [], 'what Clear deleted is still on disk');
+        } finally {
+            other.close();
+        }
+    });
+
+    test('...or by its close, when nothing else comes first', async () => {
+        // A Clear while the feature is off, say: the idle release follows at once.
+        const { storeFile, worker, other } = await clearHeldOff();
+        try {
+            await worker.send({ type: 'close', id: 0 });
+            assert.deepStrictEqual(holdingMarker(storeFile, 'Secret-Client-0xFACE'), [], 'what Clear deleted is still on disk');
+        } finally {
+            other.close();
+        }
+    });
+
+    test('...or by the next request of another window', async () => {
+        const { storeFile, other } = await clearHeldOff();
+        try {
+            await host().send(ask(storeFile));
+            assert.deepStrictEqual(holdingMarker(storeFile, 'Secret-Client-0xFACE'), [], 'what Clear deleted is still on disk');
+        } finally {
+            other.close();
+        }
+    });
+
+    test('a copy Clear could not remove is removed by a later request, and nothing set aside since', async () => {
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const worker = host();
+        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        const stuck = path.join(path.dirname(storeFile), 'usage.sqlite.corrupt-1');
+        // A folder where a file was expected stands in for a copy another window holds open.
+        fs.mkdirSync(path.join(stuck, 'inside'), { recursive: true });
+        const cleared = await worker.send({ type: 'clear', id: 0, storeFile });
+        assert.ok(cleared.type === 'cleared' && cleared.copiesLeft === 1, JSON.stringify(cleared));
+        // That window lets go; and a copy is set aside after the Clear, which is not the Clear's to remove.
+        fs.rmSync(stuck, { recursive: true });
+        fs.writeFileSync(stuck, 'x');
+        const later = path.join(path.dirname(storeFile), 'usage.sqlite.corrupt-2');
+        fs.writeFileSync(later, 'y');
         await worker.send(ask(storeFile));
-        const holding = fs.readdirSync(path.dirname(storeFile)).filter(name => fs.readFileSync(path.join(path.dirname(storeFile), name)).includes('Secret-Client-0xFACE'));
-        assert.deepStrictEqual(holding, [], 'what Clear deleted is still on disk');
+        assert.deepStrictEqual([fs.existsSync(stuck), fs.existsSync(later)], [false, true]);
+    });
+
+    test('a query during an import reads the history the import writes, though another window starts a new one', async () => {
+        const projects = path.join(tmp, 'root', 'projects', 'p');
+        fs.mkdirSync(projects, { recursive: true });
+        for (let i = 0; i < 400; i++) {
+            fs.writeFileSync(path.join(projects, `s${i}.jsonl`), line(assistantRecord(`s${i}`, `m${i}`, '2026-10-09T10:00:00Z')));
+        }
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const worker = host();
+        const order: string[] = [];
+        const imported = worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] }).then(r => (order.push('import'), r));
+        await worker.send(ask(storeFile));
+        order.push('first query');
+        replaceHistory(storeFile);
+        const during = await worker.send(ask(storeFile));
+        order.push('second query');
+        const done = await imported;
+        assert.deepStrictEqual(order, ['first query', 'second query', 'import'], 'the import ended before the test could start a history');
+        assert.ok(done.type === 'imported' && done.summary?.read === 400 && !done.summary.cancelled, JSON.stringify(done).slice(0, 300));
+        assert.strictEqual(during.type, 'report');
+        // Done, it reads the new history.
+        const after = await worker.send(ask(storeFile));
+        assert.ok(after.type === 'report' && after.report.totals.processed === 0, JSON.stringify(after).slice(0, 200));
+    });
+
+    test('two windows starting at once in an empty folder share one history, and leave no other', async function () {
+        this.timeout(60_000);
+        for (let trial = 0; trial < 5; trial++) {
+            const storeFile = path.join(tmp, `store-${trial}`, 'usage.sqlite');
+            const windows = [host(), host()];
+            // A close loads each worker and touches no file: then both start together.
+            await Promise.all(windows.map(w => w.send({ type: 'close', id: 0 })));
+            await Promise.all(windows.map(w => w.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] })));
+            const histories = fs.readdirSync(path.dirname(storeFile)).filter(name => /^usage-[0-9a-z]+\.sqlite$/.test(name));
+            assert.strictEqual(histories.length, 1, `trial ${trial}: ${histories.join(', ')}`);
+            for (const w of windows) {
+                const r = await w.send(ask(storeFile));
+                assert.ok(r.type === 'report' && r.report.totals.processed === 1_278, `trial ${trial}: ${JSON.stringify(r).slice(0, 200)}`);
+            }
+            await Promise.all(windows.map(w => w.send({ type: 'close', id: 0 })));
+        }
+    });
+
+    test('a pointer that cannot be read fails the request, and the history in use is kept', async function () {
+        if (!permissionsHold) {
+            this.skip();
+        }
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const worker = host();
+        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        const pointer = path.join(path.dirname(storeFile), 'usage.current');
+        const named = fs.readFileSync(pointer, 'utf8');
+        fs.chmodSync(pointer, 0o000);
+        try {
+            const refused = await worker.send(ask(storeFile));
+            assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'store-io', JSON.stringify(refused).slice(0, 200));
+        } finally {
+            fs.chmodSync(pointer, 0o600);
+        }
+        assert.strictEqual(fs.readFileSync(pointer, 'utf8'), named, 'the pointer was replaced');
+        const again = await worker.send(ask(storeFile));
+        assert.ok(again.type === 'report' && again.report.totals.processed === 1_278, JSON.stringify(again).slice(0, 200));
     });
 
     test('a Clear as the first request on a corrupt history names no copy after it', async () => {
@@ -675,10 +811,7 @@ suite('usage worker queries', () => {
             // Replaced, as another window replaces a corrupt one: a new
             // history, and the pointer at it.
             await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
-            assert.ok(sqlite);
-            const fresh = UsageStore.open(sqlite, startHistory(path.dirname(storeFile)));
-            assert.strictEqual(fresh.status, 'ready');
-            fresh.store.close();
+            replaceHistory(storeFile);
             assert.strictEqual(await processed(), 0, 'it went on showing a replaced history');
         }
     });

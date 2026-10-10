@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { comparablePath, isWithin, projectOf, sessionRoot } from './projects';
-import { buildReport, rangeSince, type RangeKey, type ReportSession, type UsageReport } from './report';
+import { buildReport, rangeSince, rangeUntil, type RangeKey, type ReportSession, type UsageReport } from './report';
 import type { UsageStore } from './store';
 import type { SessionSighting } from './types';
 
@@ -30,14 +30,15 @@ export interface ReportQuery {
 
 export function queryReport(store: UsageStore, query: ReportQuery): UsageReport {
     const since = rangeSince(query.range, query.zone, query.now);
+    const until = rangeUntil(query.now);
     // One snapshot: read statement by statement, another window's commit
     // could land between the sums and the sessions they belong to.
     const input = store.read(() => ({
-        sums: store.bucketSums(since),
+        sums: store.bucketSums(since, until),
         sessions: store.sessions(),
-        compactions: store.compactions(since),
-        limitHits: store.limitHits(since),
-        coverage: store.coverage(),
+        compactions: store.compactions(since, until),
+        limitHits: store.limitHits(since, until),
+        coverage: store.coverage(until),
     }));
     return buildReport(
         { ...input, sessions: reportSessions(input.sessions, query) },

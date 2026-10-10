@@ -140,10 +140,12 @@ export interface BucketSums {
 }
 
 export interface StoreCoverage {
-    /** The oldest and newest request held, of any range. */
+    /** The oldest and newest request held, of any range, but those dated ahead. */
     start: number | null;
     newest: number | null;
     requests: number;
+    /** Requests dated more than a day after this clock: kept, and counted once it reaches them. */
+    ahead: number;
     files: number;
     oversizeLines: number;
     malformedLines: number;

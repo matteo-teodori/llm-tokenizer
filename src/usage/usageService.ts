@@ -2,8 +2,9 @@
  * Claude Code usage, on or off: the one owner of the usage worker, its timers
  * and its watchers, which the panel and the status item use.
  *
- * Off, it registers its commands and one settings listener and touches
- * nothing else: no file, no worker, no watcher, no timer. On, it imports once
+ * Loaded by onDemand.ts, which registers the commands and the settings
+ * listener. Off, it touches nothing: no file, no worker, no watcher, no
+ * timer. On, it imports once
  * the startup project scan has settled or after 30 s, whichever is first, and
  * never in the activation tick; then hourly, on the Refresh command, and, while
  * the panel or the status item holds it, on watcher hints. The import is the
@@ -50,6 +51,15 @@ export const LEASE_RETRY_MS = 5_000;
 export const CLOSE_GRACE_MS = 2_000;
 
 export type UsageStatus = 'off' | 'ready' | 'no-roots' | 'no-sqlite' | 'read-only' | 'failing';
+
+/**
+ * What a Clear left to finish. `settled`: false while another window's read
+ * keeps what it deleted in the file; `copiesLeft`: copies not removed yet.
+ */
+export interface ClearOutcome {
+    settled: boolean;
+    copiesLeft: number;
+}
 
 export interface UsageSettings {
     enabled: boolean;
@@ -175,7 +185,7 @@ export class UsageService implements vscode.Disposable {
         return this.elsewhere;
     }
 
-    /** The name of the file a corrupt history was moved to, until Clear removes it. */
+    /** The name of a corrupt history set aside beside the one in use, until Clear removes it. */
     get recoveredFrom(): string | undefined {
         return this.recovered;
     }
@@ -222,14 +232,18 @@ export class UsageService implements vscode.Disposable {
      * Delete the history. Works while the feature is off, since the history
      * outlives the switch; records still on disk are read again by the next
      * import.
+     *
+     * @returns undefined when it could not be cleared; else what is left to
+     * finish, which the next request of any window using the history does.
      */
-    async clear(): Promise<boolean> {
+    async clear(): Promise<ClearOutcome | undefined> {
         const response = await this.ask({ type: 'clear', storeFile: this.deps.storeFile });
         if (response?.type !== 'cleared') {
-            return false;
+            return undefined;
         }
         this.summary = undefined;
-        // Clear deleted the copy set aside along with the rest.
+        // Clear deleted the copy set aside along with the rest; one it could
+        // not is named again by the next report.
         this.recovered = undefined;
         this.deps.log.info(`Claude Code usage history cleared (generation ${response.generation})`);
         if (!response.settled) {
@@ -238,10 +252,12 @@ export class UsageService implements vscode.Disposable {
             );
         }
         if (response.copiesLeft > 0) {
-            this.deps.log.warn(`Claude Code usage: ${response.copiesLeft} copies of the history set aside could not be removed; one may be open elsewhere`);
+            this.deps.log.warn(
+                `Claude Code usage: ${response.copiesLeft} copies of the history could not be removed yet; one may be open in another window, and each is removed at a later request`,
+            );
         }
         this.changed.fire();
-        return true;
+        return { settled: response.settled, copiesLeft: response.copiesLeft };
     }
 
     /**
@@ -788,7 +804,21 @@ async function clearCommand(service: UsageService): Promise<void> {
         return;
     }
     const cleared = await service.clear();
-    void (cleared
-        ? vscode.window.showInformationMessage('LLM Tokenizer: Claude Code usage history cleared.')
-        : vscode.window.showWarningMessage('LLM Tokenizer: the history could not be cleared; see the log.'));
+    if (!cleared) {
+        void vscode.window.showWarningMessage('LLM Tokenizer: the history could not be cleared; see the log.');
+    } else if (cleared.copiesLeft > 0) {
+        void vscode.window.showWarningMessage(clearedMessage(cleared));
+    } else {
+        void vscode.window.showInformationMessage(clearedMessage(cleared));
+    }
+}
+
+/** What a Clear tells: the copies it could not remove yet included, which stay readable until they are. */
+export function clearedMessage(outcome: ClearOutcome): string {
+    const n = outcome.copiesLeft;
+    if (n === 0) {
+        return 'LLM Tokenizer: Claude Code usage history cleared.';
+    }
+    const copies = n === 1 ? 'one copy of it' : `${n.toLocaleString('en-US')} copies of it`;
+    return `LLM Tokenizer: Claude Code usage history cleared, but ${copies} could not be removed yet, perhaps because another window has ${n === 1 ? 'it' : 'them'} open. ${n === 1 ? 'It is' : 'They are'} removed as soon as ${n === 1 ? 'it' : 'they'} can be.`;
 }

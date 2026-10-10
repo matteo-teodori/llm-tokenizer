@@ -14,7 +14,7 @@ import type { UsageService } from '../../src/usage/usageService';
 function quietReport(overrides: Partial<UsageReport> = {}): UsageReport {
     return {
         ...buildReport(
-            { sums: [], sessions: [], compactions: [], limitHits: [], coverage: { start: null, newest: null, requests: 3, files: 1, oversizeLines: 0, malformedLines: 0 } },
+            { sums: [], sessions: [], compactions: [], limitHits: [], coverage: { start: null, newest: null, requests: 3, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 } },
             { range: '7d', zone: 'UTC', now: Date.UTC(2026, 9, 10, 12), scope: 'all' },
         ),
         ...overrides,

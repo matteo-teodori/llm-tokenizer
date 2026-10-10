@@ -426,7 +426,7 @@ suite('usage transcripts', () => {
         assert.deepStrictEqual([report.totals.input, report.totals.provenance], [MAX_COUNTER, 'partial']);
     });
 
-    test('times before 2023 or later than tomorrow are not records: no year 271822, no render that throws', async () => {
+    test('times before 2023 or from 2100 on are not records; one ahead of this clock is kept, and counted once the clock reaches it', async () => {
         const file = path.join(tmp, 'projects', 'p', 's1.jsonl');
         fs.mkdirSync(path.dirname(file), { recursive: true });
         const iso = (ms: number) => new Date(ms).toISOString();
@@ -434,7 +434,7 @@ suite('usage transcripts', () => {
             file,
             line(assistant('ancient', 1, { timestamp: '-271821-04-20T00:00:00.000Z' })) +
                 line(assistant('roman', 1, { timestamp: '0001-01-01T00:00:00.000Z' })) +
-                // A wrong clock: it would put 2099 in every range.
+                // A wrong clock, here or there: counted from its day, never in every range.
                 line(assistant('future', 1, { timestamp: '2099-06-01T00:00:00.000Z' })) +
                 line(assistant('ahead', 1, { timestamp: iso(Date.now() + 2 * 24 * 60 * 60 * 1000) })) +
                 // A clock an hour ahead is another machine's, and its record counts.
@@ -444,11 +444,16 @@ suite('usage transcripts', () => {
         );
         const store = freshStore();
         const summary = await importRoots(store, [tmp]);
-        assert.deepStrictEqual(summary.malformed, { 'bad-field:timestamp': 4 });
-        assert.deepStrictEqual([...store.requests()].map(r => r.messageId).sort(), ['ok', 'skewed']);
+        assert.deepStrictEqual(summary.malformed, { 'bad-field:timestamp': 2 });
+        assert.deepStrictEqual([...store.requests()].map(r => r.messageId).sort(), ['ahead', 'future', 'ok', 'skewed']);
         assert.deepStrictEqual(store.limitHits().map(h => h.resetsAt), [null]);
-        const report = queryReport(store, { range: 'coverage', zone: 'UTC', workspaceFolders: null, now: Date.UTC(2026, 9, 10), platform: process.platform });
-        assert.strictEqual(report.from, '2026-10-09');
+        const at = (now: number) => queryReport(store, { range: 'coverage', zone: 'UTC', workspaceFolders: null, now, platform: process.platform });
+        // An hour ahead is another machine's clock, and counts; days ahead do not, yet.
+        const now = at(Date.now());
+        assert.deepStrictEqual([now.totals.coverage.requests, now.coverage.ahead, now.from], [2, 2, '2026-10-09']);
+        // Once this clock reaches them they count: nothing was dropped.
+        const later = at(Date.UTC(2099, 5, 2));
+        assert.deepStrictEqual([later.totals.coverage.requests, later.coverage.ahead], [4, 0]);
     });
 
     test('a line too long to parse safely is skipped as oversize, and reading carries on', () => {
@@ -854,11 +859,12 @@ suite('usage worker', () => {
 
     test('a failed open is tried again on the next request, not kept', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
-        fs.mkdirSync(storeFile, { recursive: true });
+        // A file where the history's folder should be.
+        fs.writeFileSync(path.dirname(storeFile), 'x');
         const worker = host();
         const first = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
         assert.deepStrictEqual(first.type === 'failed' && first.failure, 'store-io', JSON.stringify(first));
-        fs.rmSync(storeFile, { recursive: true });
+        fs.rmSync(path.dirname(storeFile));
         const second = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
         assert.ok(second.type === 'imported' && second.summary?.read === 4, JSON.stringify(second));
     });

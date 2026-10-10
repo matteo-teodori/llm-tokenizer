@@ -94,7 +94,7 @@ function emptyState(view: PanelView): string | undefined {
                 <p>Turned on, LLM Tokenizer reads Claude Code's own session records on this machine${view.where ? ` (${escapeHtml(view.where)})` : ''},
                 and shows how many tokens Claude Code processed: by day, project, session and model.</p>
                 <ul>
-                    <li>Kept, in a database in this extension's own storage: each request's token counts, model, effort, time, ids and Claude Code version; the folder each session started in; compactions' sizes and the usage limits reached; which transcripts were read, and how far; and, while an import runs, this machine's name.</li>
+                    <li>Kept, in a database in this extension's own storage: each request's token counts, model, effort, time, ids and Claude Code version; the folder each session started in; compactions' sizes and the usage limits reached; which transcripts were read, and how far; and this machine's name, which each import writes.</li>
                     <li>Never kept: prompts, responses, thinking, tool inputs or results.</li>
                     <li>Nothing is sent anywhere.</li>
                     <li>The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Claude Code Usage History removes it.</li>
@@ -451,6 +451,13 @@ function diagnostics(view: PanelView): string {
                 report.coverage.start !== null ? `, since ${escapeHtml(view.formatTime(report.coverage.start))}` : ''
             }`,
         ]);
+        if (report.coverage.ahead > 0) {
+            const n = report.coverage.ahead;
+            rows.push([
+                'Dated ahead',
+                `${n.toLocaleString('en-US')} ${n === 1 ? 'request' : 'requests'} dated more than a day after this machine's clock, kept and counted once it reaches ${n === 1 ? 'it' : 'them'}`,
+            ]);
+        }
         if (report.coverage.oversizeLines + report.coverage.malformedLines > 0) {
             rows.push([
                 'Lines not read',

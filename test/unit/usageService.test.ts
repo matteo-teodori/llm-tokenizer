@@ -16,6 +16,7 @@ import {
     LEASE_RETRY_MS,
     MAX_HINT_PATHS,
     UsageService,
+    clearedMessage,
     readUsageSettings,
     type Clock,
     type UsageHost,
@@ -482,7 +483,7 @@ suite('usage service', () => {
     test('a Clear that fails while off leaves the status off', async () => {
         const { service, host } = make({ settings: { enabled: false } });
         host.answer = request => Promise.resolve({ type: 'failed', id: request.id, failure: 'store-io', errorName: 'StoreError' });
-        assert.strictEqual(await service.clear(), false);
+        assert.strictEqual(await service.clear(), undefined);
         assert.strictEqual(service.status, 'off');
     });
 
@@ -515,7 +516,7 @@ suite('usage service', () => {
         set({ enabled: false });
         const cleared = service.clear();
         answerClose();
-        assert.strictEqual(await cleared, true, 'the Clear was cut off by the stop');
+        assert.deepStrictEqual(await cleared, { settled: true, copiesLeft: 0 }, 'the Clear was cut off by the stop');
         await clock.advance(0);
         assert.ok(host.stopped >= 1 && !host.running, 'the worker was kept');
     });
@@ -652,7 +653,7 @@ suite('usage service', () => {
 
     test('Clear works while off, and lets the worker go at once', async () => {
         const { service, host, clock } = make({ settings: { enabled: false } });
-        assert.strictEqual(await service.clear(), true);
+        assert.deepStrictEqual(await service.clear(), { settled: true, copiesLeft: 0 });
         await clock.advance(0);
         assert.deepStrictEqual(host.sent, ['clear', 'close']);
         assert.strictEqual(host.stopped, 1);
@@ -691,14 +692,22 @@ suite('usage service', () => {
         assert.strictEqual(service.recoveredFrom, undefined);
     });
 
-    test('a Clear another window held off, or that left copies, says so in the log', async () => {
+    test('a Clear another window held off, or that left copies, says so in the log and in its message', async () => {
         const logged: string[] = [];
         const { service, host } = make({ log: { info: m => logged.push(m), warn: m => logged.push(m), debug: () => undefined } });
         host.answer = request =>
             Promise.resolve(request.type === 'clear' ? { type: 'cleared', id: request.id, generation: 2, settled: false, copiesLeft: 2 } : defaultAnswer(request));
-        assert.ok(await service.clear());
+        const outcome = await service.clear();
+        assert.deepStrictEqual(outcome, { settled: false, copiesLeft: 2 });
         assert.ok(logged.some(l => l.includes('once that read ends')), logged.join(' | '));
-        assert.ok(logged.some(l => l.includes('2 copies of the history set aside could not be removed')), logged.join(' | '));
+        assert.ok(logged.some(l => l.includes('2 copies of the history could not be removed yet')), logged.join(' | '));
+        // A copy still readable is never called cleared without a word.
+        assert.strictEqual(clearedMessage({ settled: true, copiesLeft: 0 }), 'LLM Tokenizer: Claude Code usage history cleared.');
+        assert.strictEqual(
+            clearedMessage({ settled: true, copiesLeft: 1 }),
+            'LLM Tokenizer: Claude Code usage history cleared, but one copy of it could not be removed yet, perhaps because another window has it open. It is removed as soon as it can be.',
+        );
+        assert.ok(clearedMessage({ settled: true, copiesLeft: 2 }).includes('2 copies of it could not be removed yet'));
     });
 
     test('the set-aside notice follows what is beside the history: shown while a copy is there', async () => {

@@ -187,16 +187,19 @@ Tokenizer) keeps:
 - each transcript's path, size, file id and how far it was read, with a hash
   of the last 64 bytes read, to tell what changed;
 - compactions' sizes, and the usage limits reached, with when they reset;
-- while an import runs, the window's process id and this machine's name, so
-  that two windows never import at once.
+- the window's process id and this machine's name, which each import writes
+  so that two windows never import at once.
 
 Prompts, responses, thinking and tool inputs or results are never kept, and
 nothing is sent anywhere. The history outlives Claude Code's own records,
 which Claude Code deletes after 30 days by default. A history that can no
 longer be read is set aside, left as it is, and a new one started, and the
-panel says so until it is cleared. **Clear Claude Code Usage History** removes the history
-and any copy set aside, and leaves nothing of either readable on disk;
-anything still on disk is read again at the next refresh. The panel also
+panel says so until it is cleared. **Clear Claude Code Usage History**
+removes the history and any copy set aside, and leaves nothing of either
+readable on disk. What another window still holds, a copy it has open or a
+read it has not finished, goes once that window lets go of it, the next
+time any window uses the history; Clear says when a copy has to wait.
+Anything still on disk is read again at the next refresh. The panel also
 remembers its range, its scope and your time zone, in the editor's own
 state.
 
@@ -218,7 +221,8 @@ settings can come from the repository's `devcontainer.json`.
 - A request refused at a usage limit carries no tokens: it is listed as a
   limit reached.
 - Records dated more than a day after this machine's clock, which only a
-  wrong clock writes.
+  wrong clock writes: they are kept, and counted once this clock reaches
+  them.
 
 The records' format is internal to Claude Code and may change with it; the
 diagnostics say when lines could not be read.

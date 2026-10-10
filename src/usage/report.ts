@@ -123,6 +123,20 @@ const KIND_ORDER: readonly TranscriptKind[] = ['main', 'task', 'workflow', 'othe
 /** The largest UTC offset in use, +14:00: no local day starts earlier than its UTC midnight minus this. */
 const MAX_OFFSET_MS = 14 * 60 * 60 * 1000;
 
+/**
+ * How far ahead of this clock a request still counts: written on a machine
+ * whose clock runs ahead. Records are written as they happen, so one dated
+ * later, from a wrong clock, would count in every range until its day came;
+ * it is kept, and counted from then, which is also when it counts if this
+ * clock is the wrong one.
+ */
+export const AHEAD_ALLOWANCE_MS = 24 * 60 * 60 * 1000;
+
+/** The time no request is counted from, at `now`. */
+export function rangeUntil(now: number): number {
+    return now + AHEAD_ALLOWANCE_MS;
+}
+
 /** The first local day `range` covers, or null for everything held. */
 export function rangeStart(range: RangeKey, today: string): string | null {
     switch (range) {
