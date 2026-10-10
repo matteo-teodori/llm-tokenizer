@@ -424,6 +424,22 @@ suite('usage report', () => {
         assert.strictEqual(report.totals.output, 60 * 100 + (59 * 60) / 2);
     });
 
+    test('within a day, the day-and-model rows are listed largest first', () => {
+        const store = freshStore();
+        store.transaction(() =>
+            store.upsertRequests([
+                request({ messageId: 'h', model: 'claude-haiku-4-5', output: 10 }),
+                request({ messageId: 'o', model: 'claude-opus-4-6', output: 900 }),
+                request({ messageId: 's', model: 'claude-sonnet-4-6', output: 300 }),
+            ]),
+        );
+        const report = buildReport(
+            { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual(report.dayModels.map(r => r.model), ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
+    });
+
     test('day-and-model rows are capped at the newest, the rest counted', () => {
         const store = freshStore();
         const day = (d: number) => Date.UTC(2025, 0, 1 + d, 12);

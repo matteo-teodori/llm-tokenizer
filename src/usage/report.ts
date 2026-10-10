@@ -256,11 +256,12 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     const effortRows = [...efforts]
         .map(([effort, t]) => ({ effort, totals: t }))
         .sort((a, b) => b.totals.processed - a.totals.processed || compareText(a.effort ?? '', b.effort ?? ''));
-    // The newest rows are kept, then listed oldest first.
+    // The newest rows are kept, then listed oldest day first, and within a
+    // day largest first.
     const dayModelRows = [...dayModels.values()]
         .sort((a, b) => compareText(b.date, a.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model))
         .slice(0, MAX_DAY_MODELS)
-        .reverse();
+        .sort((a, b) => compareText(a.date, b.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model));
     const windows = limitWindows(input.limitHits, zone, inRange);
 
     return {

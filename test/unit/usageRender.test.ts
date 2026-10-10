@@ -275,6 +275,19 @@ suite('usage page', () => {
         assert.ok(!renderFragments(view()).body.includes('The newest'));
     });
 
+    test('a day later than today, from a clock ahead, is no column: the note counts it', () => {
+        const t = totals(5);
+        const ahead = report({ days: [{ date: '2026-10-09', totals: t }, { date: '2026-10-10', totals: t }] });
+        const body = renderFragments(view({ report: ahead })).body;
+        assert.ok(body.includes('<span>2026-10-07</span><span>2026-10-09</span>'), 'the columns went past the range');
+        assert.ok(body.includes('A later day, from a clock ahead of this one, is in the totals.'));
+    });
+
+    test('lines too long to read are called that, whatever made them so', () => {
+        const long = report({ coverage: { ...report().coverage, oversizeLines: 2 } });
+        assert.ok(renderFragments(view({ report: long })).diagnostics.includes('0 malformed, 2 too long to read'));
+    });
+
     test('with its data folder gone, a kept history is still shown, under a banner that says so', () => {
         const gone = { roots: [{ path: '~/.claude', source: 'the default', exists: false }] };
         const kept = text(renderFragments(view({ status: 'no-roots', ...gone })));

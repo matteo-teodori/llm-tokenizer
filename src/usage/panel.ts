@@ -257,7 +257,13 @@ export class UsagePanel implements vscode.Disposable {
                 const serialised = JSON.stringify(fragments);
                 if (force || serialised !== this.lastPosted) {
                     this.lastPosted = serialised;
-                    await this.panel.webview.postMessage({ type: 'data', fragments });
+                    if (this.panel.visible) {
+                        await this.panel.webview.postMessage({ type: 'data', fragments });
+                    } else {
+                        // A hidden page drops what is posted to it, and comes
+                        // back from its HTML: that is what is brought up to date.
+                        this.setPage(fragments);
+                    }
                 }
             })
             .catch((error: unknown) => {

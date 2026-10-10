@@ -426,19 +426,26 @@ suite('usage transcripts', () => {
         assert.deepStrictEqual([report.totals.input, report.totals.provenance], [MAX_COUNTER, 'partial']);
     });
 
-    test('times outside 2023–2100 are not records: no year 271822, no render that throws', async () => {
+    test('times before 2023 or later than tomorrow are not records: no year 271822, no render that throws', async () => {
         const file = path.join(tmp, 'projects', 'p', 's1.jsonl');
         fs.mkdirSync(path.dirname(file), { recursive: true });
+        const iso = (ms: number) => new Date(ms).toISOString();
         fs.writeFileSync(
             file,
             line(assistant('ancient', 1, { timestamp: '-271821-04-20T00:00:00.000Z' })) +
                 line(assistant('roman', 1, { timestamp: '0001-01-01T00:00:00.000Z' })) +
+                // A wrong clock: it would put 2099 in every range.
+                line(assistant('future', 1, { timestamp: '2099-06-01T00:00:00.000Z' })) +
+                line(assistant('ahead', 1, { timestamp: iso(Date.now() + 2 * 24 * 60 * 60 * 1000) })) +
+                // A clock an hour ahead is another machine's, and its record counts.
+                line(assistant('skewed', 1, { timestamp: iso(Date.now() + 60 * 60 * 1000) })) +
                 line(assistant('ok', 1)) +
                 line({ ...assistant('q', 0), uuid: 'q', message: { model: '<synthetic>', id: 'q', usage: {} }, quotaLimits: { rateLimitType: 'five_hour', resetsAt: 1e13 } }),
         );
         const store = freshStore();
         const summary = await importRoots(store, [tmp]);
-        assert.deepStrictEqual(summary.malformed, { 'bad-field:timestamp': 2 });
+        assert.deepStrictEqual(summary.malformed, { 'bad-field:timestamp': 4 });
+        assert.deepStrictEqual([...store.requests()].map(r => r.messageId).sort(), ['ok', 'skewed']);
         assert.deepStrictEqual(store.limitHits().map(h => h.resetsAt), [null]);
         const report = queryReport(store, { range: 'coverage', zone: 'UTC', workspaceFolders: null, now: Date.UTC(2026, 9, 10), platform: process.platform });
         assert.strictEqual(report.from, '2026-10-09');
@@ -879,7 +886,8 @@ suite('usage roots', () => {
     let home: string;
 
     setup(() => {
-        home = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-home-'));
+        // As the file system spells it, as roots are read: /private/var on macOS.
+        home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-home-')));
     });
 
     teardown(() => {
@@ -933,9 +941,11 @@ suite('usage roots', () => {
         assert.ok(resolved.candidates.some(c => c.source === 'default' && !c.exists));
     });
 
-    test('a folder named in another case is one root, where the file system folds case', () => {
+    test('a folder named in another case is one root, read under the spelling on disk', () => {
         // Choose Folder can give `c:\…` where the default is `C:\…`. Where
-        // case matters, the other spelling is simply not found.
+        // case matters, the other spelling is simply not found. Read under
+        // the typed spelling, every transcript would be read again from the
+        // start, under new keys.
         const real = dir('CaseDir');
         const resolved = resolveRoots({
             setting: path.join(home, 'casedir'),
@@ -944,7 +954,7 @@ suite('usage roots', () => {
             home,
             platform: process.platform,
         });
-        assert.strictEqual(resolved.roots.length, 1, JSON.stringify(resolved.roots));
+        assert.deepStrictEqual(resolved.roots.map(r => r.path), [real], JSON.stringify(resolved.roots));
     });
 
     test("Claude Code's two flags are read wherever it reads them, its settings files included", () => {

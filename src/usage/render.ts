@@ -204,14 +204,19 @@ function dayColumns(report: UsageReport, view: PanelView): string {
         return '';
     }
     const from = report.from ?? days[0].date;
-    const last = days[days.length - 1].date > report.to ? days[days.length - 1].date : report.to;
+    // Up to the range's last day, today, whatever a record dated later says.
+    const last = report.to;
     const byDate = new Map(days.map(d => [d.date, d.totals]));
     // The newest days, counted back from the last one, not on from the first.
     const all: string[] = [];
     for (let d = last; d >= from && all.length < MAX_DAY_COLUMNS; d = previousDay(d)) {
         all.unshift(d);
     }
+    if (all.length === 0) {
+        return '';
+    }
     const hidden = days.filter(d => d.date < all[0]).length;
+    const later = days.filter(d => d.date > last).length;
     let tallest = 0;
     for (const date of all) {
         tallest = Math.max(tallest, byDate.get(date)?.processed ?? 0);
@@ -229,6 +234,12 @@ function dayColumns(report: UsageReport, view: PanelView): string {
     <div class="columns-axis"><span>${escapeHtml(all[0])}</span><span>${escapeHtml(all[all.length - 1])}</span></div>
     <p class="note">Days in ${escapeHtml(view.zone)}.${
         hidden > 0 ? ` The newest ${MAX_DAY_COLUMNS} are drawn; ${hidden.toLocaleString('en-US')} earlier days with requests are in the totals.` : ''
+    }${
+        later === 1
+            ? ' A later day, from a clock ahead of this one, is in the totals.'
+            : later > 1
+              ? ` ${later.toLocaleString('en-US')} later days, from a clock ahead of this one, are in the totals.`
+              : ''
     }</p>`;
 }
 
@@ -443,7 +454,7 @@ function diagnostics(view: PanelView): string {
         if (report.coverage.oversizeLines + report.coverage.malformedLines > 0) {
             rows.push([
                 'Lines not read',
-                `${report.coverage.malformedLines.toLocaleString('en-US')} malformed, ${report.coverage.oversizeLines.toLocaleString('en-US')} over 16 MiB`,
+                `${report.coverage.malformedLines.toLocaleString('en-US')} malformed, ${report.coverage.oversizeLines.toLocaleString('en-US')} too long to read`,
             ]);
         }
     }

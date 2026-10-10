@@ -180,6 +180,18 @@ suite('usage panel', () => {
         assert.ok(page.panel.webview.html.includes('No requests fall in this range.'), 'the hidden page is still the empty one');
     });
 
+    test('what changes while it is hidden is in the page it comes back from', async () => {
+        const { service, fake, changed } = fakeService();
+        UsagePanel.show(context, service, log);
+        await until(() => page.posted.length > 0);
+        page.setVisible(false);
+        const posts = page.posted.length;
+        fake.report = quietReport({ coverage: { ...quietReport().coverage, requests: 0 } });
+        changed();
+        await until(() => page.panel.webview.html.includes('No Claude Code requests have been read yet'));
+        assert.strictEqual(page.posted.length, posts, 'posted to a hidden page, which drops it');
+    });
+
     test('the refreshed time is shown only after a pass that ran', async () => {
         const { service, fake } = fakeService();
         // Another window holds the import, or it failed: no pass ran here.

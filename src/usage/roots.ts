@@ -128,10 +128,13 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
             refused.push(candidate);
             continue;
         }
+        // Read under the spelling on disk: transcripts are known by their
+        // path, so a root reached under another spelling would be read again
+        // from the start.
         const identity = realPath(candidate.path);
         if (!seen.has(identity)) {
             seen.add(identity);
-            roots.push(candidate);
+            roots.push({ ...candidate, path: identity });
         }
     }
     // A root is a configuration folder, read with its own settings.json;

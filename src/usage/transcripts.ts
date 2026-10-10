@@ -60,6 +60,12 @@ export const MAX_COUNTER = 100_000_000;
 /** Record times outside these are not Claude Code's, which began in 2025. */
 const EARLIEST_TIME = Date.UTC(2023, 0, 1);
 const LATEST_TIME = Date.UTC(2100, 0, 1);
+/**
+ * How far ahead of this clock a record's time may be: written on another
+ * machine whose clock runs ahead. Records are written as they happen, so a
+ * later one would put a day in the future in every range.
+ */
+const FUTURE_ALLOWANCE_MS = 24 * 60 * 60 * 1000;
 
 /** How much of the file before the checkpoint is hashed to notice a rewrite. */
 const TAIL_BYTES = 64;
@@ -708,7 +714,7 @@ function parseCompaction(r: Record<string, unknown>, file: TranscriptFile, resul
 /** A record's ISO time as epoch milliseconds, or null when it is not a plausible one. */
 function recordTime(value: unknown): number | null {
     const time = typeof value === 'string' ? Date.parse(value) : NaN;
-    return Number.isFinite(time) && time >= EARLIEST_TIME && time < LATEST_TIME ? time : null;
+    return Number.isFinite(time) && time >= EARLIEST_TIME && time <= Date.now() + FUTURE_ALLOWANCE_MS ? time : null;
 }
 
 function objectOf(value: unknown): Record<string, unknown> | undefined {
