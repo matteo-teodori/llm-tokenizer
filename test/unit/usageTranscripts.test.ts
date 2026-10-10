@@ -685,7 +685,17 @@ suite('usage worker', () => {
         logged.length = 0;
     });
 
+    /** Stores a test opens on this thread: closed here even when an assertion failed first. */
+    const direct: UsageStore[] = [];
+
     teardown(async () => {
+        for (const store of direct.splice(0)) {
+            try {
+                store.close();
+            } catch {
+                // Closed by the test.
+            }
+        }
         await Promise.all(hosts.splice(0).map(h => h.dispose()));
         // Windows lets a folder go only once nothing in it is open.
         fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
@@ -721,10 +731,12 @@ suite('usage worker', () => {
 
     test('while it imports it keeps telling its host it is at work', async () => {
         // The host gives up on a worker silent for two minutes, and a first
-        // import of a large history can take longer than that.
+        // import of a large history can take longer than that. With a beat
+        // every millisecond, an import of 120 files beats again and again;
+        // one that beat only once would be cut off again.
         const root = manyTranscripts();
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
-        const worker = new Worker(WORKER);
+        const worker = new Worker(WORKER, { workerData: { beatMs: 1 } });
         try {
             const seen: string[] = [];
             const imported = new Promise<void>(resolve =>
@@ -737,7 +749,8 @@ suite('usage worker', () => {
             );
             worker.postMessage({ type: 'import', id: 7, storeFile, roots: [root] } satisfies UsageWorkerRequest);
             await imported;
-            assert.ok(seen.includes('progress:0') && seen.indexOf('progress:0') < seen.indexOf('imported:7'), seen.join(' '));
+            const beats = seen.slice(0, seen.indexOf('imported:7')).filter(m => m === 'progress:0').length;
+            assert.ok(beats >= 2, `${beats} beats before the answer: ${seen.join(' ')}`);
         } finally {
             await worker.terminate();
         }
@@ -822,6 +835,7 @@ suite('usage worker', () => {
         assert.ok(sqlite, 'this runtime has no node:sqlite');
         const opened = UsageStore.open(sqlite, storeFile);
         assert.strictEqual(opened.status, 'ready');
+        direct.push(opened.store);
         const unfinished = () =>
             opened.store.transaction(() =>
                 opened.store.putReadGuard({ provider: 'claude-code', path: fs.realpathSync(file), inProgress: true, crashCount: 1, lastCrash: Date.now() }),
@@ -854,6 +868,7 @@ suite('usage worker', () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const opened = UsageStore.open(sqlite, storeFile);
         assert.strictEqual(opened.status, 'ready');
+        direct.push(opened.store);
         // The window's earlier worker died holding it.
         assert.ok(opened.store.acquireLease('import', 'window-1', PARSER_VERSION));
         const worker = host();

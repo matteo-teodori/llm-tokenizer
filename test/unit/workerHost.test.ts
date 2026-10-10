@@ -80,16 +80,18 @@ suite('worker host', () => {
         const patient = path.join(tmp, 'patient.js');
         fs.writeFileSync(patient, PATIENT);
         type Ask = { id: number; every?: number; beats?: number; silent?: boolean };
-        const host = new WorkerHost<Ask, { id: number; done?: boolean }>(patient, { name: 'patient', fallback: 'nothing', log, silenceTimeoutMs: 250 });
+        // A word every 50 ms against a 1 s timeout: a pause of most of a
+        // second on a slow runner still passes.
+        const host = new WorkerHost<Ask, { id: number; done?: boolean }>(patient, { name: 'patient', fallback: 'nothing', log, silenceTimeoutMs: 1_000 });
         hosts.push(host as unknown as WorkerHost<{ id: number }, Echo>);
         const started = Date.now();
-        // 600 ms of work, more than twice the timeout, with a word every 50 ms.
-        const slow = host.send({ id: 0, every: 50, beats: 12 });
+        // 1.5 s of work, half again the timeout.
+        const slow = host.send({ id: 0, every: 50, beats: 30 });
         // Sent at the same time, and never answered: alive while the worker talks.
         const unanswered = host.send({ id: 0, silent: true });
         assert.strictEqual((await slow).done, true);
         await assert.rejects(unanswered, /did not respond in time/);
-        assert.ok(Date.now() - started >= 600, 'given up while the worker was still at work');
+        assert.ok(Date.now() - started >= 1_500, 'given up while the worker was still at work');
     });
 
     test('a heap limit reaches the worker', async () => {

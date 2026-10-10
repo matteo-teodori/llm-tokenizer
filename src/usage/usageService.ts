@@ -16,6 +16,7 @@
  * lose whatever was written in a month it stayed closed.
  */
 
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
@@ -693,9 +694,16 @@ export function registerClaudeCodeUsage(
 ): UsageService {
     const underTest = context.extensionMode === vscode.ExtensionMode.Test;
     const fixtures = path.join(context.extensionPath, 'test', 'fixtures');
+    // Under test, a history of its own, emptied as each run starts: one that
+    // a branch with a newer parser left in the test profile would refuse
+    // this branch's imports.
+    const usageFolder = path.join(context.globalStorageUri.fsPath, underTest ? 'claude-code-usage-test' : 'claude-code-usage');
+    if (underTest) {
+        fs.rmSync(usageFolder, { recursive: true, force: true });
+    }
     const service = new UsageService({
         log,
-        storeFile: path.join(context.globalStorageUri.fsPath, 'claude-code-usage', 'usage.sqlite'),
+        storeFile: path.join(usageFolder, 'usage.sqlite'),
         readSettings: () => readUsageSettings(section => vscode.workspace.getConfiguration(section)),
         rootInputs: () => machineRootInputs(underTest ? { fixtures } : undefined),
         createHost: onCrash =>

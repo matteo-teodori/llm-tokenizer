@@ -312,7 +312,9 @@ suite('usage panel', () => {
         try {
             UsagePanel.show(context, service, log);
             page.send({ type: 'chooseFolder' });
-            await until(() => config().inspect('claudeCodeDataDirectory')?.globalValue === path.dirname(picked), 5_000);
+            // As the editor gives it back: on Windows, with a lower-case drive letter.
+            const expected = vscode.Uri.file(path.dirname(picked)).fsPath;
+            await until(() => config().inspect('claudeCodeDataDirectory')?.globalValue === expected, 5_000);
             assert.strictEqual(config().inspect('claudeCodeDataDirectory')?.workspaceValue, undefined);
         } finally {
             (vscode.window as unknown as Record<string, unknown>).showOpenDialog = originalDialog;
