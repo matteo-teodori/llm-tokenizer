@@ -167,6 +167,20 @@ suite('usage status item: running sessions', () => {
         const sessions = await readLiveSessions([tmp], { isAlive: () => true, platform: 'darwin' });
         assert.deepStrictEqual(sessions.map(s => [s.sessionId, s.updatedAt]), [['newer', 3], ['older', 1]]);
     });
+
+    test('a leftover file dated far ahead, whose pid still answers, never outranks the running session', async () => {
+        const dir = path.join(tmp, 'sessions');
+        fs.mkdirSync(dir);
+        const now = 1_791_000_000_000;
+        fs.writeFileSync(path.join(dir, '1.json'), record({ sessionId: 'leftover-pid1', pid: 1, updatedAt: Number.MAX_SAFE_INTEGER }));
+        fs.writeFileSync(path.join(dir, '2.json'), record({ sessionId: 'leftover-reused', pid: 2, updatedAt: now + 6 * 60 * 60_000 }));
+        fs.writeFileSync(path.join(dir, '3.json'), record({ sessionId: 'running-now', pid: 3, updatedAt: now - 1_000 }));
+        // Within the skew, an update time is believed, and ranks.
+        fs.writeFileSync(path.join(dir, '4.json'), record({ sessionId: 'skewed', pid: 4, updatedAt: now + CLOCK_SKEW_MS }));
+        const sessions = await readLiveSessions([tmp], { isAlive: () => true, platform: 'darwin', now });
+        assert.deepStrictEqual(sessions.slice(0, 2).map(s => [s.sessionId, s.updatedAt]), [['skewed', now + CLOCK_SKEW_MS], ['running-now', now - 1_000]]);
+        assert.deepStrictEqual(sessions.slice(2).map(s => [s.sessionId, s.updatedAt]).sort(), [['leftover-pid1', null], ['leftover-reused', null]]);
+    });
 });
 
 suite('usage status item: the item', () => {

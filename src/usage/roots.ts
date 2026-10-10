@@ -279,20 +279,33 @@ function isDirectory(candidate: string): boolean {
  * folder or the drive letter often is, is still one root.
  */
 function realPath(candidate: string): string {
-    try {
-        return fs.realpathSync.native(candidate);
-    } catch {
-        return candidate;
-    }
+    return resolved(candidate) ?? candidate;
 }
 
-/** The path as the file system holds it, or undefined where it leads nowhere. */
+/**
+ * The path as the file system holds it, or undefined where it leads nowhere.
+ *
+ * On a mapped drive the native call gives the network share's path,
+ * `\\server\share\…`, which the editor can refuse, unless that host is among
+ * its allowed UNC hosts, where it reads the drive itself. There the path
+ * keeps its drive, with its links resolved and the case as typed; one that
+ * leads to a share through a link is kept as it was given.
+ */
 function resolved(candidate: string): string | undefined {
     try {
-        return fs.realpathSync.native(candidate);
+        const real = fs.realpathSync.native(candidate);
+        if (!isUnc(real) || isUnc(candidate)) {
+            return real;
+        }
+        const kept = fs.realpathSync(candidate);
+        return isUnc(kept) ? candidate : kept;
     } catch {
         return undefined;
     }
+}
+
+function isUnc(p: string): boolean {
+    return /^[\\/]{2}/.test(p);
 }
 
 /** Whether `child` is `parent` or inside it, both already resolved. */

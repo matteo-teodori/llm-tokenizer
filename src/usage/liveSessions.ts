@@ -15,7 +15,7 @@
  * names no process here even while it runs. Under another domain the pid
  * means nothing here, so only a recent update says the session runs. An
  * update time further ahead of this clock than CLOCK_SKEW_MS is no evidence
- * of anything.
+ * of anything, and ranks the session nowhere: it is taken as unknown.
  *
  * A session id is taken only in the form the worker accepts, so a file with
  * any other cannot make every look fail.
@@ -31,7 +31,7 @@ export interface LiveSession {
     sessionId: string;
     cwd: string;
     status: string | null;
-    /** Epoch milliseconds, as Claude Code writes it. */
+    /** Epoch milliseconds, as Claude Code writes it; null when there is none, or none to believe. */
     updatedAt: number | null;
 }
 
@@ -65,8 +65,12 @@ export function parseLiveSession(
     if (!sessionId || !SESSION_ID.test(sessionId) || !cwd || !path.isAbsolute(cwd)) {
         return undefined;
     }
-    const updatedAt = typeof r.updatedAt === 'number' && Number.isSafeInteger(r.updatedAt) ? r.updatedAt : null;
-    const recent = updatedAt !== null && updatedAt <= now + CLOCK_SKEW_MS && now - updatedAt <= RECENT_MS;
+    // A time past the clocks' skew is no time at all: a leftover file dated
+    // far ahead would otherwise count as recent, and rank above the running
+    // session for good.
+    const updatedAt =
+        typeof r.updatedAt === 'number' && Number.isSafeInteger(r.updatedAt) && r.updatedAt <= now + CLOCK_SKEW_MS ? r.updatedAt : null;
+    const recent = updatedAt !== null && now - updatedAt <= RECENT_MS;
     const localPid = r.pidDomain === platform && typeof r.pid === 'number' && Number.isSafeInteger(r.pid) && r.pid > 0 ? r.pid : undefined;
     const running = localPid !== undefined ? isAlive(localPid) || (platform === 'linux' && recent) : recent;
     if (!running) {

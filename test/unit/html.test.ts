@@ -123,6 +123,17 @@ suite('page text helpers', () => {
         for (const text of ['"=1+1"', ' =1+1', '\t=1+1', '\u200b=1+1', '\ufeff=1+1', '\u3000+1', '\uff1d1+1', '\uff0b1', '\uff0d1', '\uff20A1', '\uff02=1']) {
             assert.ok(helpers.pasteCell(text).startsWith("'"), JSON.stringify(text));
         }
+        // Controls, direction and other format marks, combining marks, blank letters.
+        const leads = ['\u0001', '\u0008', '\u000e', '\u001f', '\u007f', '\u0085', '\u00ad', '\u200e', '\u200f', '\u202a', '\u202e', '\u2061', '\u2066', '\u3164', '\ufe0f', '\u0301', '\u115f', '\uffa0', '\u2800'];
+        for (const lead of leads) {
+            assert.ok(helpers.pasteCell(`${lead}=1+1`).startsWith("'"), JSON.stringify(lead));
+        }
+        // The signs in their small, raised and lowered forms, and the minus sign.
+        for (const sign of ['\ufe62', '\ufe63', '\ufe66', '\ufe6b', '\u207a', '\u207c', '\u208c', '\u2212']) {
+            assert.ok(helpers.pasteCell(`${sign}1`).startsWith("'"), JSON.stringify(sign));
+        }
+        // A control anywhere is a space, as a tab is.
+        assert.strictEqual(helpers.cell('a\u0001b\u007fc'), 'a b c');
         for (const text of ['claude-opus-5-5', 'a "quoted" word', '1278', 'repo']) {
             assert.strictEqual(helpers.pasteCell(text), text);
         }

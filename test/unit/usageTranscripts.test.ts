@@ -978,6 +978,32 @@ suite('usage roots', () => {
         assert.deepStrictEqual(resolved.roots.map(r => r.path), [real], JSON.stringify(resolved.roots));
     });
 
+    test('a mapped drive is read under its letter, never as the share the editor may refuse', () => {
+        // What Windows gives for a mapped drive, simulated: the native real
+        // path is \\server\share\…, while the drive's own path is served.
+        // The module itself, as roots.ts sees it, not this file's view of it.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const shared = require('fs') as { realpathSync: typeof fs.realpathSync };
+        const original = shared.realpathSync;
+        const share = '\\\\server\\share\\mapped';
+        const stub = (js: (p: string) => string) =>
+            Object.assign((p: string) => js(p), { native: (p: string) => (p.startsWith(home) ? share : original.native(p)) }) as unknown as typeof fs.realpathSync;
+        // Named through a link, so that the path given and the path resolved differ.
+        const target = dir('mapped');
+        const given = path.join(home, 'drive');
+        fs.symlinkSync(target, given, 'junction');
+        const roots = () => resolveRoots({ setting: given, editorEnvironment: undefined, env: {}, home, platform: process.platform }).roots.map(r => r.path);
+        try {
+            shared.realpathSync = stub(p => original(p));
+            assert.deepStrictEqual(roots(), [target]);
+            // A link that leads to a share itself: kept as it was given.
+            shared.realpathSync = stub(p => (p.startsWith(home) ? share : original(p)));
+            assert.deepStrictEqual(roots(), [given]);
+        } finally {
+            shared.realpathSync = original;
+        }
+    });
+
     test("Claude Code's two flags are read wherever it reads them, its settings files included", () => {
         const custom = dir('custom');
         const read = (env: NodeJS.ProcessEnv, editorEnvironment: unknown = undefined) => {

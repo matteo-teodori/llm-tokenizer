@@ -69,18 +69,22 @@ export function embed(value: unknown): string {
  * must not let a file name act as a separator or a formula.
  *
  * - `escapeText(s)` escapes as `escapeHtml` does, for `innerHTML`.
- * - `cell(value)` turns tabs and line breaks into a space. A path is whatever
- *   the file system allowed, which on Unix includes tabs and newlines; left
- *   in, one such name shifts every following column or splits the row in two.
+ * - `cell(value)` turns control characters, tabs and line breaks among them,
+ *   into a space. A path is whatever the file system allowed, which on Unix
+ *   includes tabs and newlines; left in, one such name shifts every following
+ *   column or splits the row in two.
  * - `csv(value)` quotes a CSV field. Quoting alone does not stop a spreadsheet
  *   treating a cell as a formula: a file named `=cmd|'/c calc'!A1.ts` is
  *   executable content once the export is opened, so a leading `= + - @` gets
  *   an apostrophe, which forces it to text.
  * - `pasteCell(value)` is `cell` with the same guard, for Copy: pasted into a
  *   spreadsheet, a tab-separated cell is read as a formula just the same.
- *   The guard looks past leading spaces and invisible characters, takes the
- *   full-width forms of those signs too, and a leading `"`, which a paste
- *   reads as the start of a quoted cell whose contents are then a formula.
+ *   The guard looks past whatever a spreadsheet may pass over or draw as
+ *   nothing before the sign: spaces, format characters such as direction
+ *   marks, combining marks, and the letters that are blank. It reads the
+ *   signs in their compatibility forms too, full-width, small or raised, and
+ *   the minus sign, and takes a leading `"`, which a paste reads as the start
+ *   of a quoted cell whose contents are then a formula.
  */
 export const PAGE_TEXT_HELPERS = `
     function escapeText(s) {
@@ -89,7 +93,7 @@ export const PAGE_TEXT_HELPERS = `
     }
 
     function cell(value) {
-        return String(value).replace(/[\\t\\r\\n]+/g, ' ');
+        return String(value).replace(/\\p{Cc}+/gu, ' ');
     }
 
     function csv(value) {
@@ -98,6 +102,7 @@ export const PAGE_TEXT_HELPERS = `
 
     function pasteCell(value) {
         const text = cell(value);
-        return /^[\\s\\u200b-\\u200d\\u2060\\ufeff]*["=+\\-@\\uff02\\uff0b\\uff0d\\uff1d\\uff20]/.test(text) ? "'" + text : text;
+        const lead = text.normalize('NFKC').replace(/^[\\s\\p{Z}\\p{Cc}\\p{Cf}\\p{M}\\u115f\\u1160\\u3164\\uffa0\\u2800]+/u, '');
+        return /^["=+\\-@\\u2212]/.test(lead) ? "'" + text : text;
     }
 `;
