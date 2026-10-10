@@ -9,6 +9,7 @@ import { CLOCK_SKEW_MS, RECENT_MS, parseLiveSession, readLiveSessions, type Live
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import type { ResolvedRoots } from '../../src/usage/roots';
 import { UsageStatusItem, contextWindow, describeLive, type LiveInput, type StatusItemService } from '../../src/usage/statusItem';
+import { currentHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, loadSqlite, type LatestRequest } from '../../src/usage/store';
 import { WorkerHost } from '../../src/workerHost';
 
@@ -365,7 +366,7 @@ suite('usage status item: through the worker', () => {
         // A history a newer version wrote is read-only here, and still read.
         await host.send({ type: 'close', id: 0 });
         assert.ok(sqlite, 'this runtime has no node:sqlite');
-        const raw = new sqlite.DatabaseSync(storeFile);
+        const raw = new sqlite.DatabaseSync(currentHistory(path.dirname(storeFile)) ?? storeFile);
         raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
         raw.close();
         const readOnly = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [FIXTURE_ROOT], sessionId: 'sess-main-1' });

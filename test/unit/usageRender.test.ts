@@ -297,12 +297,12 @@ suite('usage page', () => {
         assert.ok(none.includes('No Claude Code data folder found') && !none.includes('By model'));
     });
 
-    test('a history moved aside is named, on the page and in the diagnostics', () => {
+    test('a history set aside is named, on the page and in the diagnostics', () => {
         const moved = renderFragments(view({ recoveredFrom: `usage.sqlite.corrupt-${HOSTILE}` }));
-        assert.ok(moved.body.includes('The history could not be read, so it was moved aside as usage.sqlite.corrupt-&lt;img'));
-        assert.ok(/<dt>Moved aside<\/dt><dd>usage\.sqlite\.corrupt-&lt;img/.test(moved.diagnostics), moved.diagnostics.slice(0, 400));
+        assert.ok(moved.body.includes('The history could not be read, so it was set aside as usage.sqlite.corrupt-&lt;img'));
+        assert.ok(/<dt>Set aside<\/dt><dd>usage\.sqlite\.corrupt-&lt;img/.test(moved.diagnostics), moved.diagnostics.slice(0, 400));
         assert.ok(!text(moved).includes(`corrupt-${HOSTILE}`));
-        assert.ok(!text(renderFragments(view())).includes('moved aside'));
+        assert.ok(!text(renderFragments(view())).includes('set aside'));
     });
 
     test('a day with nothing still gets a column, so a gap reads as a gap', () => {

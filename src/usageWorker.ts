@@ -23,6 +23,7 @@ import { importUnderLease } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS } from './usage/report';
 import { PARSER_VERSION, sessionTranscripts } from './usage/transcripts';
+import { currentHistory, startHistory } from './usage/historyFiles';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import { SESSION_ID, type UsageFailure, type UsageWorkerRequest, type UsageWorkerResponse } from './usage/protocol';
 
@@ -50,11 +51,14 @@ const knobs = (workerData ?? {}) as { beatMs?: unknown; busyTimeoutMs?: unknown 
 const knob = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback);
 
 const sqlite = loadSqlite();
-/** `identity`: the file's device and inode when it was opened. */
-let opened: { file: string; result: OpenResult; identity: string | undefined } | undefined;
+/**
+ * The history open now: `folder` as the request named it, `file` the
+ * history in it, `identity` that file's device and inode when it was opened.
+ */
+let opened: { folder: string; file: string; result: OpenResult; identity: string | undefined } | undefined;
 /** A history whose last Clear left pages another window's read held on to. */
 let unsettled: string | undefined;
-/** A corrupt history this worker moved aside, until an answer has said so. */
+/** A corrupt history this worker set aside, until an answer has said so. */
 let recovered: string | undefined;
 
 /** The moved file's name, once. */
@@ -92,25 +96,36 @@ function identityOf(file: string): string | undefined {
 }
 
 /**
- * The store at `file`, opened once and kept while it is the file there. One
- * replaced or deleted under this worker, by another window that moved a
- * corrupt history aside or by 2.1.2's Clear Downloaded Tokenizers, is no
- * longer the history: the one at the path is opened instead.
+ * The history in the folder of `storeFile`, opened once and kept while it is
+ * the one in use there. Another window may have started a new one, setting a
+ * corrupt one aside, or the history may have been deleted under this worker,
+ * as 2.1.2's Clear Downloaded Tokenizers deletes the extension's storage:
+ * then the one in use is opened instead. A corrupt history is left where it
+ * is, and a new one started beside it under a name of its own.
  */
-function storeAt(file: string): OpenResult {
+function storeAt(storeFile: string): OpenResult {
     if (!sqlite) {
         throw new Error('unreachable: checked by the caller');
     }
-    if (opened?.file === file && identityOf(file) !== opened.identity) {
+    const folder = path.dirname(storeFile);
+    const current = currentHistory(folder);
+    if (opened && (opened.folder !== folder || opened.file !== current || identityOf(opened.file) !== opened.identity)) {
         closeOpened();
     }
-    if (opened?.file !== file) {
-        closeOpened();
-        const result = UsageStore.open(sqlite, file, { busyTimeoutMs: knob(knobs.busyTimeoutMs, 5_000) });
-        opened = { file, result, identity: identityOf(file) };
-        if (result.status === 'ready' && result.recoveredFrom) {
-            recovered = path.basename(result.recoveredFrom);
+    if (!opened) {
+        const options = { busyTimeoutMs: knob(knobs.busyTimeoutMs, 5_000) };
+        let file = current ?? startHistory(folder);
+        let result = UsageStore.open(sqlite, file, options);
+        if (result.status === 'corrupt') {
+            const corrupt = path.basename(file);
+            file = startHistory(folder);
+            result = UsageStore.open(sqlite, file, options);
+            if (result.status === 'ready') {
+                result.store.markSetAside(corrupt);
+                recovered = corrupt;
+            }
         }
+        opened = { folder, file, result, identity: identityOf(file) };
     }
     const result = opened.result;
     // A failure is not kept: a store busy or briefly unreachable at the first
@@ -122,7 +137,7 @@ function storeAt(file: string): OpenResult {
 }
 
 function closeOpened(): void {
-    if (opened && opened.result.status !== 'failed') {
+    if (opened && opened.result.status !== 'failed' && opened.result.status !== 'corrupt') {
         if (unsettled === opened.file && opened.result.status === 'ready') {
             opened.result.store.checkpoint();
         }
@@ -133,7 +148,15 @@ function closeOpened(): void {
 }
 
 function failure(result: OpenResult): UsageFailure {
-    return result.status === 'failed' ? (result.category === 'busy' ? 'store-busy' : 'store-io') : 'store-read-only';
+    switch (result.status) {
+        case 'failed':
+            return result.category === 'busy' ? 'store-busy' : 'store-io';
+        case 'read-only':
+            return 'store-read-only';
+        default:
+            // Corrupt twice over, the new history too: nothing to read from.
+            return 'store-io';
+    }
 }
 
 async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): Promise<void> {
@@ -173,7 +196,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 now: Date.now(),
                 platform: process.platform,
             });
-            reply({ type: 'report', id: request.id, report, aside: UsageStore.setAsideCopy(request.storeFile), ...takeRecovered() });
+            reply({ type: 'report', id: request.id, report, aside: store.setAside(), ...takeRecovered() });
             return;
         }
         case 'import': {
@@ -223,7 +246,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
         case 'clear': {
             const { settled, copiesLeft } = store.clear();
             unsettled = settled ? undefined : request.storeFile;
-            // A copy this worker moved aside is one the Clear removed.
+            // A copy this worker set aside is one the Clear removed.
             recovered = undefined;
             reply({ type: 'cleared', id: request.id, generation: store.generation(), settled, copiesLeft });
             return;

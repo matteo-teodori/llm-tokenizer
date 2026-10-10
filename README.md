@@ -178,7 +178,7 @@ calculation needs: requests, input, cache writes (5-minute and 1-hour), cache
 reads, output, thinking, web searches and fetches. It gives no prices.
 
 **What is kept, and where.** A database in this extension's own storage
-(`claude-code-usage/usage.sqlite` under VS Code's global storage for LLM
+(the `claude-code-usage` folder in VS Code's global storage for LLM
 Tokenizer) keeps:
 - each request's token counts, model, effort, time and Claude Code version,
   and its ids: message, request, session, and the subagent or workflow run it
@@ -193,9 +193,9 @@ Tokenizer) keeps:
 Prompts, responses, thinking and tool inputs or results are never kept, and
 nothing is sent anywhere. The history outlives Claude Code's own records,
 which Claude Code deletes after 30 days by default. A history that can no
-longer be read is moved aside and a new one started, and the panel says so
-until it is cleared. **Clear Claude Code Usage History** removes the history
-and any copy moved aside, and leaves nothing of either readable on disk;
+longer be read is set aside, left as it is, and a new one started, and the
+panel says so until it is cleared. **Clear Claude Code Usage History** removes the history
+and any copy set aside, and leaves nothing of either readable on disk;
 anything still on disk is read again at the next refresh. The panel also
 remembers its range, its scope and your time zone, in the editor's own
 state.

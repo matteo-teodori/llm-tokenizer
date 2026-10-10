@@ -143,7 +143,7 @@ function banner(view: PanelView): string {
     const lines: string[] = [];
     if (view.recoveredFrom) {
         lines.push(
-            `The history could not be read, so it was moved aside as ${escapeHtml(view.recoveredFrom)}, and a new one started from what Claude Code still keeps.`,
+            `The history could not be read, so it was set aside as ${escapeHtml(view.recoveredFrom)}, and a new one started from what Claude Code still keeps.`,
         );
     }
     if (view.status === 'no-roots') {
@@ -477,7 +477,7 @@ function diagnostics(view: PanelView): string {
         }
     }
     if (view.recoveredFrom) {
-        rows.push(['Moved aside', escapeHtml(view.recoveredFrom)]);
+        rows.push(['Set aside', escapeHtml(view.recoveredFrom)]);
     }
     rows.push(['Time zone', escapeHtml(view.zone)]);
     return `

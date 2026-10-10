@@ -22,6 +22,7 @@ import {
     type UsageServiceDeps,
     type UsageSettings,
 } from '../../src/usage/usageService';
+import { currentHistory } from '../../src/usage/historyFiles';
 import { USAGE_SETTINGS } from '../../src/usage/settings';
 import { WorkerHost } from '../../src/workerHost';
 
@@ -674,7 +675,7 @@ suite('usage service', () => {
         assert.strictEqual(service.status, 'failing');
     });
 
-    test('a history moved aside is logged and kept on show, until Clear removes it', async () => {
+    test('a history set aside is logged and kept on show, until Clear removes it', async () => {
         const warnings: string[] = [];
         const { service, host } = make({ log: { info: () => undefined, warn: m => warnings.push(m), debug: () => undefined } });
         host.answer = request =>
@@ -685,7 +686,7 @@ suite('usage service', () => {
             );
         await settle();
         assert.strictEqual(service.recoveredFrom, 'usage.sqlite.corrupt-1791000000000');
-        assert.deepStrictEqual(warnings.filter(w => w.includes('moved aside as usage.sqlite.corrupt-1791000000000')).length, 1);
+        assert.deepStrictEqual(warnings.filter(w => w.includes('set aside as usage.sqlite.corrupt-1791000000000')).length, 1);
         assert.ok(await service.clear());
         assert.strictEqual(service.recoveredFrom, undefined);
     });
@@ -700,7 +701,7 @@ suite('usage service', () => {
         assert.ok(logged.some(l => l.includes('2 copies of the history set aside could not be removed')), logged.join(' | '));
     });
 
-    test('the moved-aside notice follows what is beside the history: shown while a copy is there', async () => {
+    test('the set-aside notice follows what is beside the history: shown while a copy is there', async () => {
         const { service, host } = make();
         let aside: string | undefined = 'usage.sqlite.corrupt-1791000000000';
         host.answer = request =>
@@ -758,7 +759,7 @@ suite('usage service', () => {
             await settle();
         }
         await worker?.dispose();
-        assert.ok(!fs.existsSync(`${storeFile}-wal`), 'the history was still open after its thread ended');
+        assert.ok(!fs.existsSync(`${currentHistory(path.dirname(storeFile)) ?? storeFile}-wal`), 'the history was still open after its thread ended');
     });
 });
 

@@ -23,6 +23,7 @@ import * as path from 'path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 import { BUCKET_MS } from './aggregate';
+import { copiesBeside } from './historyFiles';
 import { isComplete } from './provenance';
 import type {
     BucketSums,
@@ -89,10 +90,15 @@ export function installSqliteWarningFilter(): void {
     });
 }
 
-/** What opening the history gave. */
+/**
+ * What opening the history gave. `corrupt`: the file is not a database, or
+ * fails its check; it is left as it is, for the caller to start another
+ * history beside it (historyFiles.ts says why it is never renamed).
+ */
 export type OpenResult =
-    | { status: 'ready'; store: UsageStore; journal: 'wal' | 'delete'; recoveredFrom?: string }
+    | { status: 'ready'; store: UsageStore; journal: 'wal' | 'delete' }
     | { status: 'read-only'; store: UsageStore; reason: 'newer-schema'; schema: number }
+    | { status: 'corrupt' }
     | { status: 'failed'; category: 'busy' | 'io' | 'unknown' };
 
 export interface OpenOptions {
@@ -353,9 +359,7 @@ export class UsageStore {
                     continue;
                 }
                 if (code === SQLITE_CORRUPT || code === SQLITE_NOTADB) {
-                    const renamed = setAside(file, now());
-                    const reopened = UsageStore.openOnce(sqlite, file, now, options);
-                    return reopened.status === 'ready' ? { ...reopened, recoveredFrom: renamed } : reopened;
+                    return { status: 'corrupt' };
                 }
                 return { status: 'failed', category: code === SQLITE_BUSY ? 'busy' : code === undefined ? 'unknown' : 'io' };
             }
@@ -824,7 +828,7 @@ export class UsageStore {
         // file moved away, and the backup each migration starts from. Clear
         // means all of it, as far as it can be removed.
         let copiesLeft = 0;
-        for (const name of UsageStore.copiesBeside(this.file)) {
+        for (const name of copiesBeside(this.file)) {
             try {
                 fs.rmSync(path.join(path.dirname(this.file), name), { force: true });
             } catch {
@@ -844,28 +848,20 @@ export class UsageStore {
         return result?.busy !== 1;
     }
 
-    /** The copies of a history set aside beside `file`: corrupt ones moved away, and migration backups. */
-    static copiesBeside(file: string): string[] {
-        const base = path.basename(file);
-        try {
-            return fs.readdirSync(path.dirname(file)).filter(name => name.startsWith(`${base}.corrupt-`) || name.startsWith(`${base}.bak-v`));
-        } catch {
-            return [];
-        }
+    /**
+     * Record the history this one replaced, a corrupt one set aside, by its
+     * name: every window, and every reload, says so while its file is there,
+     * until Clear removes it.
+     */
+    markSetAside(name: string): void {
+        this.assertWritable();
+        this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('set_aside', ?)").run(name);
     }
 
-    /** The newest corrupt history moved aside beside `file`, by name, while one is there. */
-    static setAsideCopy(file: string): string | undefined {
-        const prefix = `${path.basename(file)}.corrupt-`;
-        let newest: { name: string; at: number } | undefined;
-        for (const name of UsageStore.copiesBeside(file)) {
-            // Its own -wal and -shm are not copies of their own.
-            const at = name.startsWith(prefix) ? Number(name.slice(prefix.length)) : NaN;
-            if (Number.isSafeInteger(at) && (!newest || at > newest.at)) {
-                newest = { name, at };
-            }
-        }
-        return newest?.name;
+    /** The history this one replaced, while its file is still beside it. */
+    setAside(): string | undefined {
+        const row = this.db.prepare("SELECT value FROM meta WHERE key = 'set_aside'").get() as { value: string } | undefined;
+        return row && copiesBeside(this.file).includes(row.value) ? row.value : undefined;
     }
 
     /** Run `work` as one read, on one snapshot, whatever other windows commit meanwhile. */
@@ -1026,25 +1022,6 @@ function processAlive(pid: number): boolean {
 function primaryCode(error: unknown): number | undefined {
     const code = (error as { errcode?: unknown } | null)?.errcode;
     return typeof code === 'number' ? code & 0xff : undefined;
-}
-
-/**
- * Move a corrupt history aside, with its journal files, and say where. It is
- * renamed rather than deleted: it is the only copy of whatever the session
- * records on disk no longer hold.
- */
-function setAside(file: string, now: number): string {
-    const target = `${file}.corrupt-${now}`;
-    for (const suffix of ['', '-wal', '-shm']) {
-        try {
-            fs.renameSync(file + suffix, target + suffix);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-                throw error;
-            }
-        }
-    }
-    return target;
 }
 
 /** Linux's magic numbers for the filesystems WAL cannot be trusted on. */

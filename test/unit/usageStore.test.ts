@@ -65,7 +65,7 @@ suite('usage history store', () => {
     function open(options = {}): OpenResult {
         assert.ok(sqlite, 'this runtime has no node:sqlite');
         const result = UsageStore.open(sqlite, file, options);
-        if (result.status !== 'failed') {
+        if (result.status !== 'failed' && result.status !== 'corrupt') {
             opened.push(result.store);
         }
         return result;
@@ -219,12 +219,13 @@ suite('usage history store', () => {
     });
 
     test('Clear removes the copies set aside beside the history too, and nothing else', () => {
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, 'this is not a database, '.repeat(400));
-        const store = ready(open({ now: () => 1_791_000_000_000 }));
-        const copies = [`${file}.corrupt-1791000000000`, `${file}.bak-v0`];
-        const others = [`${file}.notes`, path.join(path.dirname(file), 'other.sqlite.corrupt-1'), path.join(dir, 'usage.sqlite.bak-v0')];
-        for (const f of [...copies.slice(1), ...others]) {
+        const store = ready(open());
+        // A history set aside with its journal, an older version's corrupt
+        // copy, and a migration's backup.
+        const folder = path.dirname(file);
+        const copies = [path.join(folder, 'usage-0a1b2c3d4e.sqlite'), path.join(folder, 'usage-0a1b2c3d4e.sqlite-wal'), `${file}.corrupt-1791000000000`, `${file}.bak-v0`];
+        const others = [`${file}.notes`, path.join(folder, 'other.sqlite.corrupt-1'), path.join(folder, 'usage.current'), path.join(dir, 'usage.sqlite.bak-v0')];
+        for (const f of [...copies, ...others]) {
             fs.writeFileSync(f, 'x');
         }
         assert.ok(copies.every(f => fs.existsSync(f)));
@@ -309,15 +310,14 @@ suite('usage history store', () => {
         assert.throws(() => store.transaction(() => store.upsertRequests([req()])), /newer LLM Tokenizer/);
     });
 
-    test('a corrupt history is set aside, not deleted, and a new one starts', () => {
+    test('a corrupt history opens as corrupt, and is left exactly as it is', () => {
+        // Not renamed, not rewritten: a window may still have it open, and
+        // it is the only copy of what the records on disk no longer hold.
         fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, 'this is not a database, '.repeat(400));
-
-        const result = open({ now: () => 1_791_000_000_000 });
-        const store = ready(result);
-        assert.strictEqual(result.status === 'ready' && result.recoveredFrom, `${file}.corrupt-1791000000000`);
-        assert.ok(fs.existsSync(`${file}.corrupt-1791000000000`), 'the corrupt file is gone');
-        assert.strictEqual(store.generation(), 0);
+        const bytes = Buffer.from('this is not a database, '.repeat(400));
+        fs.writeFileSync(file, bytes);
+        assert.deepStrictEqual(open(), { status: 'corrupt' });
+        assert.ok(fs.readFileSync(file).equals(bytes), 'the corrupt file was touched');
     });
 
     test('a rollback journal is used where WAL cannot be trusted', () => {

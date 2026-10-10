@@ -9,12 +9,16 @@ import { comparablePath, isWithin, projectLabel, sessionRoot } from '../../src/u
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import { queryReport, reportSessions, type ReportQuery } from '../../src/usage/queries';
 import { buildReport, rangeSince, type RangeKey } from '../../src/usage/report';
+import { currentHistory, startHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
 import type { UsageRequest } from '../../src/usage/types';
 import { WorkerHost } from '../../src/workerHost';
 
 const FIXTURE_ROOT = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'claude-config');
 const sqlite = loadSqlite();
+
+/** The history a worker keeps in `storeFile`'s folder: the one in use there. */
+const historyIn = (storeFile: string) => currentHistory(path.dirname(storeFile)) ?? storeFile;
 
 /** The day the fixture's requests fall on, at noon UTC: R4 is already the 10th in Rome. */
 const FIXTURE_NOW = Date.UTC(2026, 9, 10, 12);
@@ -583,7 +587,7 @@ suite('usage worker queries', () => {
         await worker.send({ type: 'close', id: 0 });
 
         assert.ok(sqlite, 'this runtime has no node:sqlite');
-        const raw = new sqlite.DatabaseSync(storeFile);
+        const raw = new sqlite.DatabaseSync(historyIn(storeFile));
         raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
         raw.close();
         const again = await worker.send(ask(storeFile));
@@ -592,15 +596,17 @@ suite('usage worker queries', () => {
         assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'store-read-only');
     });
 
-    test('a history moved aside is named once, by its file name, in the next answer', async () => {
+    test('a history set aside is named once, by its file name, in the next answer', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         fs.mkdirSync(path.dirname(storeFile), { recursive: true });
         fs.writeFileSync(storeFile, 'this is not a database, '.repeat(400));
         const worker = host();
         const first = await worker.send(ask(storeFile));
         const moved = first.type === 'report' ? first.recovered : undefined;
-        assert.ok(moved && moved.startsWith('usage.sqlite.corrupt-'), JSON.stringify(first).slice(0, 200));
-        assert.ok(fs.existsSync(path.join(tmp, 'store', moved)), 'not the name of the file it was moved to');
+        // Left where it is, under its own name: never renamed, never reused.
+        assert.strictEqual(moved, 'usage.sqlite', JSON.stringify(first).slice(0, 200));
+        assert.ok(fs.readFileSync(storeFile, 'utf8').startsWith('this is not a database'), 'the corrupt history was touched');
+        assert.notStrictEqual(historyIn(storeFile), storeFile, 'the new history took the corrupt one\'s name');
         const again = await worker.send(ask(storeFile));
         assert.ok(again.type === 'report' && !('recovered' in again), JSON.stringify(again).slice(0, 200));
     });
@@ -616,7 +622,7 @@ suite('usage worker queries', () => {
         await worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] });
         // Another window, in the middle of a read.
         assert.ok(sqlite, 'this runtime has no node:sqlite');
-        const reader = new sqlite.DatabaseSync(storeFile);
+        const reader = new sqlite.DatabaseSync(historyIn(storeFile));
         reader.exec('BEGIN');
         reader.prepare('SELECT count(*) FROM requests').get();
         const cleared = await worker.send({ type: 'clear', id: 0, storeFile });
@@ -666,14 +672,11 @@ suite('usage worker queries', () => {
             // Deleted, as 2.1.2's Clear Downloaded Tokenizers deletes the storage.
             fs.rmSync(path.dirname(storeFile), { recursive: true, force: true });
             assert.strictEqual(await processed(), 0, 'it went on showing a deleted history');
-            // Replaced, as another window moving a corrupt one aside replaces it.
+            // Replaced, as another window replaces a corrupt one: a new
+            // history, and the pointer at it.
             await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
-            fs.renameSync(storeFile, `${storeFile}.moved`);
-            for (const suffix of ['-wal', '-shm']) {
-                fs.rmSync(storeFile + suffix, { force: true });
-            }
             assert.ok(sqlite);
-            const fresh = UsageStore.open(sqlite, storeFile);
+            const fresh = UsageStore.open(sqlite, startHistory(path.dirname(storeFile)));
             assert.strictEqual(fresh.status, 'ready');
             fresh.store.close();
             assert.strictEqual(await processed(), 0, 'it went on showing a replaced history');

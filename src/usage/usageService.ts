@@ -229,7 +229,7 @@ export class UsageService implements vscode.Disposable {
             return false;
         }
         this.summary = undefined;
-        // Clear deleted the moved-aside copy along with the rest.
+        // Clear deleted the copy set aside along with the rest.
         this.recovered = undefined;
         this.deps.log.info(`Claude Code usage history cleared (generation ${response.generation})`);
         if (!response.settled) {
@@ -528,7 +528,7 @@ export class UsageService implements vscode.Disposable {
             if ('recovered' in response && response.recovered) {
                 this.recovered = response.recovered;
                 this.deps.log.warn(
-                    `Claude Code usage: the history could not be read, so it was moved aside as ${response.recovered}, and a new one started`,
+                    `Claude Code usage: the history could not be read, so it was set aside as ${response.recovered}, and a new one started`,
                 );
                 this.changed.fire();
             } else if (response.type === 'report' && response.aside !== this.recovered) {
