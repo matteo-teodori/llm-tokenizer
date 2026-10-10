@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
+import type { UsageReport } from '../../src/usage/report';
 import {
     CLOSE_GRACE_MS,
     FIRST_IMPORT_MAX_WAIT_MS,
@@ -151,7 +152,7 @@ function defaultAnswer(request: UsageWorkerRequest): UsageWorkerResponse {
         case 'import':
             return { type: 'imported', id: request.id, summary: summaryOf(1), leaseHeldElsewhere: false };
         case 'clear':
-            return { type: 'cleared', id: request.id, generation: 1 };
+            return { type: 'cleared', id: request.id, generation: 1, settled: true, copiesLeft: 0 };
         case 'close':
             return { type: 'closed', id: request.id };
         case 'query':
@@ -678,6 +679,28 @@ suite('usage service', () => {
         assert.strictEqual(service.recoveredFrom, 'usage.sqlite.corrupt-1791000000000');
         assert.deepStrictEqual(warnings.filter(w => w.includes('moved aside as usage.sqlite.corrupt-1791000000000')).length, 1);
         assert.ok(await service.clear());
+        assert.strictEqual(service.recoveredFrom, undefined);
+    });
+
+    test('a Clear another window held off, or that left copies, says so in the log', async () => {
+        const logged: string[] = [];
+        const { service, host } = make({ log: { info: m => logged.push(m), warn: m => logged.push(m), debug: () => undefined } });
+        host.answer = request =>
+            Promise.resolve(request.type === 'clear' ? { type: 'cleared', id: request.id, generation: 2, settled: false, copiesLeft: 2 } : defaultAnswer(request));
+        assert.ok(await service.clear());
+        assert.ok(logged.some(l => l.includes('once that read ends')), logged.join(' | '));
+        assert.ok(logged.some(l => l.includes('2 copies of the history set aside could not be removed')), logged.join(' | '));
+    });
+
+    test('the moved-aside notice follows what is beside the history: shown while a copy is there', async () => {
+        const { service, host } = make();
+        let aside: string | undefined = 'usage.sqlite.corrupt-1791000000000';
+        host.answer = request =>
+            Promise.resolve(request.type === 'query' ? { type: 'report', id: request.id, report: {} as UsageReport, aside } : defaultAnswer(request));
+        await service.report('today', 'UTC', null);
+        assert.strictEqual(service.recoveredFrom, 'usage.sqlite.corrupt-1791000000000');
+        aside = undefined;
+        await service.report('today', 'UTC', null);
         assert.strictEqual(service.recoveredFrom, undefined);
     });
 

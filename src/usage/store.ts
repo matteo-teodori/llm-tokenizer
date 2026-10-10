@@ -104,6 +104,8 @@ export interface OpenOptions {
     forceRollbackJournal?: boolean;
     /** Whether a lease holder's process still runs (tests). */
     isAlive?: (pid: number) => boolean;
+    /** How long a statement waits on another window's lock, in ms; tests shorten it. */
+    busyTimeoutMs?: number;
 }
 
 /** A file's checkpoint: how far it has been read, and what it was. */
@@ -361,16 +363,17 @@ export class UsageStore {
     }
 
     private static openOnce(sqlite: Sqlite, file: string, now: () => number, options: OpenOptions): OpenResult {
+        const busyTimeout = `PRAGMA busy_timeout = ${Math.max(0, Math.floor(options.busyTimeoutMs ?? 5000))}`;
         let db = new sqlite.DatabaseSync(file);
         try {
-            db.exec('PRAGMA busy_timeout = 5000');
+            db.exec(busyTimeout);
             const schema = userVersion(db);
 
             // A newer extension created it: read it, never write or migrate it.
             if (schema > SCHEMA_VERSION) {
                 db.close();
                 db = new sqlite.DatabaseSync(file, { readOnly: true });
-                db.exec('PRAGMA busy_timeout = 5000');
+                db.exec(busyTimeout);
                 return { status: 'read-only', store: new UsageStore(db, file, true, now, alive(options)), reason: 'newer-schema', schema };
             }
 
@@ -785,16 +788,30 @@ export class UsageStore {
      *
      * The file itself is never unlinked: on POSIX another window would go on
      * writing to the unlinked file, and Windows refuses to delete one that is
-     * open. VACUUM afterwards returns the space, and is skipped if another
-     * window is busy with the database.
+     * open. Nothing of the history is left readable on disk either: deleted
+     * rows are overwritten (secure_delete), VACUUM returns the space when no
+     * other window is busy with the database, and the write-ahead log, which
+     * holds every page written since the last checkpoint, is folded into the
+     * file and emptied.
+     *
+     * @returns `settled`: false while another window's read holds the
+     * checkpoint off, for `checkpoint()` to finish later; `copiesLeft`: the
+     * copies beside it that could not be removed (one that another process
+     * holds open, on Windows).
      */
-    clear(): void {
-        this.transaction(() => {
-            for (const table of DATA_TABLES) {
-                this.db.exec(`DELETE FROM ${table}`);
-            }
-            this.db.exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
-        });
+    clear(): { settled: boolean; copiesLeft: number } {
+        const secure = (this.db.prepare('PRAGMA secure_delete').get() as { secure_delete: number }).secure_delete;
+        this.db.exec('PRAGMA secure_delete = ON');
+        try {
+            this.transaction(() => {
+                for (const table of DATA_TABLES) {
+                    this.db.exec(`DELETE FROM ${table}`);
+                }
+                this.db.exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
+            });
+        } finally {
+            this.db.exec(`PRAGMA secure_delete = ${secure === 2 ? 'FAST' : secure === 1 ? 'ON' : 'OFF'}`);
+        }
         try {
             this.db.exec('VACUUM');
         } catch (error) {
@@ -802,22 +819,53 @@ export class UsageStore {
                 throw error;
             }
         }
+        const settled = this.checkpoint();
         // The copies set aside beside it hold the same history: a corrupt
         // file moved away, and the backup each migration starts from. Clear
-        // means all of it.
-        const dir = path.dirname(this.file);
-        const base = path.basename(this.file);
-        let names: string[] = [];
-        try {
-            names = fs.readdirSync(dir);
-        } catch {
-            // Nothing beside it to remove.
-        }
-        for (const name of names) {
-            if (name.startsWith(`${base}.corrupt-`) || name.startsWith(`${base}.bak-v`)) {
-                fs.rmSync(path.join(dir, name), { force: true });
+        // means all of it, as far as it can be removed.
+        let copiesLeft = 0;
+        for (const name of UsageStore.copiesBeside(this.file)) {
+            try {
+                fs.rmSync(path.join(path.dirname(this.file), name), { force: true });
+            } catch {
+                copiesLeft++;
             }
         }
+        return { settled, copiesLeft };
+    }
+
+    /**
+     * Fold the write-ahead log into the file and empty it. False while
+     * another window's read holds it off: until then, the pages the last
+     * Clear replaced are still in the file and the log.
+     */
+    checkpoint(): boolean {
+        const result = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number } | undefined;
+        return result?.busy !== 1;
+    }
+
+    /** The copies of a history set aside beside `file`: corrupt ones moved away, and migration backups. */
+    static copiesBeside(file: string): string[] {
+        const base = path.basename(file);
+        try {
+            return fs.readdirSync(path.dirname(file)).filter(name => name.startsWith(`${base}.corrupt-`) || name.startsWith(`${base}.bak-v`));
+        } catch {
+            return [];
+        }
+    }
+
+    /** The newest corrupt history moved aside beside `file`, by name, while one is there. */
+    static setAsideCopy(file: string): string | undefined {
+        const prefix = `${path.basename(file)}.corrupt-`;
+        let newest: { name: string; at: number } | undefined;
+        for (const name of UsageStore.copiesBeside(file)) {
+            // Its own -wal and -shm are not copies of their own.
+            const at = name.startsWith(prefix) ? Number(name.slice(prefix.length)) : NaN;
+            if (Number.isSafeInteger(at) && (!newest || at > newest.at)) {
+                newest = { name, at };
+            }
+        }
+        return newest?.name;
     }
 
     /** Run `work` as one read, on one snapshot, whatever other windows commit meanwhile. */

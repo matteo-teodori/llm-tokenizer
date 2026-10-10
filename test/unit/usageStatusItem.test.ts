@@ -9,11 +9,12 @@ import { RECENT_MS, parseLiveSession, readLiveSessions, type LiveSession } from 
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import type { ResolvedRoots } from '../../src/usage/roots';
 import { UsageStatusItem, contextWindow, describeLive, type LiveInput, type StatusItemService } from '../../src/usage/statusItem';
-import type { LatestRequest } from '../../src/usage/store';
+import { SCHEMA_VERSION, loadSqlite, type LatestRequest } from '../../src/usage/store';
 import { WorkerHost } from '../../src/workerHost';
 
 const FIXTURE_ROOT = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'claude-config');
 const WORKER = path.join(__dirname, '..', '..', '..', 'out', 'usageWorker.js');
+const sqlite = loadSqlite();
 
 function latest(overrides: Partial<LatestRequest> = {}): LatestRequest {
     return { timestamp: Date.UTC(2026, 9, 9, 10), model: 'claude-opus-5-5', variant: null, input: 1_000, cacheCreation: 9_000, cacheRead: 840_000, ...overrides };
@@ -332,6 +333,15 @@ suite('usage status item: through the worker', () => {
         const report = await host.send({ type: 'query', id: 0, storeFile, range: 'coverage', zone: 'UTC', workspaceFolders: null });
         assert.ok(report.type === 'report');
         assert.deepStrictEqual(report.report.sessions.find(x => x.sessionId === 'sess-x')?.compactions, []);
+
+        // A history a newer version wrote is read-only here, and still read.
+        await host.send({ type: 'close', id: 0 });
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(storeFile);
+        raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+        raw.close();
+        const readOnly = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [FIXTURE_ROOT], sessionId: 'sess-main-1' });
+        assert.ok(readOnly.type === 'liveContext' && readOnly.latest?.input === 70, JSON.stringify(readOnly).slice(0, 200));
 
         for (const sessionId of ['../../etc/passwd', 'a/b', '', 'x'.repeat(201)]) {
             const refused = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [FIXTURE_ROOT], sessionId });

@@ -510,11 +510,12 @@ suite('usage worker queries', () => {
     const WORKER = path.join(__dirname, '..', '..', '..', 'out', 'usageWorker.js');
     let tmp: string;
     const hosts: WorkerHost<UsageWorkerRequest, UsageWorkerResponse>[] = [];
-    const host = () => {
+    const host = (workerData?: { busyTimeoutMs?: number }) => {
         const h = new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(WORKER, {
             name: 'usage',
             fallback: 'showing nothing',
             log: { error: () => undefined, warn: () => undefined },
+            workerData,
         });
         hosts.push(h);
         return h;
@@ -586,6 +587,81 @@ suite('usage worker queries', () => {
         assert.ok(fs.existsSync(path.join(tmp, 'store', moved)), 'not the name of the file it was moved to');
         const again = await worker.send(ask(storeFile));
         assert.ok(again.type === 'report' && !('recovered' in again), JSON.stringify(again).slice(0, 200));
+    });
+
+    test("a Clear another window's read held off is finished by the worker's next request", async () => {
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const projects = path.join(tmp, 'root', 'projects', 'p');
+        fs.mkdirSync(projects, { recursive: true });
+        for (let i = 0; i < 50; i++) {
+            fs.writeFileSync(path.join(projects, `s${i}.jsonl`), line(userRecord(`s${i}`, `/Secret-Client-0xFACE/repo-${i}`, '2026-10-09T09:59:00Z')) + line(assistantRecord(`s${i}`, `m${i}`, '2026-10-09T10:00:00Z')));
+        }
+        const worker = host({ busyTimeoutMs: 50 });
+        await worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] });
+        // Another window, in the middle of a read.
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const reader = new sqlite.DatabaseSync(storeFile);
+        reader.exec('BEGIN');
+        reader.prepare('SELECT count(*) FROM requests').get();
+        const cleared = await worker.send({ type: 'clear', id: 0, storeFile });
+        reader.exec('COMMIT');
+        reader.close();
+        assert.ok(cleared.type === 'cleared' && !cleared.settled, JSON.stringify(cleared));
+        await worker.send(ask(storeFile));
+        const holding = fs.readdirSync(path.dirname(storeFile)).filter(name => fs.readFileSync(path.join(path.dirname(storeFile), name)).includes('Secret-Client-0xFACE'));
+        assert.deepStrictEqual(holding, [], 'what Clear deleted is still on disk');
+    });
+
+    test('a Clear as the first request on a corrupt history names no copy after it', async () => {
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+        fs.writeFileSync(storeFile, 'this is not a database, '.repeat(400));
+        const worker = host();
+        assert.strictEqual((await worker.send({ type: 'clear', id: 0, storeFile })).type, 'cleared');
+        const after = await worker.send(ask(storeFile));
+        assert.ok(after.type === 'report' && !after.recovered && !after.aside, JSON.stringify(after).slice(0, 200));
+    });
+
+    test('every window, and every reload, is told of a copy set aside, until Clear removes it', async () => {
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+        fs.writeFileSync(storeFile, 'this is not a database, '.repeat(400));
+        const first = await host().send(ask(storeFile));
+        assert.ok(first.type === 'report' && first.recovered && first.aside === first.recovered, JSON.stringify(first).slice(0, 200));
+        // Another window, or this one reloaded: nothing was moved by it.
+        const other = host();
+        const told = await other.send(ask(storeFile));
+        assert.ok(told.type === 'report' && !told.recovered && told.aside === first.aside, JSON.stringify(told).slice(0, 200));
+        await other.send({ type: 'clear', id: 0, storeFile });
+        const cleared = await other.send(ask(storeFile));
+        assert.ok(cleared.type === 'report' && cleared.aside === undefined);
+    });
+
+    test('a history deleted or replaced under a resident worker: the one at the path is the history', async () => {
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const worker = host();
+        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        const processed = async () => {
+            const r = await worker.send(ask(storeFile));
+            return r.type === 'report' ? r.report.totals.processed : -1;
+        };
+        assert.strictEqual(await processed(), 1_278);
+        if (process.platform !== 'win32') {
+            // Deleted, as 2.1.2's Clear Downloaded Tokenizers deletes the storage.
+            fs.rmSync(path.dirname(storeFile), { recursive: true, force: true });
+            assert.strictEqual(await processed(), 0, 'it went on showing a deleted history');
+            // Replaced, as another window moving a corrupt one aside replaces it.
+            await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+            fs.renameSync(storeFile, `${storeFile}.moved`);
+            for (const suffix of ['-wal', '-shm']) {
+                fs.rmSync(storeFile + suffix, { force: true });
+            }
+            assert.ok(sqlite);
+            const fresh = UsageStore.open(sqlite, storeFile);
+            assert.strictEqual(fresh.status, 'ready');
+            fresh.store.close();
+            assert.strictEqual(await processed(), 0, 'it went on showing a replaced history');
+        }
     });
 
     test('a range or zone the worker does not know is refused', async () => {

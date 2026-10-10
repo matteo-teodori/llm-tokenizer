@@ -236,6 +236,48 @@ suite('usage history store', () => {
         assert.strictEqual([...store.requests()].length, 1);
     });
 
+    /** Files in the history's folder whose bytes hold `marker`. */
+    function holding(marker: string): string[] {
+        const folder = path.dirname(file);
+        return fs.readdirSync(folder).filter(name => fs.statSync(path.join(folder, name)).isFile() && fs.readFileSync(path.join(folder, name)).includes(marker));
+    }
+
+    /** `n` requests whose model id carries `marker`, as text a recovery tool would find. */
+    const marked = (marker: string, n: number) => Array.from({ length: n }, (_, i) => req({ messageId: `m${i}`, requestId: `r${i}`, model: `${marker}-${i}` }));
+
+    test('Clear leaves nothing of the history readable on disk, while the history stays open', () => {
+        // Another window's worker has it open too, idle, as a status item keeps it.
+        const store = ready(open());
+        const other = ready(open());
+        store.transaction(() => store.upsertRequests(marked('Secret-Client-0xC0FFEE', 400)));
+        assert.ok(holding('Secret-Client-0xC0FFEE').length > 0);
+        assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 0 });
+        assert.deepStrictEqual(holding('Secret-Client-0xC0FFEE'), [], 'the deleted history is still on disk');
+        assert.strictEqual([...other.requests()].length, 0);
+    });
+
+    test("a Clear another window's read holds off is settled by a checkpoint once that read ends", () => {
+        const store = ready(open({ busyTimeoutMs: 50 }));
+        const reader = ready(open({ busyTimeoutMs: 50 }));
+        store.transaction(() => store.upsertRequests(marked('Secret-Client-0xBEEF', 400)));
+        reader.read(() => {
+            // The read has begun: its snapshot holds the old pages.
+            assert.strictEqual([...reader.requests()].length, 400);
+            assert.strictEqual(store.clear().settled, false);
+        });
+        assert.ok(store.checkpoint(), 'still held off once the read had ended');
+        assert.deepStrictEqual(holding('Secret-Client-0xBEEF'), []);
+    });
+
+    test('a copy beside the history that cannot be removed leaves the Clear done, and is counted', () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req()]));
+        // A folder where a file was expected stands in for one held open elsewhere.
+        fs.mkdirSync(`${file}.corrupt-1/inside`, { recursive: true });
+        assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 1 });
+        assert.strictEqual([...store.requests()].length, 0);
+    });
+
     test('a read sees one snapshot, whatever another window commits during it', () => {
         const store = ready(open());
         const other = ready(open());

@@ -36,15 +36,22 @@ export type UsageFailure = 'store-busy' | 'store-io' | 'store-read-only' | 'outd
 
 /**
  * `recovered`, on the first answer after it happened: the file a corrupt
- * history was moved to, its name only, before a new one was started.
+ * history was moved to, its name only, before a new one was started. A
+ * report's `aside` names the newest such file while one is there, so every
+ * window, and every reload, says so until Clear removes it.
  */
 export type UsageWorkerResponse =
     | { type: 'imported'; id: number; summary: ImportSummary; leaseHeldElsewhere: false; recovered?: string }
     | { type: 'imported'; id: number; summary: null; leaseHeldElsewhere: true; recovered?: string }
-    | { type: 'report'; id: number; report: UsageReport; recovered?: string }
+    | { type: 'report'; id: number; report: UsageReport; aside?: string; recovered?: string }
     /** `compactions` newest first, at most 20. */
     | { type: 'liveContext'; id: number; latest: LatestRequest | null; compactions: Compaction[]; recovered?: string }
-    | { type: 'cleared'; id: number; generation: number }
+    /**
+     * `settled`: false while another window's read keeps what was deleted in
+     * the file, until a later request finishes it; `copiesLeft`: copies set
+     * aside that could not be removed.
+     */
+    | { type: 'cleared'; id: number; generation: number; settled: boolean; copiesLeft: number }
     | { type: 'closed'; id: number }
     /** This runtime has no `node:sqlite` binding. */
     | { type: 'unavailable'; id: number; node: string; electron: string | null }

@@ -241,6 +241,14 @@ export class UsageService implements vscode.Disposable {
         // Clear deleted the moved-aside copy along with the rest.
         this.recovered = undefined;
         this.deps.log.info(`Claude Code usage history cleared (generation ${response.generation})`);
+        if (!response.settled) {
+            this.deps.log.info(
+                'Claude Code usage: another window was reading the history, so what Clear deleted leaves the file once that read ends',
+            );
+        }
+        if (response.copiesLeft > 0) {
+            this.deps.log.warn(`Claude Code usage: ${response.copiesLeft} copies of the history set aside could not be removed; one may be open elsewhere`);
+        }
         this.changed.fire();
         return true;
     }
@@ -531,6 +539,11 @@ export class UsageService implements vscode.Disposable {
                 this.deps.log.warn(
                     `Claude Code usage: the history could not be read, so it was moved aside as ${response.recovered}, and a new one started`,
                 );
+                this.changed.fire();
+            } else if (response.type === 'report' && response.aside !== this.recovered) {
+                // What is beside the history now: told in every window, and
+                // after a reload, until Clear removes it.
+                this.recovered = response.aside;
                 this.changed.fire();
             }
             switch (response.type) {

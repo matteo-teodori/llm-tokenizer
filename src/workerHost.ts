@@ -59,6 +59,8 @@ export interface WorkerHostOptions {
     resourceLimits?: { maxOldGenerationSizeMb?: number };
     /** How long the worker may send nothing while a request waits; tests shorten it. */
     silenceTimeoutMs?: number;
+    /** Passed to each Worker as its `workerData`. */
+    workerData?: unknown;
 }
 
 interface Pending<Response> {
@@ -184,7 +186,7 @@ export class WorkerHost<Request extends { id: number }, Response extends { id: n
             );
         }
 
-        const worker = new Worker(this.workerPath, { resourceLimits: this.options.resourceLimits });
+        const worker = new Worker(this.workerPath, { resourceLimits: this.options.resourceLimits, workerData: this.options.workerData });
         worker.on('message', (response: Response) => {
             const pending = this.pending.get(response.id);
             if (pending) {

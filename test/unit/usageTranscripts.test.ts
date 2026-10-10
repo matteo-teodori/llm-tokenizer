@@ -699,7 +699,7 @@ suite('usage worker', () => {
         assert.ok(second.type === 'imported' && !second.leaseHeldElsewhere && second.summary.unchanged === 4, JSON.stringify(second));
 
         const cleared = await a.send({ type: 'clear', id: 0, storeFile });
-        assert.deepStrictEqual(cleared, { type: 'cleared', id: cleared.id, generation: 1 });
+        assert.deepStrictEqual(cleared, { type: 'cleared', id: cleared.id, generation: 1, settled: true, copiesLeft: 0 });
     });
 
     /** More one-request transcripts than one yield's worth, under `tmp/root`. */

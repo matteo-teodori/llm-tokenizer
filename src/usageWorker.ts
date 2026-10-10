@@ -14,8 +14,9 @@
  * after the whole import.
  */
 
+import * as fs from 'fs';
 import * as path from 'path';
-import { parentPort } from 'worker_threads';
+import { parentPort, workerData } from 'worker_threads';
 
 import { isTimeZone } from './usage/aggregate';
 import { importUnderLease } from './usage/importer';
@@ -43,8 +44,18 @@ function holderOf(request: { holder?: unknown }): string {
     return typeof request.holder === 'string' && request.holder.length > 0 && request.holder.length <= 100 ? request.holder : ownHolder;
 }
 
+/**
+ * Timings a test may shorten, through the worker's `workerData`; the
+ * extension passes none.
+ */
+const knobs = (workerData ?? {}) as { beatMs?: unknown; busyTimeoutMs?: unknown };
+const knob = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback);
+
 const sqlite = loadSqlite();
-let opened: { file: string; result: OpenResult } | undefined;
+/** `identity`: the file's device and inode when it was opened. */
+let opened: { file: string; result: OpenResult; identity: string | undefined } | undefined;
+/** A history whose last Clear left pages another window's read held on to. */
+let unsettled: string | undefined;
 /** A corrupt history this worker moved aside, until an answer has said so. */
 let recovered: string | undefined;
 
@@ -60,7 +71,7 @@ function reply(response: UsageWorkerResponse): void {
 }
 
 /** The longest the worker goes without a word while it works. */
-const BEAT_MS = 5_000;
+const BEAT_MS = knob(knobs.beatMs, 5_000);
 let lastBeat = -BEAT_MS;
 
 /** Tell the host this worker is still at work, at most every BEAT_MS. */
@@ -72,18 +83,35 @@ function beat(): void {
     }
 }
 
-/** The store at `file`, opened once and kept for the worker's lifetime. */
+/** Which file is at `file` now: its device and inode, or undefined when there is none. */
+function identityOf(file: string): string | undefined {
+    try {
+        const stat = fs.statSync(file, { bigint: true });
+        return `${stat.dev}:${stat.ino}`;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * The store at `file`, opened once and kept while it is the file there. One
+ * replaced or deleted under this worker, by another window that moved a
+ * corrupt history aside or by 2.1.2's Clear Downloaded Tokenizers, is no
+ * longer the history: the one at the path is opened instead.
+ */
 function storeAt(file: string): OpenResult {
     if (!sqlite) {
         throw new Error('unreachable: checked by the caller');
     }
+    if (opened?.file === file && identityOf(file) !== opened.identity) {
+        closeOpened();
+    }
     if (opened?.file !== file) {
-        if (opened && opened.result.status !== 'failed') {
-            opened.result.store.close();
-        }
-        opened = { file, result: UsageStore.open(sqlite, file) };
-        if (opened.result.status === 'ready' && opened.result.recoveredFrom) {
-            recovered = path.basename(opened.result.recoveredFrom);
+        closeOpened();
+        const result = UsageStore.open(sqlite, file, { busyTimeoutMs: knob(knobs.busyTimeoutMs, 5_000) });
+        opened = { file, result, identity: identityOf(file) };
+        if (result.status === 'ready' && result.recoveredFrom) {
+            recovered = path.basename(result.recoveredFrom);
         }
     }
     const result = opened.result;
@@ -95,16 +123,24 @@ function storeAt(file: string): OpenResult {
     return result;
 }
 
+function closeOpened(): void {
+    if (opened && opened.result.status !== 'failed') {
+        if (unsettled === opened.file && opened.result.status === 'ready') {
+            opened.result.store.checkpoint();
+        }
+        opened.result.store.close();
+    }
+    opened = undefined;
+    unsettled = undefined;
+}
+
 function failure(result: OpenResult): UsageFailure {
     return result.status === 'failed' ? (result.category === 'busy' ? 'store-busy' : 'store-io') : 'store-read-only';
 }
 
 async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): Promise<void> {
     if (request.type === 'close') {
-        if (opened && opened.result.status !== 'failed') {
-            opened.result.store.close();
-        }
-        opened = undefined;
+        closeOpened();
         reply({ type: 'closed', id: request.id });
         return;
     }
@@ -115,12 +151,16 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
 
     const result = storeAt(request.storeFile);
     // A history a newer version created can still be read.
-    const readable = result.status === 'ready' || (result.status === 'read-only' && request.type === 'query');
+    const readable = result.status === 'ready' || (result.status === 'read-only' && (request.type === 'query' || request.type === 'liveContext'));
     if (!readable) {
         reply({ type: 'failed', id: request.id, failure: failure(result), errorName: 'StoreError' });
         return;
     }
     const store = result.store;
+    // A Clear's checkpoint another window held off, tried again until done.
+    if (unsettled === request.storeFile && result.status === 'ready' && store.checkpoint()) {
+        unsettled = undefined;
+    }
 
     switch (request.type) {
         case 'query': {
@@ -135,7 +175,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 now: Date.now(),
                 platform: process.platform,
             });
-            reply({ type: 'report', id: request.id, report, ...takeRecovered() });
+            reply({ type: 'report', id: request.id, report, aside: UsageStore.setAsideCopy(request.storeFile), ...takeRecovered() });
             return;
         }
         case 'import': {
@@ -168,7 +208,8 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 return;
             }
             const paths = request.roots.flatMap(root => sessionTranscripts(root, request.sessionId));
-            if (paths.length > 0 && !store.outdated(PARSER_VERSION)) {
+            // A read-only history is read as it is.
+            if (paths.length > 0 && result.status === 'ready' && !store.outdated(PARSER_VERSION)) {
                 // Null when another window holds the lease: what is stored is read all the same.
                 await importUnderLease(store, request.roots, holderOf(request), { isCancelled, countCrashes: request.crashed === true, progress: beat }, paths);
             }
@@ -181,10 +222,14 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
             });
             return;
         }
-        case 'clear':
-            store.clear();
-            reply({ type: 'cleared', id: request.id, generation: store.generation() });
+        case 'clear': {
+            const { settled, copiesLeft } = store.clear();
+            unsettled = settled ? undefined : request.storeFile;
+            // A copy this worker moved aside is one the Clear removed.
+            recovered = undefined;
+            reply({ type: 'cleared', id: request.id, generation: store.generation(), settled, copiesLeft });
             return;
+        }
     }
 }
 
