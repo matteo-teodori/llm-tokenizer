@@ -84,7 +84,7 @@ export class TokenizerService implements vscode.Disposable {
     }
 
     public dispose(): void {
-        this.host.dispose();
+        void this.host.dispose();
         this.onDidChangeEmitter.dispose();
     }
 

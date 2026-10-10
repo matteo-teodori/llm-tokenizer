@@ -77,6 +77,81 @@ function view(overrides: Partial<PanelView> = {}): PanelView {
 
 const text = (f: PanelFragments) => f.controls + f.body + f.diagnostics;
 
+/** A sortable table as the page's script sees it: rows carry their sort keys, headers their buttons. */
+function fakeTable(id: string, initial: string, keys: string[], rows: Record<string, string>[]) {
+    const tbody = {
+        rows: rows.map(values => ({ values, getAttribute: (name: string) => values[name.replace(/^data-k-/, '')] ?? null })),
+        appendChild(row: unknown) {
+            this.rows.splice(this.rows.indexOf(row as (typeof this.rows)[number]), 1);
+            this.rows.push(row as (typeof this.rows)[number]);
+        },
+    };
+    const headers = keys.map(key => {
+        const attributes: Record<string, string> = {};
+        return { key, attributes, querySelector: () => ({ dataset: { sortKey: key } }), setAttribute: (name: string, value: string) => (attributes[name] = value) };
+    });
+    const table = {
+        id,
+        dataset: { sort: initial },
+        tBodies: [tbody],
+        querySelectorAll: () => headers,
+        /** Row labels, in the order shown. */
+        order: () => tbody.rows.map(r => r.values.label),
+        sortOf: (key: string) => headers.find(h => h.key === key)?.attributes['aria-sort'],
+        /** A click on a header's sort button. */
+        button: (key: string) => ({ dataset: { sortKey: key }, closest: () => table }),
+    };
+    return table;
+}
+
+/** The page's script over a DOM that holds `tables`, swapped for new ones by each update. */
+function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fakeTable>[]) {
+    const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
+    const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
+    assert.ok(script);
+    const posted: { type: string; text?: string }[] = [];
+    const listeners: Record<string, (e: unknown) => void> = {};
+    let tables = firstTables;
+    let nextTables = firstTables;
+    const details = { current: { open: false } as { open: boolean } | null };
+    const focused: string[] = [];
+    const document = {
+        activeElement: null as unknown,
+        getElementById: (id: string) =>
+            id === 'diagnostics'
+                ? details.current
+                : {
+                      set innerHTML(_html: string) {
+                          // The update writes the slots; what it wrote is the new DOM.
+                          if (id === 'diagnostics-slot') {
+                              details.current = { open: false };
+                          }
+                          tables = nextTables;
+                      },
+                  },
+        querySelectorAll: (selector: string) => (selector === 'table[data-sort]' ? tables : []),
+        querySelector: (selector: string) => ({ focus: () => focused.push(selector) }),
+        addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
+    };
+    vm.runInNewContext(script, {
+        acquireVsCodeApi: () => ({ postMessage: (m: { type: string }) => posted.push(m) }),
+        document,
+        window: { addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
+        Intl,
+    });
+    return {
+        posted,
+        focused,
+        details,
+        document,
+        click: (target: unknown) => listeners.click({ target: { closest: () => target } }),
+        update: (next: PanelFragments, newTables: ReturnType<typeof fakeTable>[]) => {
+            nextTables = newTables;
+            listeners['window:message']({ data: { type: 'data', fragments: next } });
+        },
+    };
+}
+
 /** The page's script, run as the webview would, with only what it uses. */
 function runPage(fragments: PanelFragments): { posted: { type: string; text?: string }[]; click(action: string): string } {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
@@ -263,6 +338,45 @@ suite('usage page', () => {
         const html = renderUsagePage('abc', "default-src 'none'; script-src 'nonce-abc'", renderFragments(view({ report: report({ dayModels: [{ date: '2026-10-09', model: '</script><script>alert(1)</script>', variant: null, totals: totals(1) }] }) })));
         assert.ok(html.includes(`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-abc'">`));
         assert.strictEqual((html.match(/<\/script>/g) ?? []).length, 1);
+    });
+
+    test("a header's button sorts its table, numbers as numbers, and says which way", () => {
+        const sessions = fakeTable('sessions', 'processed', ['label', 'processed'], [
+            { label: 'b', processed: '9' },
+            { label: 'a', processed: '100' },
+            { label: 'c', processed: '20' },
+        ]);
+        const page = livePage(renderFragments(view()), [sessions]);
+        // Largest first on load: 100 above 20 above 9, never "9" above "20".
+        assert.deepStrictEqual(sessions.order(), ['a', 'c', 'b']);
+        assert.deepStrictEqual([sessions.sortOf('processed'), sessions.sortOf('label')], ['descending', 'none']);
+        // Names start A to Z; a second click turns it round.
+        page.click(sessions.button('label'));
+        assert.deepStrictEqual([sessions.order(), sessions.sortOf('label'), sessions.sortOf('processed')], [['a', 'b', 'c'], 'ascending', 'none']);
+        page.click(sessions.button('label'));
+        assert.deepStrictEqual([sessions.order(), sessions.sortOf('label')], [['c', 'b', 'a'], 'descending']);
+    });
+
+    test('an update keeps each table\'s sort, the diagnostics as they were, and the focus where it was', () => {
+        const rows = [
+            { label: 'b', processed: '9' },
+            { label: 'a', processed: '100' },
+        ];
+        const before = fakeTable('sessions', 'processed', ['label', 'processed'], rows);
+        const page = livePage(renderFragments(view()), [before]);
+        page.click(before.button('label'));
+        page.details.current = { open: true };
+        page.document.activeElement = { matches: () => true, getAttribute: (name: string) => (name === 'data-range' ? '30d' : null) };
+
+        const after = fakeTable('sessions', 'processed', ['label', 'processed'], [...rows, { label: 'c', processed: '50' }]);
+        const next = renderFragments(view({ report: report({ sessions: [{ ...report().sessions[0], label: 'moved', sessionId: 'next' }] }) }));
+        page.update(next, [after]);
+        assert.deepStrictEqual([after.order(), after.sortOf('label')], [['a', 'b', 'c'], 'ascending']);
+        assert.strictEqual(page.details.current?.open, true, 'the diagnostics closed on an update');
+        assert.deepStrictEqual(page.focused, ['button[data-range="30d"]']);
+        // And the exports are the update's.
+        page.click({ dataset: { action: 'copy' } });
+        assert.ok(page.posted.at(-1)?.text?.includes('next'));
     });
 
     test('sorting and every action work from the keyboard, as buttons', () => {

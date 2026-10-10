@@ -343,6 +343,19 @@ suite('usage transcripts', () => {
         assert.ok(store.getFile('claude-code', s1));
     });
 
+    test('a path named through a symlink is read as the transcript it leads to, under the same checkpoint', async () => {
+        // A watcher names files by the path it watches, which can lead
+        // through a link; the walk knows them by their real path.
+        const [s0] = transcripts(1);
+        const link = path.join(tmp, 'linked');
+        fs.symlinkSync(path.join(tmp, 'projects'), link, 'junction');
+        const store = freshStore();
+        const summary = await importPaths(store, [tmp], [path.join(link, 'p', path.basename(s0))]);
+        assert.strictEqual(summary.read, 1);
+        const full = await importRoots(store, [tmp]);
+        assert.deepStrictEqual([full.read, full.unchanged], [0, 1], 'one file, checkpointed twice');
+    });
+
     test('a Clear in another window mid-pass leaves nothing behind it: every file is read again', async () => {
         // Window B reads files against their checkpoints, then window A
         // clears, then B writes. Unchecked, B's tails landed under end-of-file
@@ -661,11 +674,10 @@ suite('usage worker', () => {
         logged.length = 0;
     });
 
-    teardown(() => {
-        for (const h of hosts.splice(0)) {
-            h.dispose();
-        }
-        fs.rmSync(tmp, { recursive: true, force: true });
+    teardown(async () => {
+        await Promise.all(hosts.splice(0).map(h => h.dispose()));
+        // Windows lets a folder go only once nothing in it is open.
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     });
 
     test("imports in its own thread, and a finished pass leaves the next window's free to run", async () => {
@@ -967,6 +979,17 @@ suite('usage roots', () => {
         assert.deepStrictEqual(resolved.roots.map(r => fs.realpathSync(r.path)), [fs.realpathSync(FIXTURE_ROOT)]);
         const realDefault = path.join(os.homedir(), '.claude');
         assert.ok(!resolved.candidates.some(c => c.path === realDefault), 'the real ~/.claude was considered');
+    });
+
+    test('under test, a root whose projects or sessions folder leads outside the allowed folders is refused', () => {
+        const allowed = dir('allowed');
+        const outside = dir('outside');
+        for (const folder of ['projects', 'sessions']) {
+            const root = dir(path.join('allowed', `through-${folder}`));
+            fs.symlinkSync(outside, path.join(root, folder), 'junction');
+            const resolved = resolveRoots({ setting: root, editorEnvironment: undefined, env: {}, home, platform: 'linux', confineTo: [allowed] });
+            assert.deepStrictEqual([resolved.roots, resolved.refused.map(r => r.path)], [[], [root]], folder);
+        }
     });
 
     test('under test, a root outside the allowed folders is refused', () => {

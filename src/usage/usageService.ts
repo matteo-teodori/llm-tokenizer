@@ -23,7 +23,7 @@ import { WorkerHost, WorkerHostError } from '../workerHost';
 import { localMinute } from './aggregate';
 import type { ImportSummary } from './importer';
 import { readLiveSessions } from './liveSessions';
-import { UsagePanel, savedZone } from './panel';
+import { UsagePanel, openUsageSettings, savedZone } from './panel';
 import type { UsageWorkerRequest, UsageWorkerResponse } from './protocol';
 import type { RangeKey, UsageReport } from './report';
 import type { LatestRequest } from './store';
@@ -65,6 +65,21 @@ export interface UsageSettings {
     dataDirectory: string;
     /** The user-level `claudeCode.environmentVariables`; only its CLAUDE_CONFIG_DIR is kept. */
     editorEnvironment: unknown;
+}
+
+/**
+ * The settings as the editor holds them. Claude Code's environmentVariables
+ * is taken at the user level only: get() returned a cloned repository's
+ * workspace value where Claude Code is not installed, and a repository must
+ * not choose which folder is read.
+ */
+export function readUsageSettings(configuration: (section: string) => Pick<vscode.WorkspaceConfiguration, 'get' | 'inspect'>): UsageSettings {
+    const config = configuration(CONFIG_SECTION);
+    return {
+        enabled: config.get<boolean>('enableClaudeCodeUsage', false),
+        dataDirectory: config.get<string>('claudeCodeDataDirectory', ''),
+        editorEnvironment: configuration('claudeCode').inspect('environmentVariables')?.globalValue,
+    };
 }
 
 /** What the service needs from the editor and the machine, injected so a test can fake each. */
@@ -331,7 +346,7 @@ export class UsageService implements vscode.Disposable {
         const host = this.host;
         if (!host?.running) {
             if (this.disposed) {
-                host?.dispose();
+                void host?.dispose();
             }
             return;
         }
@@ -347,9 +362,9 @@ export class UsageService implements vscode.Disposable {
             this.clock.clearTimeout(timer);
         }
         if (this.disposed) {
-            host.dispose();
+            void host.dispose();
         } else if (generation === this.generation) {
-            host.stop();
+            void host.stop();
         }
     }
 
@@ -560,7 +575,7 @@ export class UsageService implements vscode.Disposable {
             this.inFlight--;
         }
         if (this.holders === 0 && this.inFlight === 0 && !this.importing) {
-            host.stop();
+            void host.stop();
         }
     }
 
@@ -629,16 +644,7 @@ export function registerClaudeCodeUsage(
     const service = new UsageService({
         log,
         storeFile: path.join(context.globalStorageUri.fsPath, 'claude-code-usage', 'usage.sqlite'),
-        readSettings: () => {
-            const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-            return {
-                enabled: config.get<boolean>('enableClaudeCodeUsage', false),
-                dataDirectory: config.get<string>('claudeCodeDataDirectory', ''),
-                // The user-level value only: get() returned a cloned repo's
-                // workspace value where Claude Code is not installed.
-                editorEnvironment: vscode.workspace.getConfiguration('claudeCode').inspect('environmentVariables')?.globalValue,
-            };
-        },
+        readSettings: () => readUsageSettings(section => vscode.workspace.getConfiguration(section)),
         rootInputs: () => machineRootInputs(underTest ? { fixtures } : undefined),
         createHost: onCrash =>
             new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(path.join(context.extensionPath, 'out', 'usageWorker.js'), {
@@ -696,7 +702,7 @@ async function refreshCommand(service: UsageService): Promise<void> {
     if (service.status === 'off') {
         const open = await vscode.window.showInformationMessage('Claude Code usage is off.', 'Open Settings');
         if (open) {
-            await vscode.commands.executeCommand('workbench.action.openSettings', `${CONFIG_SECTION}.enableClaudeCodeUsage`);
+            await openUsageSettings();
         }
         return;
     }

@@ -109,7 +109,12 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
         if (!candidate.exists) {
             continue;
         }
-        if (inputs.confineTo && !inputs.confineTo.some(allowed => isInside(candidate.path, allowed))) {
+        // Under test, what is read under the root must stay inside too: a
+        // projects or sessions folder can be a link that leads out. One that
+        // does not exist reads nothing.
+        const confined = (p: string, mustExist: boolean) =>
+            !inputs.confineTo || (!mustExist && !exists(p)) || inputs.confineTo.some(allowed => isInside(p, allowed));
+        if (!confined(candidate.path, true) || !confined(path.join(candidate.path, 'projects'), false) || !confined(path.join(candidate.path, 'sessions'), false)) {
             refused.push(candidate);
             continue;
         }
@@ -224,6 +229,16 @@ function settingsEnv(file: string): SettingsEnv {
         // Missing, unreadable or not JSON: nothing set there.
     }
     return kept;
+}
+
+/** Anything at all at `p`, a broken link included. */
+function exists(p: string): boolean {
+    try {
+        fs.lstatSync(p);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 function isDirectory(candidate: string): boolean {

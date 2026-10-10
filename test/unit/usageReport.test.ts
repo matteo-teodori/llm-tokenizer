@@ -533,11 +533,10 @@ suite('usage worker queries', () => {
         tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-usage-query-'));
     });
 
-    teardown(() => {
-        for (const h of hosts.splice(0)) {
-            h.dispose();
-        }
-        fs.rmSync(tmp, { recursive: true, force: true });
+    teardown(async () => {
+        await Promise.all(hosts.splice(0).map(h => h.dispose()));
+        // Windows lets a folder go only once nothing in it is open.
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     });
 
     test('a query is answered between an import\u2019s files, not after the whole import', async () => {

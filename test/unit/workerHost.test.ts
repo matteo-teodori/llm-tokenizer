@@ -50,12 +50,11 @@ suite('worker host', () => {
         warnings.length = 0;
     });
 
-    teardown(() => {
-        for (const host of hosts) {
-            host.dispose();
-        }
+    teardown(async () => {
+        await Promise.all(hosts.map(host => host.dispose()));
         hosts = [];
-        fs.rmSync(tmp, { recursive: true, force: true });
+        // Windows lets a folder go only once nothing in it is open.
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     });
 
     test('a stopped host starts a new worker on the next request, and no crash is counted', async () => {
@@ -64,13 +63,14 @@ suite('worker host', () => {
         const first = await host.send({ id: 0 });
         assert.ok(host.running);
 
-        host.stop();
+        const stopped = host.stop();
         assert.ok(!host.running);
+        await stopped;
         const second = await host.send({ id: 0 });
         assert.notStrictEqual(second.threadId, first.threadId, 'the stopped worker answered');
         // Stopping four times inside a minute is no crash budget spent.
         for (let i = 0; i < 4; i++) {
-            host.stop();
+            await host.stop();
             await host.send({ id: 0 });
         }
         assert.deepStrictEqual([host.epoch, host.backingOff, warnings], [0, false, []]);
@@ -81,6 +81,7 @@ suite('worker host', () => {
         fs.writeFileSync(patient, PATIENT);
         type Ask = { id: number; every?: number; beats?: number; silent?: boolean };
         const host = new WorkerHost<Ask, { id: number; done?: boolean }>(patient, { name: 'patient', fallback: 'nothing', log, silenceTimeoutMs: 250 });
+        hosts.push(host as unknown as WorkerHost<{ id: number }, Echo>);
         const started = Date.now();
         // 600 ms of work, more than twice the timeout, with a word every 50 ms.
         const slow = host.send({ id: 0, every: 50, beats: 12 });
@@ -89,7 +90,6 @@ suite('worker host', () => {
         assert.strictEqual((await slow).done, true);
         await assert.rejects(unanswered, /did not respond in time/);
         assert.ok(Date.now() - started >= 600, 'given up while the worker was still at work');
-        host.dispose();
     });
 
     test('a heap limit reaches the worker', async () => {

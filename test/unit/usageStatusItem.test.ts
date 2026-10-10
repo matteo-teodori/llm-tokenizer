@@ -78,6 +78,13 @@ suite('usage status item: the window and what is shown', () => {
         assert.deepStrictEqual([over.text, over.status], ['$(comment-discussion) 250.0K ?', undefined]);
     });
 
+    test("the tooltip adds today's tokens in this workspace, marked when a lower bound", () => {
+        const today = (partial: boolean) => describeLive(live({ todayProcessed: { tokens: 1_234_567, partial } })).tooltip;
+        assert.ok(today(false).includes('Today in this workspace: 1.2M processed'), today(false).join('|'));
+        assert.ok(today(true).includes('Today in this workspace: ≥1.2M processed'));
+        assert.ok(!describeLive(live()).tooltip.some(l => l.startsWith('Today')));
+    });
+
     test('a request that missed a counter, or nothing yet, shows a dash', () => {
         assert.strictEqual(describeLive(live({ latest: latest({ cacheRead: null }) })).text, '$(comment-discussion) —');
         assert.strictEqual(describeLive(live({ latest: null })).text, '$(comment-discussion) —');
@@ -274,11 +281,10 @@ suite('usage status item: through the worker', () => {
         tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-live-worker-'));
     });
 
-    teardown(() => {
-        for (const h of hosts.splice(0)) {
-            h.dispose();
-        }
-        fs.rmSync(tmp, { recursive: true, force: true });
+    teardown(async () => {
+        await Promise.all(hosts.splice(0).map(h => h.dispose()));
+        // Windows lets a folder go only once nothing in it is open.
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     });
 
     test("one session's transcript is read, then its latest main request and compactions; an unsafe id is refused", async () => {

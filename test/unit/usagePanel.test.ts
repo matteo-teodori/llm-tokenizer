@@ -1,9 +1,11 @@
 import * as assert from 'assert';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { emptyTotals } from '../../src/usage/aggregate';
 import type { ImportSummary } from '../../src/usage/importer';
-import { UsagePanel } from '../../src/usage/panel';
+import { UsagePanel, openUsageSettings } from '../../src/usage/panel';
 import type { PanelFragments } from '../../src/usage/render';
 import { buildReport, type UsageReport } from '../../src/usage/report';
 import type { UsageService } from '../../src/usage/usageService';
@@ -62,13 +64,14 @@ function fakePanel() {
 /** The service as the panel uses it; `counts` records each use. */
 function fakeService() {
     const counts = { holds: 0, releases: 0, refreshes: 0 };
+    const changed = new vscode.EventEmitter<void>();
     const fake = {
         status: 'ready',
         roots: undefined,
         lastImport: undefined,
         missingSqlite: undefined,
         recoveredFrom: undefined,
-        onDidChange: new vscode.EventEmitter<void>().event,
+        onDidChange: changed.event,
         /** What the next refresh returns: a summary when a pass ran. */
         passes: undefined as ImportSummary | undefined,
         report: quietReport(),
@@ -100,16 +103,25 @@ function fakeService() {
         },
         report: () => Promise.resolve(fake.report),
     };
-    return { service: service as unknown as UsageService, counts, fake };
+    return { service: service as unknown as UsageService, counts, fake, changed: () => changed.fire() };
 }
 
-const context = {
-    globalState: { get: () => undefined, update: () => Promise.resolve() },
-    extension: { packageJSON: { version: '2.2.0' } },
-} as unknown as vscode.ExtensionContext;
+/** An extension context whose global state is kept, as the editor keeps it between sessions. */
+function fakeContext(): vscode.ExtensionContext {
+    const state = new Map<string, unknown>();
+    return {
+        globalState: {
+            get: (key: string) => state.get(key),
+            update: (key: string, value: unknown) => (state.set(key, value), Promise.resolve()),
+        },
+        extension: { packageJSON: { version: '2.2.0' } },
+    } as unknown as vscode.ExtensionContext;
+}
 
+let context = fakeContext();
 const warnings: string[] = [];
-const log = { warn: (m: string) => warnings.push(m), show: () => undefined } as unknown as vscode.LogOutputChannel;
+let logShown = 0;
+const log = { warn: (m: string) => warnings.push(m), show: () => logShown++ } as unknown as vscode.LogOutputChannel;
 
 async function until(condition: () => boolean, ms = 2_000): Promise<void> {
     const deadline = Date.now() + ms;
@@ -132,7 +144,9 @@ suite('usage panel', () => {
 
     setup(() => {
         page = fakePanel();
+        context = fakeContext();
         warnings.length = 0;
+        logShown = 0;
         create = vscode.window.createWebviewPanel.bind(vscode.window);
         (vscode.window as unknown as { createWebviewPanel: unknown }).createWebviewPanel = () => page.panel;
     });
@@ -195,5 +209,102 @@ suite('usage panel', () => {
         await until(() => page.posted.length > 0 || warnings.length > 0);
         assert.deepStrictEqual(warnings, []);
         assert.strictEqual(page.posted.at(-1)?.copy.rows[0]?.[0], '—');
+    });
+
+    test("the page brought back is always answered; otherwise only what changed is sent", async () => {
+        const { service, fake, changed } = fakeService();
+        UsagePanel.show(context, service, log);
+        // The zone first, so that the next ready changes nothing.
+        page.send({ type: 'ready', zone: 'Asia/Tokyo' });
+        await until(() => page.posted.length > 0);
+        await settle();
+        const sent = page.posted.length;
+        // Nothing new: nothing sent.
+        changed();
+        await settle();
+        assert.strictEqual(page.posted.length, sent);
+        // A page brought back from hidden starts empty, so it is answered all the same.
+        page.send({ type: 'ready', zone: 'Asia/Tokyo' });
+        await until(() => page.posted.length === sent + 1);
+        // New data is sent.
+        fake.report = quietReport({ coverage: { ...quietReport().coverage, requests: 4 } });
+        changed();
+        await until(() => page.posted.length === sent + 2);
+    });
+
+    test('its range, scope and the reader\'s zone are kept for the next time it opens', async () => {
+        const { service } = fakeService();
+        UsagePanel.show(context, service, log);
+        page.send({ type: 'ready', zone: 'Asia/Tokyo' });
+        page.send({ type: 'setRange', range: '30d' });
+        page.send({ type: 'setScope', scope: 'workspace' });
+        await settle();
+        page.panel.dispose();
+
+        page = fakePanel();
+        const reopened: { range?: string; scope?: string; zone?: string }[] = [];
+        UsagePanel.show(context, { ...service, report: (range: string, zone: string, folders: string[] | null) => (reopened.push({ range, zone, scope: folders ? 'workspace' : 'all' }), Promise.resolve(undefined)) } as unknown as UsageService, log);
+        await until(() => reopened.length > 0);
+        assert.deepStrictEqual(reopened[0], { range: '30d', zone: 'Asia/Tokyo', scope: 'workspace' });
+    });
+
+    test('each action the page can ask for does what it says, and nothing else', async () => {
+        // Copy and Export write the clipboard, which the editor does not let a
+        // test replace, and which is the developer's own: their messages are
+        // checked by parsePanelMessage's test instead.
+        const { service } = fakeService();
+        const ran: unknown[][] = [];
+        const original = vscode.commands.executeCommand;
+        (vscode.commands as unknown as Record<string, unknown>).executeCommand = (...args: unknown[]) => (ran.push(args), Promise.resolve(undefined));
+        try {
+            UsagePanel.show(context, service, log);
+            page.send({ type: 'openSettings' });
+            page.send({ type: 'clear' });
+            page.send({ type: 'showLog' });
+            page.send({ type: 'openFile', path: '/etc/passwd' });
+            await settle();
+            assert.deepStrictEqual(ran, [
+                ['workbench.action.openSettings', { query: 'llm-tokenizer.enableClaudeCodeUsage' }],
+                ['llm-tokenizer.clearClaudeCodeUsageHistory'],
+            ]);
+            assert.strictEqual(logShown, 1);
+        } finally {
+            (vscode.commands as unknown as Record<string, unknown>).executeCommand = original;
+        }
+    });
+
+    test('in a remote window, Open Settings opens the remote settings, the only ones that apply there', async () => {
+        const ran: unknown[][] = [];
+        const original = vscode.commands.executeCommand;
+        (vscode.commands as unknown as Record<string, unknown>).executeCommand = (...args: unknown[]) => (ran.push(args), Promise.resolve(undefined));
+        try {
+            await openUsageSettings('ssh-remote');
+            await openUsageSettings(undefined);
+        } finally {
+            (vscode.commands as unknown as Record<string, unknown>).executeCommand = original;
+        }
+        const query = { query: 'llm-tokenizer.enableClaudeCodeUsage' };
+        assert.deepStrictEqual(ran, [
+            ['workbench.action.openRemoteSettings', query],
+            ['workbench.action.openSettings', query],
+        ]);
+    });
+
+    test("Choose Folder sets the data folder for the user, and a projects folder picked means its parent", async () => {
+        const { service } = fakeService();
+        const config = () => vscode.workspace.getConfiguration('llm-tokenizer');
+        const before = config().inspect('claudeCodeDataDirectory')?.globalValue;
+        const picked = path.join(os.tmpdir(), 'claude-elsewhere', 'projects');
+        const originalDialog = vscode.window.showOpenDialog;
+        (vscode.window as unknown as Record<string, unknown>).showOpenDialog = () => Promise.resolve([vscode.Uri.file(picked)]);
+        try {
+            UsagePanel.show(context, service, log);
+            page.send({ type: 'chooseFolder' });
+            await until(() => config().inspect('claudeCodeDataDirectory')?.globalValue === path.dirname(picked), 5_000);
+            assert.strictEqual(config().inspect('claudeCodeDataDirectory')?.workspaceValue, undefined);
+        } finally {
+            (vscode.window as unknown as Record<string, unknown>).showOpenDialog = originalDialog;
+            await config().update('claudeCodeDataDirectory', before, vscode.ConfigurationTarget.Global);
+        }
     });
 });

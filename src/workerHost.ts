@@ -76,6 +76,8 @@ export class WorkerHost<Request extends { id: number }, Response extends { id: n
     /** When the worker died, oldest first, on `now`. */
     private readonly crashTimes: number[] = [];
     private crashEpoch = 0;
+    /** Settles once the last worker stopped has ended. */
+    private ended: Promise<void> = Promise.resolve();
     private readonly now: () => number;
 
     constructor(
@@ -95,20 +97,31 @@ export class WorkerHost<Request extends { id: number }, Response extends { id: n
         return this.recentCrashes() >= MAX_WORKER_CRASHES;
     }
 
-    public dispose(): void {
+    /** End the worker for good; resolves once the last thread has ended. */
+    public dispose(): Promise<void> {
         this.disposed = true;
-        this.stop();
+        return this.stop();
     }
 
     /**
      * End the current worker, as dispose does, but leave the host usable: the
      * next request starts a new worker. For a caller that lets an idle worker
      * go. Not a crash, so it never counts against the budget.
+     *
+     * Resolves once the last worker stopped has ended, and with it every file
+     * it held open: Windows refuses to delete a file a worker still has open.
      */
-    public stop(): void {
+    public stop(): Promise<void> {
         this.failAllPending(new WorkerHostError(`The ${this.options.name} was shut down`));
-        void this.worker?.terminate();
+        const worker = this.worker;
         this.worker = undefined;
+        if (worker) {
+            this.ended = worker.terminate().then(
+                () => undefined,
+                () => undefined,
+            );
+        }
+        return this.ended;
     }
 
     /** Whether a worker is running now. */

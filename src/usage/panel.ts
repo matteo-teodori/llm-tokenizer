@@ -35,6 +35,17 @@ export function savedZone(context: vscode.ExtensionContext): string | undefined 
 /** Copied or exported text is the page's own rendering of what it was sent; far more is not that. */
 const MAX_EXPORT_CHARS = 16 << 20;
 
+/**
+ * This feature's settings, where they apply. They are machine settings, so
+ * in a remote window only the remote ones count: User settings would be
+ * ignored there. The query goes as an object, the one form the remote
+ * command reads (VS Code 1.105 drops a string).
+ */
+export async function openUsageSettings(remoteName: string | undefined = vscode.env.remoteName): Promise<void> {
+    const command = remoteName ? 'workbench.action.openRemoteSettings' : 'workbench.action.openSettings';
+    await vscode.commands.executeCommand(command, { query: 'llm-tokenizer.enableClaudeCodeUsage' });
+}
+
 /** What the page may ask for. */
 export type PanelMessage =
     | { type: 'ready'; zone: string }
@@ -200,7 +211,7 @@ export class UsagePanel implements vscode.Disposable {
                 );
                 return;
             case 'openSettings':
-                await vscode.commands.executeCommand('workbench.action.openSettings', 'llm-tokenizer.enableClaudeCodeUsage');
+                await openUsageSettings();
                 return;
             case 'chooseFolder':
                 await this.chooseFolder();

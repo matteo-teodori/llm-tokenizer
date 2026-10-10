@@ -14,7 +14,9 @@ import {
     IDLE_MS,
     LEASE_RETRY_MS,
     MAX_HINT_PATHS,
+    USAGE_SETTINGS,
     UsageService,
+    readUsageSettings,
     type Clock,
     type UsageHost,
     type UsageServiceDeps,
@@ -111,14 +113,16 @@ class FakeHost implements UsageHost {
         return this.answer(request);
     }
 
-    stop(): void {
+    stop(): Promise<void> {
         this.stopped++;
         this.running = false;
+        return Promise.resolve();
     }
 
-    dispose(): void {
+    dispose(): Promise<void> {
         this.disposed++;
         this.running = false;
+        return Promise.resolve();
     }
 }
 
@@ -157,7 +161,8 @@ suite('usage service', () => {
         for (const service of services.splice(0)) {
             service.dispose();
         }
-        fs.rmSync(tmp, { recursive: true, force: true });
+        // Windows lets a folder go only once nothing in it is open.
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     });
 
     /** A service over fakes; `calls` counts every touch of the machine. */
@@ -308,11 +313,19 @@ suite('usage service', () => {
     test('an idle worker is let go after 10 minutes, its history closed first', async () => {
         const { clock, host } = make();
         await settle();
+        let answerClose!: () => void;
+        host.answer = request =>
+            request.type === 'close'
+                ? new Promise(resolve => (answerClose = () => resolve(defaultAnswer(request))))
+                : Promise.resolve(defaultAnswer(request));
         assert.ok(host.running);
         await clock.advance(IDLE_MS - 1);
         assert.strictEqual(host.stopped, 0);
         await clock.advance(1);
-        assert.deepStrictEqual([host.sent.at(-1), host.stopped], ['close', 1]);
+        assert.deepStrictEqual([host.sent.at(-1), host.stopped], ['close', 0], 'ended before its history was closed');
+        answerClose();
+        await settle();
+        assert.strictEqual(host.stopped, 1);
     });
 
     test('held, it stays resident and imports on watcher hints, a burst coalesced', async () => {
@@ -503,12 +516,14 @@ suite('usage service', () => {
 
     test('through the real worker: the fixtures imported, reported, cleared and read again', async () => {
         const log = { info: () => undefined, warn: () => undefined, debug: () => undefined, error: () => undefined };
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        let worker: WorkerHost<UsageWorkerRequest, UsageWorkerResponse> | undefined;
         const service = new UsageService({
             log,
-            storeFile: path.join(tmp, 'store', 'usage.sqlite'),
+            storeFile,
             readSettings: () => ({ enabled: true, dataDirectory: '', editorEnvironment: undefined }),
             rootInputs: () => ({ env: { CLAUDE_CONFIG_DIR: FIXTURE_ROOT }, home: path.join(tmp, 'home'), platform: process.platform }),
-            createHost: () => new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(WORKER, { name: 'usage', fallback: 'nothing', log }),
+            createHost: () => (worker = new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(WORKER, { name: 'usage', fallback: 'nothing', log })),
             watch: () => new vscode.Disposable(() => undefined),
             startupSettled: Promise.resolve(),
         });
@@ -526,5 +541,41 @@ suite('usage service', () => {
         assert.strictEqual((await service.report('coverage', 'Europe/Rome', null))?.totals.processed, 0);
         assert.strictEqual((await service.refresh())?.read, 4);
         assert.strictEqual((await service.report('coverage', 'Europe/Rome', null))?.totals.processed, 1_278);
+
+        // Once its thread has ended, nothing of the history is open: what
+        // Windows needs before the folder can go. (The order, close then end,
+        // is the fake host's to show: the end closes the file too.)
+        services.splice(services.indexOf(service), 1);
+        service.dispose();
+        for (let i = 0; i < 200 && worker?.running; i++) {
+            await settle();
+        }
+        await worker?.dispose();
+        assert.ok(!fs.existsSync(`${storeFile}-wal`), 'the history was still open after its thread ended');
+    });
+});
+
+suite('usage settings', () => {
+    test("Claude Code's environment is taken at the user level only, never from a repository", () => {
+        const configuration = (section: string) => ({
+            get: <T>(key: string, fallback?: T): T | undefined =>
+                section === 'claudeCode' ? ({ environmentVariables: 'workspace' } as Record<string, unknown>)[key] as T : fallback,
+            inspect: <T>(key: string) =>
+                section === 'claudeCode' && key === 'environmentVariables'
+                    ? ({ key, globalValue: 'user', workspaceValue: 'workspace', workspaceFolderValue: 'folder' } as unknown as { key: string; globalValue?: T })
+                    : undefined,
+        });
+        assert.deepStrictEqual(readUsageSettings(configuration as never), { enabled: false, dataDirectory: '', editorEnvironment: 'user' });
+    });
+
+    test('every setting of the feature is a machine setting, so no workspace can turn it on or point it elsewhere', () => {
+        const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'package.json'), 'utf8')) as {
+            contributes: { configuration: { properties: Record<string, { scope?: string }> } | { properties: Record<string, { scope?: string }> }[] };
+        };
+        const sections = ([] as { properties: Record<string, { scope?: string }> }[]).concat(manifest.contributes.configuration);
+        const properties = Object.assign({}, ...sections.map(c => c.properties)) as Record<string, { scope?: string }>;
+        for (const key of USAGE_SETTINGS) {
+            assert.strictEqual(properties[`llm-tokenizer.${key}`]?.scope, 'machine', key);
+        }
     });
 });
