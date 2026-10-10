@@ -15,7 +15,6 @@ import {
     IDLE_MS,
     LEASE_RETRY_MS,
     MAX_HINT_PATHS,
-    USAGE_SETTINGS,
     UsageService,
     readUsageSettings,
     type Clock,
@@ -23,6 +22,7 @@ import {
     type UsageServiceDeps,
     type UsageSettings,
 } from '../../src/usage/usageService';
+import { USAGE_SETTINGS } from '../../src/usage/settings';
 import { WorkerHost } from '../../src/workerHost';
 
 const FIXTURE_ROOT = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'claude-config');

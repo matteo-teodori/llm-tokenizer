@@ -1,10 +1,14 @@
 /**
  * Build script.
  *
- * Produces three kinds of output:
+ * Produces, as scripts/bundles.mjs lists:
  *
  *   out/extension.js      the extension host entrypoint
+ *   out/usage.js          the Claude Code usage feature, loaded by the
+ *                         extension only once the feature is on or one of
+ *                         its commands runs
  *   out/worker.js         the tokenizer worker thread
+ *   out/usageWorker.js    the usage worker thread
  *   out/encodings/*.js    one self-contained tiktoken encoding each
  *
  * The encodings are separate files on purpose. Each one builds its rank tables

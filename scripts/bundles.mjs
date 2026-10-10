@@ -32,6 +32,13 @@ export const SHIPPED_BUNDLES = [
         external: ['vscode'],
     },
     {
+        // The Claude Code usage feature, loaded only once it is on or one of
+        // its commands runs: off, activation parses none of it.
+        entryPoints: ['src/usage/usageService.ts'],
+        outfile: 'out/usage.js',
+        external: ['vscode'],
+    },
+    {
         // Built only from node: built-ins, so it inlines no package.
         // node:sqlite is required at run time, never bundled.
         entryPoints: ['src/usageWorker.ts'],

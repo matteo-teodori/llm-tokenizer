@@ -30,19 +30,9 @@ import type { RangeKey, UsageReport } from './report';
 import type { LatestRequest } from './store';
 import type { Compaction } from './types';
 import { machineRootInputs, resolveRoots, type ResolvedRoots, type RootInputs } from './roots';
+import { CONFIG_SECTION } from './settings';
 import { UsageStatusItem } from './statusItem';
 
-const CONFIG_SECTION = 'llm-tokenizer';
-
-/** This feature's settings. A change to any of them, or to where Claude Code writes, is handled here. */
-export const USAGE_SETTINGS = ['enableClaudeCodeUsage', 'claudeCodeDataDirectory', 'showClaudeCodeUsageInStatusBar'] as const;
-
-export function affectsUsage(event: Pick<vscode.ConfigurationChangeEvent, 'affectsConfiguration'>): boolean {
-    return (
-        USAGE_SETTINGS.some(key => event.affectsConfiguration(`${CONFIG_SECTION}.${key}`)) ||
-        event.affectsConfiguration('claudeCode.environmentVariables')
-    );
-}
 
 /** The first import waits at most this long for the startup project scan. */
 export const FIRST_IMPORT_MAX_WAIT_MS = 30_000;
@@ -683,15 +673,24 @@ export class UsageService implements vscode.Disposable {
     }
 }
 
+/** What the extension's loader asks of the feature once it is loaded. */
+export interface UsageCommands {
+    show(): void;
+    refresh(): Promise<void>;
+    clear(): Promise<void>;
+    settingsChanged(): void;
+}
+
 /**
- * The service as the extension runs it, with its three commands. In the test
- * host, roots are confined to the fixtures; see `machineRootInputs`.
+ * The service as the extension runs it, and the status item: the entry of
+ * the feature's own bundle, which onDemand.ts loads. In the test host, roots
+ * are confined to the fixtures; see `machineRootInputs`.
  */
-export function registerClaudeCodeUsage(
+export function startClaudeCodeUsage(
     context: vscode.ExtensionContext,
     log: vscode.LogOutputChannel,
     startupSettled: Thenable<unknown>,
-): UsageService {
+): UsageCommands {
     const underTest = context.extensionMode === vscode.ExtensionMode.Test;
     const fixtures = path.join(context.extensionPath, 'test', 'fixtures');
     // Under test, a history of its own, emptied as each run starts: one that
@@ -741,21 +740,16 @@ export function registerClaudeCodeUsage(
         createItem: () => vscode.window.createStatusBarItem('llm-tokenizer.claudeCodeUsage', vscode.StatusBarAlignment.Right, 98),
     });
 
-    context.subscriptions.push(
-        service,
-        statusItem,
-        vscode.workspace.onDidChangeConfiguration(event => {
-            if (affectsUsage(event)) {
-                service.settingsChanged();
-                statusItem.settingsChanged();
-            }
-        }),
-        // Always registered: while the feature is off, the panel says what turning it on does.
-        vscode.commands.registerCommand('llm-tokenizer.showClaudeCodeUsage', () => UsagePanel.show(context, service, log)),
-        vscode.commands.registerCommand('llm-tokenizer.refreshClaudeCodeUsage', () => refreshCommand(service)),
-        vscode.commands.registerCommand('llm-tokenizer.clearClaudeCodeUsageHistory', () => clearCommand(service)),
-    );
-    return service;
+    context.subscriptions.push(service, statusItem);
+    return {
+        show: () => UsagePanel.show(context, service, log),
+        refresh: () => refreshCommand(service),
+        clear: () => clearCommand(service),
+        settingsChanged: () => {
+            service.settingsChanged();
+            statusItem.settingsChanged();
+        },
+    };
 }
 
 async function refreshCommand(service: UsageService): Promise<void> {

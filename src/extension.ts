@@ -28,7 +28,8 @@ import {
 } from './scan';
 import { accuracyOf, isDownloadable } from './tokenizer/encoders';
 import { CountCache, isBinaryOutcome } from './countCache';
-import { affectsUsage, registerClaudeCodeUsage } from './usage/usageService';
+import { registerClaudeCodeUsage } from './usage/onDemand';
+import { affectsUsage } from './usage/settings';
 import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 
 const CONFIG_SECTION = 'llm-tokenizer';
