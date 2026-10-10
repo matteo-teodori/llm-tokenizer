@@ -31,9 +31,12 @@ src/              extension source, bundled by esbuild into out/
   html.ts         escaping, the webview CSP, and the text helpers a page script runs
   charts.ts       the theme tokens, meter and ranked bars the pages share
   usage/          Claude Code usage: finding and reading its records, the history
-                  store, the rollups and reports, the panel and the status item;
-                  bundled apart, into out/usage.js, which onDemand.ts loads only
-                  once the feature is on or one of its commands runs
+                  store, the rollups and reports, the panel and the status item.
+                  onDemand.ts and settings.ts are in out/extension.js; the
+                  service, the panel and the status item are bundled apart, into
+                  out/usage.js, which onDemand.ts loads only once the feature is
+                  on or one of its commands runs; what reads the records and the
+                  history is in out/usageWorker.js
   usageWorker.ts  the usage worker: the one thread that reads Claude Code's records
                   or touches the history
 test/

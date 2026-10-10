@@ -88,10 +88,13 @@ suite('worker host', () => {
         // 1.5 s of work, half again the timeout.
         const slow = host.send({ id: 0, every: 50, beats: 30 });
         // Sent at the same time, and never answered: alive while the worker talks.
-        const unanswered = host.send({ id: 0, silent: true });
+        let givenUpAfter = 0;
+        const unanswered = host.send({ id: 0, silent: true }).finally(() => (givenUpAfter = Date.now() - started));
         assert.strictEqual((await slow).done, true);
         await assert.rejects(unanswered, /did not respond in time/);
-        assert.ok(Date.now() - started >= 1_500, 'given up while the worker was still at work');
+        // A second of silence after the last word, at 1.5 s: never before 2 s.
+        // A wait restarted for the oldest request alone gives up at 1 s.
+        assert.ok(givenUpAfter >= 2_000, `given up after ${givenUpAfter} ms, while the worker was still at work`);
     });
 
     test('a heap limit reaches the worker', async () => {
