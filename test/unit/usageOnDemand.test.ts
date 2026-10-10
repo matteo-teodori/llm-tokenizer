@@ -9,15 +9,24 @@ type Start = typeof startClaudeCodeUsage;
 suite('usage, loaded on demand', () => {
     const commands = vscode.commands as unknown as Record<string, unknown>;
     const workspace = vscode.workspace as unknown as Record<string, unknown>;
+    const window = vscode.window as unknown as Record<string, unknown>;
     const originals: Record<string, unknown> = {};
     let handlers: Map<string, () => unknown>;
     let listener: ((event: Pick<vscode.ConfigurationChangeEvent, 'affectsConfiguration'>) => void) | undefined;
     let enabled: boolean;
     const calls = { loads: 0, starts: 0, show: 0, settingsChanged: 0 };
+    /** Loads that fail before one works, as a broken install's would. */
+    let failingLoads: number;
+    let errors: string[];
+    let shownErrors: string[];
 
     /** The bundle as the loader sees it: counted, and doing nothing. */
     const load = (): Start => {
         calls.loads++;
+        if (failingLoads > 0) {
+            failingLoads--;
+            throw new Error("Cannot find module '/ext/out/usage.js'");
+        }
         return (): UsageCommands => {
             calls.starts++;
             return {
@@ -35,7 +44,7 @@ suite('usage, loaded on demand', () => {
     const register = () =>
         registerClaudeCodeUsage(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
-            {} as vscode.LogOutputChannel,
+            { error: (message: string) => void errors.push(message) } as unknown as vscode.LogOutputChannel,
             Promise.resolve(),
             load,
         );
@@ -47,6 +56,11 @@ suite('usage, loaded on demand', () => {
         handlers = new Map();
         listener = undefined;
         enabled = false;
+        failingLoads = 0;
+        errors = [];
+        shownErrors = [];
+        originals.showErrorMessage = window.showErrorMessage;
+        window.showErrorMessage = (message: string) => (shownErrors.push(message), Promise.resolve(undefined));
         originals.registerCommand = commands.registerCommand;
         originals.onDidChangeConfiguration = workspace.onDidChangeConfiguration;
         originals.getConfiguration = workspace.getConfiguration;
@@ -57,6 +71,7 @@ suite('usage, loaded on demand', () => {
     });
 
     teardown(() => {
+        window.showErrorMessage = originals.showErrorMessage;
         commands.registerCommand = originals.registerCommand;
         workspace.onDidChangeConfiguration = originals.onDidChangeConfiguration;
         workspace.getConfiguration = originals.getConfiguration;
@@ -86,5 +101,18 @@ suite('usage, loaded on demand', () => {
         change('llm-tokenizer.showClaudeCodeUsageInStatusBar');
         change('editor.fontSize');
         assert.deepStrictEqual([calls.loads, calls.settingsChanged], [1, 1]);
+    });
+
+    test('a bundle that fails to load fails no activation: it is logged, and the next command tries again', async () => {
+        enabled = true;
+        failingLoads = 2;
+        assert.doesNotThrow(register);
+        assert.deepStrictEqual([calls.loads, calls.starts], [1, 0]);
+        assert.ok(errors.some(e => e.includes('could not be loaded') && e.includes('usage.js')), errors.join(' | '));
+        // The command says so, rather than throwing.
+        await handlers.get('llm-tokenizer.showClaudeCodeUsage')?.();
+        assert.deepStrictEqual(shownErrors, ['LLM Tokenizer: Claude Code usage could not be loaded; see the log.']);
+        await handlers.get('llm-tokenizer.showClaudeCodeUsage')?.();
+        assert.deepStrictEqual([calls.loads, calls.starts, calls.show, shownErrors.length], [3, 1, 1, 1]);
     });
 });

@@ -25,7 +25,12 @@ function bundled(): Start {
     return (require(path.join(__dirname, 'usage.js')) as { startClaudeCodeUsage: Start }).startClaudeCodeUsage;
 }
 
-/** Register the commands and the listener; `load` is the bundle's loader, which a test replaces. */
+/**
+ * Register the commands and the listener; `load` is the bundle's loader,
+ * which a test replaces. A bundle that fails to load or start, as a broken
+ * install's would, is logged and tried again by the next command, and never
+ * fails the extension's activation.
+ */
 export function registerClaudeCodeUsage(
     context: vscode.ExtensionContext,
     log: vscode.LogOutputChannel,
@@ -33,13 +38,39 @@ export function registerClaudeCodeUsage(
     load: () => Start = bundled,
 ): void {
     let feature: UsageCommands | undefined;
-    const started = (): UsageCommands => (feature ??= load()(context, log, startupSettled));
+    const started = (): UsageCommands | undefined => {
+        if (!feature) {
+            let start: Start;
+            try {
+                start = load();
+            } catch (error) {
+                log.error(`Claude Code usage could not be loaded: ${error instanceof Error ? error.message : String(error)}`);
+                return undefined;
+            }
+            try {
+                feature = start(context, log, startupSettled);
+            } catch (error) {
+                // The name only: what the feature had read could be in the message.
+                log.error(`Claude Code usage could not be started (${error instanceof Error ? error.name : 'Error'})`);
+                return undefined;
+            }
+        }
+        return feature;
+    };
+    /** The feature for a command, or why there is none. */
+    const forCommand = (): UsageCommands | undefined => {
+        const commands = started();
+        if (!commands) {
+            void vscode.window.showErrorMessage('LLM Tokenizer: Claude Code usage could not be loaded; see the log.');
+        }
+        return commands;
+    };
     const enabled = () => vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('enableClaudeCodeUsage', false);
     context.subscriptions.push(
         // Always registered: while the feature is off, the panel says what turning it on does.
-        vscode.commands.registerCommand('llm-tokenizer.showClaudeCodeUsage', () => started().show()),
-        vscode.commands.registerCommand('llm-tokenizer.refreshClaudeCodeUsage', () => started().refresh()),
-        vscode.commands.registerCommand('llm-tokenizer.clearClaudeCodeUsageHistory', () => started().clear()),
+        vscode.commands.registerCommand('llm-tokenizer.showClaudeCodeUsage', () => forCommand()?.show()),
+        vscode.commands.registerCommand('llm-tokenizer.refreshClaudeCodeUsage', () => forCommand()?.refresh()),
+        vscode.commands.registerCommand('llm-tokenizer.clearClaudeCodeUsageHistory', () => forCommand()?.clear()),
         vscode.workspace.onDidChangeConfiguration(event => {
             if (!affectsUsage(event)) {
                 return;
