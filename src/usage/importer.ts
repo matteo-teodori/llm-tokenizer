@@ -61,6 +61,8 @@ export interface ImportSummary {
     /** Projects folders missing under a root. */
     missingProjects: number;
     cancelled: boolean;
+    /** Reads an earlier worker left unfinished, met by this pass: each a crash, when the window saw one. */
+    interrupted: number;
     elapsedMs: number;
 }
 
@@ -163,6 +165,7 @@ async function runImport(
         journals: 0,
         missingProjects: 0,
         cancelled: false,
+        interrupted: 0,
         elapsedMs: 0,
     };
 
@@ -237,7 +240,7 @@ async function runImport(
             let guard: ReadGuard | undefined;
             if (unreadBytes(previous, state) > guardedReadBytes) {
                 flush();
-                guard = guardRead(store, file.path, now(), writeIfCurrent, countCrashes);
+                guard = guardRead(store, file.path, now(), writeIfCurrent, countCrashes, () => summary.interrupted++);
                 if (!guard) {
                     increment(summary.skipped, 'crashed');
                     continue;
@@ -344,8 +347,12 @@ function guardRead(
     now: number,
     writeIfCurrent: (work: () => void) => boolean,
     countCrashes: boolean,
+    onInterrupted: () => void,
 ): ReadGuard | undefined {
     const previous = store.getReadGuard(PROVIDER, filePath);
+    if (previous?.inProgress) {
+        onInterrupted();
+    }
     // A read that never finished counts as a crash of this file, when the
     // window saw a crash; otherwise it was only interrupted.
     const crashed = previous?.inProgress === true && countCrashes;

@@ -103,6 +103,9 @@ class FakeHost implements UsageHost {
     /** Answers each request; an import can be held open by the test. */
     answer: (request: UsageWorkerRequest) => Promise<UsageWorkerResponse> = request => Promise.resolve(defaultAnswer(request));
 
+    /** What a stop fails, as the real host fails every request still waiting. */
+    private readonly waiting = new Set<(error: Error) => void>();
+
     send(request: UsageWorkerRequest): Promise<UsageWorkerResponse> {
         this.running = true;
         this.sent.push(request.type);
@@ -110,12 +113,21 @@ class FakeHost implements UsageHost {
             this.imports.push(request.paths ? [...request.paths].sort() : 'all');
             this.crashFlags.push(request.crashed === true);
         }
-        return this.answer(request);
+        return new Promise((resolve, reject) => {
+            this.waiting.add(reject);
+            this.answer(request)
+                .then(resolve, reject)
+                .finally(() => this.waiting.delete(reject));
+        });
     }
 
     stop(): Promise<void> {
         this.stopped++;
         this.running = false;
+        for (const fail of this.waiting) {
+            fail(new Error('shut down'));
+        }
+        this.waiting.clear();
         return Promise.resolve();
     }
 
@@ -130,7 +142,7 @@ function summaryOf(read: number): Extract<UsageWorkerResponse, { type: 'imported
     return {
         roots: 1, files: 4, read, unchanged: 4 - read, restarted: 0, records: read, skipped: {}, malformed: {}, oversizeLines: 0,
         synthetic: 0, apiErrors: 0, symlinkedFolders: 0, unreadableFolders: 0, journals: 0, missingProjects: 0, cancelled: false,
-        elapsedMs: 1,
+        interrupted: 0, elapsedMs: 1,
     };
 }
 
@@ -414,6 +426,170 @@ suite('usage service', () => {
         await settle();
         assert.strictEqual(calls.watching, 1);
         assert.strictEqual(host.sent.at(-1), 'import');
+        held.dispose();
+    });
+
+    /** An import that answers only when the test says, with what it says. */
+    function heldImport(host: FakeHost): (answer?: Partial<UsageWorkerResponse>) => void {
+        let answer!: (extra?: Partial<UsageWorkerResponse>) => void;
+        host.answer = request =>
+            request.type === 'import'
+                ? new Promise(resolve => (answer = extra => resolve({ ...defaultAnswer(request), ...extra } as UsageWorkerResponse)))
+                : Promise.resolve(defaultAnswer(request));
+        return extra => answer(extra);
+    }
+
+    test('turned off during an import, its answer coming after changes nothing', async () => {
+        const { service, host, set } = make();
+        const answer = heldImport(host);
+        await settle();
+        let changes = 0;
+        service.onDidChange(() => changes++);
+        set({ enabled: false });
+        answer();
+        await settle();
+        assert.deepStrictEqual([service.status, service.lastImport, changes > 1], ['off', undefined, false]);
+    });
+
+    test('a refused pass answered after turning off, or after dispose, arms no retry and reads nothing', async () => {
+        for (const end of ['off', 'dispose'] as const) {
+            const { service, host, clock, calls, set } = make();
+            const answer = heldImport(host);
+            await settle();
+            if (end === 'off') {
+                set({ enabled: false });
+            } else {
+                service.dispose();
+            }
+            answer({ summary: null, leaseHeldElsewhere: true });
+            await settle();
+            const [roots, sent] = [calls.roots, host.sent.length];
+            await clock.advance(LEASE_RETRY_MS * 2);
+            assert.deepStrictEqual([calls.roots, host.sent.length, service.updatingElsewhere], [roots, sent, false], end);
+        }
+    });
+
+    test('a Clear that fails while off leaves the status off', async () => {
+        const { service, host } = make({ settings: { enabled: false } });
+        host.answer = request => Promise.resolve({ type: 'failed', id: request.id, failure: 'store-io', errorName: 'StoreError' });
+        assert.strictEqual(await service.clear(), false);
+        assert.strictEqual(service.status, 'off');
+    });
+
+    test('turned off and on before the pass answered, the new start imports, and hourly after', async () => {
+        const { host, clock, set } = make();
+        const answer = heldImport(host);
+        await settle();
+        set({ enabled: false });
+        set({ enabled: true });
+        host.answer = request => Promise.resolve(defaultAnswer(request));
+        answer();
+        await settle();
+        assert.deepStrictEqual(host.imports, ['all', 'all'], 'the new start did not import');
+        await clock.advance(HOURLY_MS);
+        assert.deepStrictEqual(host.imports, ['all', 'all', 'all'], 'no hourly pass after it');
+    });
+
+    test('a Clear sent just after turning off is answered, and the worker ends after it', async () => {
+        const { service, host, clock, set } = make();
+        await settle();
+        // As the worker's queue has it: the close first, the Clear after it.
+        let answerClose!: () => void;
+        const closed = new Promise<void>(resolve => (answerClose = resolve));
+        host.answer = request =>
+            request.type === 'close'
+                ? closed.then(() => defaultAnswer(request))
+                : request.type === 'clear'
+                  ? closed.then(() => new Promise<UsageWorkerResponse>(resolve => setImmediate(() => resolve(defaultAnswer(request)))))
+                  : Promise.resolve(defaultAnswer(request));
+        set({ enabled: false });
+        const cleared = service.clear();
+        answerClose();
+        assert.strictEqual(await cleared, true, 'the Clear was cut off by the stop');
+        await clock.advance(0);
+        assert.ok(host.stopped >= 1 && !host.running, 'the worker was kept');
+    });
+
+    test('a crash is reported to the worker until a pass has counted the read it left unfinished', async () => {
+        const { service, host, clock, hints } = make();
+        await settle();
+        const held = service.hold();
+        const flags: string[] = [];
+        let interrupted = 0;
+        host.answer = request => {
+            if (request.type === 'liveContext') {
+                flags.push(`live:${request.crashed === true}`);
+            }
+            if (request.type === 'import') {
+                flags.push(`${request.paths ? 'hint' : 'full'}:${request.crashed === true}`);
+                return Promise.resolve({
+                    type: 'imported',
+                    id: request.id,
+                    summary: { ...summaryOf(1), interrupted: request.paths ? 0 : interrupted },
+                    leaseHeldElsewhere: false,
+                });
+            }
+            return Promise.resolve(defaultAnswer(request));
+        };
+        host.onCrash();
+        // Another session's file, then a hint naming another file: neither
+        // met the read the crash left unfinished.
+        await service.liveContext('s1');
+        hints[0]('/r/projects/p/other.jsonl');
+        await clock.advance(HINT_DEBOUNCE_MS);
+        // A full pass meets it and counts it; after that the flag is spent.
+        interrupted = 1;
+        await service.refresh();
+        await service.refresh();
+        assert.deepStrictEqual(flags, ['live:true', 'hint:true', 'full:true', 'full:false']);
+        held.dispose();
+    });
+
+    test("a Refresh whose own pass is refused says nothing was read, not what the pass before it read", async () => {
+        // A hint's pass is running when Refresh is clicked; another window
+        // takes the lease between the two.
+        const { service, host, clock, hints } = make();
+        await settle();
+        const held = service.hold();
+        let answerHint!: () => void;
+        host.answer = request =>
+            request.type !== 'import'
+                ? Promise.resolve(defaultAnswer(request))
+                : request.paths
+                  ? new Promise(resolve => (answerHint = () => resolve(defaultAnswer(request))))
+                  : Promise.resolve({ type: 'imported', id: request.id, summary: null, leaseHeldElsewhere: true });
+        hints[0]('/r/projects/p/a.jsonl');
+        await clock.advance(HINT_DEBOUNCE_MS);
+        const refreshed = service.refresh();
+        answerHint();
+        assert.strictEqual(await refreshed, undefined, 'Refresh was answered with the hint pass');
+        assert.ok(service.updatingElsewhere);
+        held.dispose();
+    });
+
+    test('a retry that fails drops the other-window note, so Refresh says what went wrong', async () => {
+        const { service, host } = make();
+        await settle();
+        let refusals = 1;
+        host.answer = request =>
+            request.type !== 'import'
+                ? Promise.resolve(defaultAnswer(request))
+                : refusals-- > 0
+                  ? Promise.resolve({ type: 'imported', id: request.id, summary: null, leaseHeldElsewhere: true })
+                  : Promise.resolve({ type: 'failed', id: request.id, failure: 'store-io', errorName: 'StoreError' });
+        await service.refresh();
+        assert.ok(service.updatingElsewhere);
+        await service.refresh();
+        assert.deepStrictEqual([service.updatingElsewhere, service.status], [false, 'failing']);
+    });
+
+    test('off, a held service still lets its worker go after a Clear', async () => {
+        // The panel holds it while visible, the feature off or not.
+        const { service, host, clock } = make({ settings: { enabled: false } });
+        const held = service.hold();
+        assert.ok(await service.clear());
+        await clock.advance(0);
+        assert.deepStrictEqual([host.sent, host.stopped], [['clear', 'close'], 1]);
         held.dispose();
     });
 

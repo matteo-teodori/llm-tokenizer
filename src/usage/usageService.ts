@@ -132,6 +132,8 @@ export class UsageService implements vscode.Disposable {
     /** Bumped on every start and stop, so a timer armed before either does nothing. */
     private generation = 0;
     private importing: Promise<ImportSummary | undefined> | undefined;
+    /** The start the running pass belongs to. */
+    private importingGeneration = -1;
     /** What the next pass must cover: named files, or everything. */
     private pending: Set<string> | 'all' | undefined;
     /** This window, as the holder of the import lease, whichever worker runs for it. */
@@ -261,9 +263,8 @@ export class UsageService implements vscode.Disposable {
             holder: this.holder,
             crashed: this.crashed,
         });
-        if (response?.type === 'liveContext') {
-            this.crashed = false;
-        }
+        // The crash flag is not spent here: this reads one session's file,
+        // and the read a crash left unfinished is most likely another's.
         return response?.type === 'liveContext' ? { latest: response.latest, compactions: response.compactions } : undefined;
     }
 
@@ -310,6 +311,7 @@ export class UsageService implements vscode.Disposable {
     private start(): void {
         this.enabled = true;
         this.generation++;
+        this.elsewhere = false;
         this.setStatus('ready');
         if (this.holders > 0) {
             this.restartWatchers();
@@ -326,6 +328,7 @@ export class UsageService implements vscode.Disposable {
         this.enabled = false;
         this.generation++;
         this.pending = undefined;
+        this.elsewhere = false;
         this.stopWatchers();
         for (const timer of [this.hourlyTimer, this.idleTimer, this.hintTimer, this.retryTimer]) {
             this.clock.clearTimeout(timer);
@@ -351,6 +354,7 @@ export class UsageService implements vscode.Disposable {
             return;
         }
         let timer: unknown;
+        this.inFlight++;
         try {
             await Promise.race([
                 host.send({ type: 'close', id: 0 }),
@@ -359,13 +363,16 @@ export class UsageService implements vscode.Disposable {
         } catch {
             // Gone already.
         } finally {
+            this.inFlight--;
             this.clock.clearTimeout(timer);
         }
         if (this.disposed) {
             void host.dispose();
-        } else if (generation === this.generation) {
+        } else if (generation === this.generation && this.inFlight === 0) {
             void host.stop();
         }
+        // Otherwise a request sent since, a Clear while off for one, is
+        // answered first: the idle release ends the worker after it.
     }
 
     /**
@@ -396,7 +403,9 @@ export class UsageService implements vscode.Disposable {
     /** Run passes, one at a time, until nothing is pending. */
     private drain(): Promise<ImportSummary | undefined> {
         if (this.importing) {
-            return this.importing;
+            // A pass of an earlier start, turned off and on again meanwhile,
+            // ends without taking what this start wants: run after it.
+            return this.importingGeneration === this.generation ? this.importing : this.importing.then(() => this.drain());
         }
         const generation = this.generation;
         const pass = async (): Promise<ImportSummary | undefined> => {
@@ -404,13 +413,16 @@ export class UsageService implements vscode.Disposable {
             while (this.pending && generation === this.generation) {
                 const take = this.pending;
                 this.pending = undefined;
-                const outcome = await this.importOnce(take === 'all' ? undefined : [...take]);
+                const outcome = await this.importOnce(take === 'all' ? undefined : [...take], generation);
                 if (outcome === 'held') {
                     // Another window is importing: keep what this pass was
-                    // for, and try again once its pass is likely over.
+                    // for, and try again once its pass is likely over. (Only
+                    // this start's answers come here; stop() clears the timer.)
                     this.want(take === 'all' ? undefined : [...take]);
                     this.clock.clearTimeout(this.retryTimer);
                     this.retryTimer = this.clock.setTimeout(() => void this.drain(), LEASE_RETRY_MS);
+                    // Nothing was read: no answer to a Refresh.
+                    summary = undefined;
                     break;
                 }
                 // Hourly from the last full pass: a hint's pass covers only
@@ -423,6 +435,7 @@ export class UsageService implements vscode.Disposable {
             }
             return summary;
         };
+        this.importingGeneration = generation;
         this.importing = pass().finally(() => {
             this.importing = undefined;
         });
@@ -440,8 +453,12 @@ export class UsageService implements vscode.Disposable {
         return this.resolved;
     }
 
-    /** One pass; 'held' when another window holds the import lease. */
-    private async importOnce(paths?: string[]): Promise<ImportSummary | 'held' | undefined> {
+    /**
+     * One pass; 'held' when another window holds the import lease. An answer
+     * that comes after the feature was turned off, or off and on, belongs to
+     * a start that is over, and changes nothing.
+     */
+    private async importOnce(paths: string[] | undefined, generation: number): Promise<ImportSummary | 'held' | undefined> {
         const resolved = this.resolveNow();
         for (const refused of resolved.refused) {
             this.deps.log.warn(`Claude Code usage: refused a root outside the test fixtures (${refused.source})`);
@@ -464,11 +481,12 @@ export class UsageService implements vscode.Disposable {
             holder: this.holder,
             crashed: this.crashed,
         });
-        if (response?.type !== 'imported') {
+        if (generation !== this.generation) {
             return undefined;
         }
-        if (!response.leaseHeldElsewhere) {
-            this.crashed = false;
+        if (response?.type !== 'imported') {
+            this.elsewhere = false;
+            return undefined;
         }
         if (response.leaseHeldElsewhere) {
             // Another window is importing into the same history; what it
@@ -480,6 +498,11 @@ export class UsageService implements vscode.Disposable {
         }
         this.elsewhere = false;
         const s = response.summary;
+        // The crash has been accounted for once a pass has counted the read
+        // it left unfinished, or has gone over every file without finding one.
+        if (s.interrupted > 0 || (!paths && !s.cancelled)) {
+            this.crashed = false;
+        }
         this.summary = s;
         this.setStatus('ready');
         const skipped = Object.values(s.skipped).reduce((sum, n) => sum + (n ?? 0), 0);
@@ -516,22 +539,26 @@ export class UsageService implements vscode.Disposable {
                     this.deps.log.warn(
                         `Claude Code usage needs node:sqlite, which this editor's runtime lacks (Node ${response.node})`,
                     );
-                    this.setStatus('no-sqlite');
+                    this.statusWhileOn('no-sqlite');
                     return undefined;
                 case 'failed':
                     if (response.failure === 'store-read-only') {
                         this.deps.log.warn('Claude Code usage: the history was created by a newer LLM Tokenizer, so it is read-only here');
-                        this.setStatus('read-only');
+                        this.statusWhileOn('read-only');
                     } else if (response.failure === 'outdated') {
                         if (this.currentStatus !== 'read-only') {
                             this.deps.log.warn(
                                 'Claude Code usage: a newer LLM Tokenizer, in another window, updates this history; reload this window to update it here',
                             );
                         }
-                        this.setStatus('read-only');
+                        this.statusWhileOn('read-only');
+                    } else if (response.failure === 'bad-request') {
+                        // A request the worker would not take says nothing
+                        // about the history: the status stays as it is.
+                        this.deps.log.warn(`Claude Code usage: a request was refused (${response.errorName})`);
                     } else {
                         this.deps.log.warn(`Claude Code usage: ${response.failure} (${response.errorName})`);
-                        this.setStatus('failing');
+                        this.statusWhileOn('failing');
                     }
                     return undefined;
                 default:
@@ -551,10 +578,22 @@ export class UsageService implements vscode.Disposable {
         }
     }
 
+    /** A status from an answer: while off, the status stays 'off', whatever a Clear met. */
+    private statusWhileOn(status: UsageStatus): void {
+        if (this.enabled) {
+            this.setStatus(status);
+        }
+    }
+
+    /** Held only while on: off, a held service has nothing for a worker to do. */
+    private get held(): boolean {
+        return this.enabled && this.holders > 0;
+    }
+
     /** Let an idle worker go: its history closed first, then the thread ended. */
     private armIdle(): void {
         this.clock.clearTimeout(this.idleTimer);
-        if (!this.host?.running || this.holders > 0 || this.inFlight > 0 || this.disposed) {
+        if (!this.host?.running || this.held || this.inFlight > 0 || this.disposed) {
             return;
         }
         const after = this.enabled ? IDLE_MS : 0;
@@ -563,7 +602,7 @@ export class UsageService implements vscode.Disposable {
 
     private async release(): Promise<void> {
         const host = this.host;
-        if (!host?.running || this.holders > 0 || this.inFlight > 0 || this.importing) {
+        if (!host?.running || this.held || this.inFlight > 0 || this.importing) {
             return;
         }
         this.inFlight++;
@@ -574,7 +613,7 @@ export class UsageService implements vscode.Disposable {
         } finally {
             this.inFlight--;
         }
-        if (this.holders === 0 && this.inFlight === 0 && !this.importing) {
+        if (!this.held && this.inFlight === 0 && !this.importing) {
             void host.stop();
         }
     }

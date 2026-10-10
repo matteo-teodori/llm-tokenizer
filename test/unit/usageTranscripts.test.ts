@@ -483,11 +483,15 @@ suite('usage transcripts', () => {
             );
         interrupted();
         let summary = await importRoots(store, [tmp], { guardedReadBytes: 0, countCrashes: false });
-        assert.deepStrictEqual([summary.read, summary.skipped], [1, {}]);
+        // Met either way, so the window knows its crash flag has done its work.
+        assert.deepStrictEqual([summary.read, summary.skipped, summary.interrupted], [1, {}, 1]);
         fs.appendFileSync(file, line(assistant('m9', 1)));
         interrupted();
         summary = await importRoots(store, [tmp], { guardedReadBytes: 0, countCrashes: true, now: () => 2 });
-        assert.deepStrictEqual([summary.read, summary.skipped], [0, { crashed: 1 }]);
+        assert.deepStrictEqual([summary.read, summary.skipped, summary.interrupted], [0, { crashed: 1 }, 1]);
+        fs.appendFileSync(file, line(assistant('m10', 1)));
+        summary = await importRoots(store, [tmp], { guardedReadBytes: 0, countCrashes: true, now: () => 2 });
+        assert.strictEqual(summary.interrupted, 0, 'a guard settled by its pass was met again');
     });
 
     test('a read is guarded by the bytes it will take, not by the size of the file', async () => {
