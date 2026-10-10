@@ -713,7 +713,7 @@ ${PAGE_TEXT_HELPERS}
     }
 
     function lines(table, separator, format) {
-        const out = table.notes.map(n => '# ' + n.replace(/[\\r\\n]+/g, ' '));
+        const out = table.notes.map(n => '# ' + n.replace(/[\\t\\r\\n]+/g, ' '));
         // Stamped on the click: the notes were rendered when the data came.
         out.push('# exported: ' + new Date().toISOString());
         out.push(table.header.map(format).join(separator));
@@ -765,6 +765,9 @@ ${PAGE_TEXT_HELPERS}
     });
 
     window.addEventListener('message', e => {
+        // The editor's own messages come from this page's origin; another
+        // frame in the window could post here too.
+        if (e.origin !== window.origin) { return; }
         if (e.data && e.data.type === 'data') { show(e.data.fragments); }
     });
 

@@ -996,6 +996,21 @@ suite('usage roots', () => {
         }
     });
 
+    test('under test, a root whose settings.json leads out, or whose projects link leads nowhere yet, is refused', () => {
+        const allowed = dir('allowed');
+        const outside = dir('outside');
+        fs.writeFileSync(path.join(outside, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } }));
+        const linkedSettings = dir(path.join('allowed', 'linked-settings'));
+        fs.symlinkSync(path.join(outside, 'settings.json'), path.join(linkedSettings, 'settings.json'), 'file');
+        // A link to nothing could lead out once its target appears.
+        const dangling = dir(path.join('allowed', 'dangling'));
+        fs.symlinkSync(path.join(outside, 'later'), path.join(dangling, 'projects'), 'junction');
+        for (const root of [linkedSettings, dangling]) {
+            const resolved = resolveRoots({ setting: root, editorEnvironment: undefined, env: {}, home, platform: 'linux', confineTo: [allowed] });
+            assert.deepStrictEqual([resolved.roots, resolved.refused.map(r => r.path), resolved.largeContextDisabled], [[], [root], false], root);
+        }
+    });
+
     test('under test, a root outside the allowed folders is refused', () => {
         const allowed = dir('allowed');
         const outside = dir('outside');

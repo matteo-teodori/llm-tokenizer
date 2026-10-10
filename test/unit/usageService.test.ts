@@ -470,6 +470,14 @@ suite('usage service', () => {
         }
     });
 
+    test('a request the worker refuses as malformed leaves the status as it is', async () => {
+        const { service, host } = make();
+        await settle();
+        host.answer = request => Promise.resolve({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
+        assert.strictEqual(await service.liveContext('s1'), undefined);
+        assert.strictEqual(service.status, 'ready');
+    });
+
     test('a Clear that fails while off leaves the status off', async () => {
         const { service, host } = make({ settings: { enabled: false } });
         host.answer = request => Promise.resolve({ type: 'failed', id: request.id, failure: 'store-io', errorName: 'StoreError' });

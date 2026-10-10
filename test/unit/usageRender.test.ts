@@ -136,7 +136,7 @@ function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fake
     vm.runInNewContext(script, {
         acquireVsCodeApi: () => ({ postMessage: (m: { type: string }) => posted.push(m) }),
         document,
-        window: { addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
+        window: { origin: ORIGIN, addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
         Intl,
     });
     return {
@@ -147,13 +147,20 @@ function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fake
         click: (target: unknown) => listeners.click({ target: { closest: () => target } }),
         update: (next: PanelFragments, newTables: ReturnType<typeof fakeTable>[]) => {
             nextTables = newTables;
-            listeners['window:message']({ data: { type: 'data', fragments: next } });
+            listeners['window:message']({ origin: ORIGIN, data: { type: 'data', fragments: next } });
         },
     };
 }
 
 /** The page's script, run as the webview would, with only what it uses. */
-function runPage(fragments: PanelFragments): { posted: { type: string; text?: string }[]; click(action: string): string } {
+/** The page's origin, as the editor's webview gives it. */
+const ORIGIN = 'vscode-webview://0123abcd';
+
+function runPage(fragments: PanelFragments): {
+    posted: { type: string; text?: string }[];
+    click(action: string): string;
+    message(origin: string, fragments: PanelFragments): void;
+} {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
     const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
     assert.ok(script);
@@ -168,11 +175,12 @@ function runPage(fragments: PanelFragments): { posted: { type: string; text?: st
             addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
             activeElement: null,
         },
-        window: { addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
+        window: { origin: ORIGIN, addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
         Intl,
     });
     return {
         posted,
+        message: (origin: string, fragments: PanelFragments) => listeners['window:message']({ origin, data: { type: 'data', fragments } }),
         click: action => {
             listeners.click({ target: { closest: () => ({ dataset: { action } }) } });
             return posted.at(-1)?.text ?? '';
@@ -319,6 +327,22 @@ suite('usage page', () => {
         const copied = runPage(renderFragments(view({ report: report({ sessions: [session] }) }))).click('copy');
         const row = copied.split('\n').find(l => l.includes('HYPERLINK'))?.split('\t');
         assert.deepStrictEqual(row?.slice(1, 3), [`'${formula}`, "'+1"]);
+    });
+
+    test("the page takes data only from the editor, whose messages come from the page's own origin", () => {
+        const page = runPage(renderFragments(view()));
+        const forged = renderFragments(view({ report: report({ sessions: [{ ...report().sessions[0], label: 'forged', sessionId: 'forged' }] }) }));
+        // Another frame in the window, a site in Simple Browser say.
+        page.message('https://evil.example', forged);
+        assert.ok(!page.click('copy').includes('forged'), 'a message from another frame was shown');
+        page.message(ORIGIN, forged);
+        assert.ok(page.click('copy').includes('forged'));
+    });
+
+    test("an export's notes cannot split into columns: tabs are spaces there too", () => {
+        const fragments = renderFragments(view());
+        fragments.copy.notes.push('a\tnote');
+        assert.ok(runPage(fragments).click('copy').split('\n').includes('# a note'));
     });
 
     test('an export is stamped when it is made, not when the page last had data', async () => {

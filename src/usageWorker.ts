@@ -24,7 +24,7 @@ import { queryReport } from './usage/queries';
 import { RANGE_KEYS } from './usage/report';
 import { PARSER_VERSION, sessionTranscripts } from './usage/transcripts';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
-import type { UsageFailure, UsageWorkerRequest, UsageWorkerResponse } from './usage/protocol';
+import { SESSION_ID, type UsageFailure, type UsageWorkerRequest, type UsageWorkerResponse } from './usage/protocol';
 
 if (!parentPort) {
     throw new Error('usageWorker.ts must be run as a worker thread');
@@ -34,8 +34,6 @@ const port = parentPort;
 /** More named paths than this are a full pass's job. */
 const MAX_PATHS = 1000;
 
-/** A session id becomes part of a file name, so only what Claude Code's ids are made of. */
-const SESSION_ID = /^[A-Za-z0-9_-]{1,200}$/;
 
 /** Holds the import lease when the window does not name itself; unique per thread. */
 const ownHolder = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;

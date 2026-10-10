@@ -78,6 +78,9 @@ export function embed(value: unknown): string {
  *   an apostrophe, which forces it to text.
  * - `pasteCell(value)` is `cell` with the same guard, for Copy: pasted into a
  *   spreadsheet, a tab-separated cell is read as a formula just the same.
+ *   The guard looks past leading spaces and invisible characters, takes the
+ *   full-width forms of those signs too, and a leading `"`, which a paste
+ *   reads as the start of a quoted cell whose contents are then a formula.
  */
 export const PAGE_TEXT_HELPERS = `
     function escapeText(s) {
@@ -95,6 +98,6 @@ export const PAGE_TEXT_HELPERS = `
 
     function pasteCell(value) {
         const text = cell(value);
-        return /^[=+\\-@]/.test(text) ? "'" + text : text;
+        return /^[\\s\\u200b-\\u200d\\u2060\\ufeff]*["=+\\-@\\uff02\\uff0b\\uff0d\\uff1d\\uff20]/.test(text) ? "'" + text : text;
     }
 `;

@@ -117,4 +117,16 @@ suite('page text helpers', () => {
         assert.strictEqual(helpers.pasteCell('a=b'), 'a=b');
         assert.strictEqual(helpers.pasteCell('a\tb'), 'a b');
     });
+
+    test('the guard looks past spaces and invisible characters, at full-width signs, and at a leading quote', () => {
+        // A paste reads "…" as one quoted cell, and the formula inside it.
+        for (const text of ['"=1+1"', ' =1+1', '\t=1+1', '\u200b=1+1', '\ufeff=1+1', '\u3000+1', '\uff1d1+1', '\uff0b1', '\uff0d1', '\uff20A1', '\uff02=1']) {
+            assert.ok(helpers.pasteCell(text).startsWith("'"), JSON.stringify(text));
+        }
+        for (const text of ['claude-opus-5-5', 'a "quoted" word', '1278', 'repo']) {
+            assert.strictEqual(helpers.pasteCell(text), text);
+        }
+        // The CSV, built on it, keeps its quoting as well.
+        assert.strictEqual(helpers.csv('"=2+2"'), `"'""=2+2"""`);
+    });
 });

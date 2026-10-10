@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { modelById } from '../../src/tokenizer/registry';
-import { RECENT_MS, parseLiveSession, readLiveSessions, type LiveSession } from '../../src/usage/liveSessions';
+import { CLOCK_SKEW_MS, RECENT_MS, parseLiveSession, readLiveSessions, type LiveSession } from '../../src/usage/liveSessions';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import type { ResolvedRoots } from '../../src/usage/roots';
 import { UsageStatusItem, contextWindow, describeLive, type LiveInput, type StatusItemService } from '../../src/usage/statusItem';
@@ -127,19 +127,27 @@ suite('usage status item: running sessions', () => {
         });
         assert.strictEqual(parseLiveSession(record({}), () => false, 'darwin', later), undefined, 'a dead pid read as live');
         assert.strictEqual(parseLiveSession(record({ updatedAt: undefined }), () => false, 'darwin', later), undefined);
-        // Another domain's pid means nothing here: the file is taken at its word.
-        assert.ok(parseLiveSession(record({ pidDomain: 'linux' }), () => false, 'darwin', later));
-        for (const bad of [record({ cwd: 'relative' }), record({ sessionId: 7 }), record({ cwd: '' }), '[1]', 'not json']) {
+        // Another domain's pid means nothing here: only a recent update says it runs.
+        assert.ok(parseLiveSession(record({ pidDomain: 'linux' }), () => false, 'darwin', 1_791_000_000_000 + 60_000));
+        assert.strictEqual(parseLiveSession(record({ pidDomain: 'linux' }), () => false, 'darwin', later), undefined);
+        // An id the worker would refuse would make every look fail.
+        for (const bad of [record({ cwd: 'relative' }), record({ sessionId: 7 }), record({ sessionId: 'not.a.uuid' }), record({ cwd: '' }), '[1]', 'not json']) {
             assert.strictEqual(parseLiveSession(bad, alive, 'darwin', later), undefined, bad.slice(0, 40));
         }
     });
 
-    test('a session updated in the last 15 minutes is live whatever its pid says here', () => {
+    test('on Linux a session updated in the last 15 minutes is live whatever its pid says; elsewhere a dead pid is a leftover', () => {
         // A Flatpak editor, or a container's ~/.claude: the pid is another
         // namespace's, and names no process here while the session runs.
         const updated = 1_791_000_000_000;
-        assert.ok(parseLiveSession(record({}), () => false, 'darwin', updated + RECENT_MS));
-        assert.strictEqual(parseLiveSession(record({}), () => false, 'darwin', updated + RECENT_MS + 1), undefined);
+        const linux = (fields: Record<string, unknown>, now: number) => parseLiveSession(record({ pidDomain: 'linux', ...fields }), () => false, 'linux', now);
+        assert.ok(linux({}, updated + RECENT_MS));
+        assert.strictEqual(linux({}, updated + RECENT_MS + 1), undefined);
+        // An update ahead of this clock by more than a skew is no evidence.
+        assert.ok(linux({}, updated - CLOCK_SKEW_MS));
+        assert.strictEqual(linux({}, updated - CLOCK_SKEW_MS - 1), undefined);
+        // macOS and Windows have no PID namespaces: a dead pid is final.
+        assert.strictEqual(parseLiveSession(record({}), () => false, 'darwin', updated + 1), undefined);
     });
 
     test('only <pid>.json files are read, newest session first, one entry per session', async () => {
@@ -172,7 +180,13 @@ suite('usage status item: the item', () => {
     }
 
     function harness(
-        options: { shown?: boolean; sessions?: LiveSession[]; context?: Awaited<ReturnType<StatusItemService['liveContext']>>; started?: Promise<void> } = {},
+        options: {
+            shown?: boolean;
+            sessions?: LiveSession[];
+            readLive?: () => Promise<LiveSession[]>;
+            context?: Awaited<ReturnType<StatusItemService['liveContext']>>;
+            started?: Promise<void>;
+        } = {},
     ) {
         const calls = { readLive: 0, holds: 0, released: 0, liveContext: 0 };
         const emitter = new vscode.EventEmitter<void>();
@@ -197,7 +211,7 @@ suite('usage status item: the item', () => {
             shown: () => shown,
             readLive: () => {
                 calls.readLive++;
-                return Promise.resolve(options.sessions ?? []);
+                return options.readLive ? options.readLive() : Promise.resolve(options.sessions ?? []);
             },
             workspaceFolders: () => ['/work/repo'],
             platform: 'linux',
@@ -220,6 +234,20 @@ suite('usage status item: the item', () => {
             await new Promise<void>(resolve => setImmediate(resolve));
         }
     };
+
+    test('a look that never ends holds no later item: turned off and on, the new one looks', async () => {
+        // A read of a sessions file that never returns, as a FIFO's did.
+        let first = true;
+        const { statusItem, calls, items, setShown } = harness({
+            readLive: () => (first ? ((first = false), new Promise<LiveSession[]>(() => undefined)) : Promise.resolve([session('/work/repo')])),
+        });
+        await settle();
+        setShown(false);
+        setShown(true);
+        await settle();
+        assert.deepStrictEqual([calls.readLive, items.at(-1)?.visible], [2, true], 'the new item never looked');
+        statusItem.dispose();
+    });
 
     test('nothing is held, read or shown before the service has started', async () => {
         // It starts once the startup project scan has settled: never in the

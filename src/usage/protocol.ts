@@ -12,6 +12,9 @@ import type { RangeKey, UsageReport } from './report';
 import type { LatestRequest } from './store';
 import type { Compaction } from './types';
 
+/** A session id becomes part of a file name, so only what Claude Code's ids are made of. */
+export const SESSION_ID = /^[A-Za-z0-9_-]{1,200}$/;
+
 export type UsageWorkerRequest =
     /**
      * With `paths`, only those transcripts: the ones a watcher reported

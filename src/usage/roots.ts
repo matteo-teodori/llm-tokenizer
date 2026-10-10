@@ -109,12 +109,22 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
         if (!candidate.exists) {
             continue;
         }
-        // Under test, what is read under the root must stay inside too: a
-        // projects or sessions folder can be a link that leads out. One that
-        // does not exist reads nothing.
-        const confined = (p: string, mustExist: boolean) =>
-            !inputs.confineTo || (!mustExist && !exists(p)) || inputs.confineTo.some(allowed => isInside(p, allowed));
-        if (!confined(candidate.path, true) || !confined(path.join(candidate.path, 'projects'), false) || !confined(path.join(candidate.path, 'sessions'), false)) {
+        // Under test, what is read under the root must stay inside too: its
+        // projects or sessions folder, or its settings.json, can be a link
+        // that leads out. One that does not exist reads nothing; a link that
+        // leads nowhere now could lead out later, so it counts as outside.
+        const confined = (p: string, mustExist: boolean) => {
+            if (!inputs.confineTo) {
+                return true;
+            }
+            if (!exists(p)) {
+                return !mustExist;
+            }
+            const real = resolved(p);
+            return real !== undefined && inputs.confineTo.some(allowed => isInside(real, realPath(allowed)));
+        };
+        const read = ['projects', 'sessions', 'settings.json'].map(name => path.join(candidate.path, name));
+        if (!confined(candidate.path, true) || !read.every(p => confined(p, false))) {
             refused.push(candidate);
             continue;
         }
@@ -209,13 +219,20 @@ function editorVariable(
 /** The `env` entries of a Claude Code settings file that are kept, and nothing else from it. */
 function settingsEnv(file: string): SettingsEnv {
     const kept: SettingsEnv = {};
+    let fd: number | undefined;
     try {
         // A regular file only: reading a FIFO would block the extension host.
-        const stat = fs.statSync(file);
+        // Opened without blocking, then checked and read by the descriptor,
+        // so that nothing swapped in after a check is read, and no more than
+        // the size checked.
+        fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+        const stat = fs.fstatSync(fd);
         if (!stat.isFile() || stat.size > MAX_SETTINGS_BYTES) {
             return kept;
         }
-        const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+        const bytes = Buffer.alloc(stat.size);
+        const read = fs.readSync(fd, bytes, 0, stat.size, 0);
+        const parsed = JSON.parse(bytes.subarray(0, read).toString('utf8')) as unknown;
         const env = (parsed as { env?: unknown } | null)?.env;
         if (typeof env === 'object' && env !== null) {
             for (const name of SETTINGS_VARIABLES) {
@@ -227,6 +244,10 @@ function settingsEnv(file: string): SettingsEnv {
         }
     } catch {
         // Missing, unreadable or not JSON: nothing set there.
+    } finally {
+        if (fd !== undefined) {
+            fs.closeSync(fd);
+        }
     }
     return kept;
 }
@@ -262,7 +283,17 @@ function realPath(candidate: string): string {
     }
 }
 
+/** The path as the file system holds it, or undefined where it leads nowhere. */
+function resolved(candidate: string): string | undefined {
+    try {
+        return fs.realpathSync.native(candidate);
+    } catch {
+        return undefined;
+    }
+}
+
+/** Whether `child` is `parent` or inside it, both already resolved. */
 function isInside(child: string, parent: string): boolean {
-    const relative = path.relative(realPath(parent), realPath(child));
+    const relative = path.relative(parent, child);
     return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }

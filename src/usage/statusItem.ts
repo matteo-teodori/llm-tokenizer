@@ -182,6 +182,8 @@ export class UsageStatusItem implements vscode.Disposable {
     private remove(): void {
         clearInterval(this.timer);
         this.timer = undefined;
+        // A look that never ends must not hold the next item's looks.
+        this.refreshing = undefined;
         this.hold?.dispose();
         this.hold = undefined;
         this.item?.dispose();
@@ -190,7 +192,14 @@ export class UsageStatusItem implements vscode.Disposable {
 
     /** Look again; a call during a look waits for it rather than starting another. */
     refresh(): Promise<void> {
-        this.refreshing ??= this.look().finally(() => (this.refreshing = undefined));
+        if (!this.refreshing) {
+            const look: Promise<void> = this.look().finally(() => {
+                if (this.refreshing === look) {
+                    this.refreshing = undefined;
+                }
+            });
+            this.refreshing = look;
+        }
         return this.refreshing;
     }
 
