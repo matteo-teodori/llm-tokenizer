@@ -22,11 +22,13 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
     writes a line per streaming update, and summing them would count about
     twice the tokens.
   - Kept, in a database in this extension's storage: each request's token
-    counts, model, effort, time, ids and Claude Code version, the folder
-    each session started in, and which transcripts were read and how far.
-    Prompts, responses, thinking and tool contents are never kept, and
-    nothing is sent anywhere. **Clear Claude Code Usage History** removes
-    it. The README lists everything kept.
+    counts, model, effort, time, ids and Claude Code version; the folder
+    each session started in; compactions' sizes and the usage limits
+    reached; which transcripts were read and how far; and, while an import
+    runs, this machine's name. Prompts, responses, thinking and tool
+    contents are never kept, and nothing is sent anywhere. **Clear Claude
+    Code Usage History** removes it, and leaves nothing of it readable on
+    disk. The README lists everything kept.
   - Every setting is machine-scoped, so a repository's own settings cannot
     turn it on; in a dev container, the container's settings can.
   - A history written by a later version of LLM Tokenizer opens read-only in
@@ -65,12 +67,14 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   and before every release.
 - CONTRIBUTING's layout and commands cover what exists now, and its
   changelog rule matches the dated sections this file uses.
-- `WorkerHost` takes a heap limit, can let a worker go without being
-  disposed, and resolves its stop once the thread has ended. It gives up on
-  a request when the worker goes silent, no longer when it is slow: any
-  message from the worker restarts every request's wait. The registry
-  records the window Claude Code gives Opus 4.6 and Sonnet 4.6 without
-  their `[1m]` variant.
+- `WorkerHost` takes a heap limit and a worker's `workerData`, can let a
+  worker go without being disposed, and resolves its stop once the thread
+  has ended. It gives up on a request when the worker goes silent, no
+  longer when it is slow: any message from the worker restarts every
+  request's wait. The registry records the window Claude Code gives Opus
+  4.6 and Sonnet 4.6 without their `[1m]` variant.
+- Under test, the extension keeps the usage history in a folder of its
+  own, emptied as each run starts.
 
 ## [2.1.2] - 2026-10-09
 

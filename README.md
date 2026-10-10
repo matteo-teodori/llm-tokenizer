@@ -167,8 +167,11 @@ the conversation again with every turn and the cache serves it. A total marked
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
 the context of the Claude Code session running in this workspace is, with the
 80% and 100% colours where the model's window is known. The window follows
-Claude Code's own rules, `CLAUDE_CODE_DISABLE_1M_CONTEXT` included, wherever
-that is set. It reads Claude Code's running-session files too.
+Claude Code's own rules, `CLAUDE_CODE_DISABLE_1M_CONTEXT` included when it is
+set in the editor's environment, in Claude Code's **Environment Variables**
+setting, or in the `env` of the `settings.json` in Claude Code's folder; a
+project's own `.claude/settings.json` is not read. It reads Claude Code's
+running-session files too.
 
 **Export CSV** gives, per day and model, every input a hand-made cost
 calculation needs: requests, input, cache writes (5-minute and 1-hour), cache
@@ -190,9 +193,12 @@ Tokenizer) keeps:
 Prompts, responses, thinking and tool inputs or results are never kept, and
 nothing is sent anywhere. The history outlives Claude Code's own records,
 which Claude Code deletes after 30 days by default. A history that can no
-longer be read is moved aside and a new one started, and the panel says so.
-**Clear Claude Code Usage History** removes the history and any copy moved
-aside; anything still on disk is read again at the next refresh.
+longer be read is moved aside and a new one started, and the panel says so
+until it is cleared. **Clear Claude Code Usage History** removes the history
+and any copy moved aside, and leaves nothing of either readable on disk;
+anything still on disk is read again at the next refresh. The panel also
+remembers its range, its scope and your time zone, in the editor's own
+state.
 
 Its settings are machine settings, so a repository's settings cannot turn it
 on or point it at another folder. In a dev container, though, the container's
@@ -211,6 +217,8 @@ settings can come from the repository's `devcontainer.json`.
   possibly compaction.
 - A request refused at a usage limit carries no tokens: it is listed as a
   limit reached.
+- Records dated more than a day after this machine's clock, which only a
+  wrong clock writes.
 
 The records' format is internal to Claude Code and may change with it; the
 diagnostics say when lines could not be read.
