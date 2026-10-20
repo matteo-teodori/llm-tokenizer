@@ -148,7 +148,9 @@ A leading `≈` means the count is an estimate rather than an exact tokenization
 
 How many tokens Claude Code processed, read from the session records Claude
 Code keeps on your machine. It is off by default: turn on
-**Enable Claude Code Usage** in Settings, then run **Show Claude Code Usage**.
+**Enable Claude Code Usage** in Settings, then run **Show Claude Code Usage**,
+or, while it is on, click the LLM Tokenizer **T** at the top right of an
+editor.
 
 **The panel** shows today, the last 7 or 30 days, or everything since the
 history starts, for all projects or for this workspace:

@@ -1,7 +1,9 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { logoIcon } from '../../src/logo';
 import { showMultiFileSummary, type MultiFileSummaryConfig } from '../../src/webview';
 import { resolveInitialModel, settingsChangeEffects } from '../../src/extension';
 import { STORAGE_KEY } from '../../src/constants';
@@ -185,11 +187,15 @@ suite('extension', () => {
             contextStatus: { percentage: 0, status: 'ok', limit: 922_000 },
         });
 
-        const first = showMultiFileSummary(summary(1));
+        const extensionUri = vscode.extensions.getExtension(EXTENSION_ID)?.extensionUri;
+        assert.ok(extensionUri);
+        const first = showMultiFileSummary(summary(1), extensionUri);
         try {
+            // Its tab shows the logo's T, as every page of the extension does.
+            assert.deepStrictEqual(first.iconPath, logoIcon(extensionUri));
             for (let i = 2; i <= 5; i++) {
                 assert.strictEqual(
-                    showMultiFileSummary(summary(i)),
+                    showMultiFileSummary(summary(i), extensionUri),
                     first,
                     `run ${i} created a second panel`,
                 );
@@ -200,7 +206,7 @@ suite('extension', () => {
 
         // Closing it releases the reference, so the next run opens a fresh one
         // rather than reviving a disposed panel.
-        const reopened = showMultiFileSummary(summary(6));
+        const reopened = showMultiFileSummary(summary(6), extensionUri);
         try {
             assert.notStrictEqual(reopened, first, 'a disposed panel was reused');
         } finally {
@@ -223,6 +229,42 @@ suite('extension', () => {
         for (const command of contributed) {
             assert.ok(registered.has(command), `${command} is contributed but not registered`);
         }
+    });
+
+    test('every menu names a contributed command, and every command icon is a file that ships', () => {
+        const extension = vscode.extensions.getExtension(EXTENSION_ID);
+        assert.ok(extension);
+        const manifest = extension.packageJSON as {
+            contributes: {
+                commands: { command: string; icon?: string | { light: string; dark: string } }[];
+                menus: Record<string, { command: string; when?: string; group?: string }[]>;
+            };
+        };
+        const contributed = new Set(manifest.contributes.commands.map(c => c.command));
+        for (const [menu, items] of Object.entries(manifest.contributes.menus)) {
+            for (const item of items) {
+                assert.ok(contributed.has(item.command), `${menu} names ${item.command}, which is not contributed`);
+            }
+        }
+        // A missing file is an empty button. .vscodeignore lets media/*.png into the VSIX.
+        const shipped = fs.readFileSync(path.join(extension.extensionPath, '.vscodeignore'), 'utf8').split('\n').includes('!media/*.png');
+        const files = (icon: string | { light: string; dark: string } | undefined) => (icon === undefined ? [] : typeof icon === 'string' ? [icon] : [icon.light, icon.dark]);
+        for (const { command, icon } of manifest.contributes.commands) {
+            for (const file of files(icon)) {
+                assert.ok(fs.existsSync(path.join(extension.extensionPath, file)), `${command}'s icon ${file} does not exist`);
+                assert.ok(shipped && /^media\/[^/]+\.png$/.test(file), `${command}'s icon ${file} is not one the VSIX ships`);
+            }
+        }
+        // The usage panel is one click from any editor's title, the panel's
+        // own included, while the feature is on: off, the button would be
+        // there for everyone, and say only that it is off.
+        const title = manifest.contributes.menus['editor/title']?.find(item => item.command === 'llm-tokenizer.showClaudeCodeUsage');
+        assert.ok(title?.group?.startsWith('navigation'), 'Show Claude Code Usage is not a button in the editor title');
+        assert.strictEqual(title?.when, 'config.llm-tokenizer.enableClaudeCodeUsage', 'the button shows while the feature is off, or hides somewhere while it is on');
+        // The button and the tabs are one icon: the logo's T.
+        const show = manifest.contributes.commands.find(c => c.command === 'llm-tokenizer.showClaudeCodeUsage');
+        const tab = logoIcon(extension.extensionUri);
+        assert.deepStrictEqual(files(show?.icon).map(file => vscode.Uri.joinPath(extension.extensionUri, file).toString()), [tab.light.toString(), tab.dark.toString()]);
     });
 
     test('every contributed setting is readable with its declared type', () => {

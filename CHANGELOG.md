@@ -9,7 +9,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Added
 - **Claude Code usage, off by default.** How many tokens Claude Code
   processed, read from the session records it keeps on your machine. Turn on
-  **Enable Claude Code Usage**, then run **Show Claude Code Usage**.
+  **Enable Claude Code Usage**, then run **Show Claude Code Usage**, or
+  click the LLM Tokenizer T at the top right of an editor.
   - The panel shows today, 7 days, 30 days or the whole history, for all
     projects or this workspace: tokens processed by category and by day,
     models, delegated work, effort, projects, sessions, the usage limits
@@ -38,6 +39,10 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
     VS Code 1.141.0 and 1.105.0, on macOS.
   - **Before going back to 2.1.2:** its Clear Downloaded Tokenizers deletes
     this extension's whole storage, and this history with it.
+
+### Changed
+- **The extension's pages show the logo's T in their tabs**, the token
+  summary as well as Claude Code usage, rather than a blank page.
 
 ### Fixed
 - **Clear Downloaded Tokenizers deletes only the tokenizers.** It deleted

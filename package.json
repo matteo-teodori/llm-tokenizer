@@ -84,7 +84,11 @@
       {
         "command": "llm-tokenizer.showClaudeCodeUsage",
         "title": "Show Claude Code Usage",
-        "category": "LLM Tokenizer"
+        "category": "LLM Tokenizer",
+        "icon": {
+          "light": "media/logo-light.png",
+          "dark": "media/logo-dark.png"
+        }
       },
       {
         "command": "llm-tokenizer.refreshClaudeCodeUsage",
@@ -108,6 +112,13 @@
         {
           "command": "llm-tokenizer.countTokens",
           "group": "1_modification@99"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "llm-tokenizer.showClaudeCodeUsage",
+          "when": "config.llm-tokenizer.enableClaudeCodeUsage",
+          "group": "navigation@100"
         }
       ],
       "commandPalette": [

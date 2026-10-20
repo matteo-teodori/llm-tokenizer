@@ -39,6 +39,8 @@ const CONFIG_SECTION = 'llm-tokenizer';
 // ═══════════════════════════════════════════════════════════════
 
 let log: vscode.LogOutputChannel;
+/** The extension's own folder: where its pages' tab icon is. */
+let extensionUri: vscode.Uri;
 let tokenizer: TokenizerService;
 let statusBar: StatusBarManager;
 let currentModel: ModelInfo;
@@ -98,6 +100,7 @@ function invalidateCounts(): void {
 export function activate(context: vscode.ExtensionContext): void {
     log = vscode.window.createOutputChannel('LLM Tokenizer', { log: true });
     context.subscriptions.push(log);
+    extensionUri = context.extensionUri;
 
     const store = new TokenizerStore(context.globalStorageUri);
     tokenizer = new TokenizerService(path.join(context.extensionPath, 'out', 'worker.js'), store, log);
@@ -974,7 +977,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                 modelLabel: model.label,
                 exact: result.exact,
                 contextStatus: contextStatus(result.total, model),
-            });
+            }, extensionUri);
         },
     );
 }

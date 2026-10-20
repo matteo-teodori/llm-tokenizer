@@ -13,6 +13,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { contentSecurityPolicy, createNonce } from '../html';
+import { logoIcon } from '../logo';
 import { modelById } from '../tokenizer/registry';
 import { isTimeZone, localMinute } from './aggregate';
 import { renderFragments, renderUsagePage, type PanelFragments, type PanelView } from './render';
@@ -115,6 +116,7 @@ export class UsagePanel implements vscode.Disposable {
             // The page is self-contained: nothing on disk is needed.
             localResourceRoots: [],
         });
+        panel.iconPath = logoIcon(context.extensionUri);
         UsagePanel.current = new UsagePanel(panel, context, service, log);
     }
 

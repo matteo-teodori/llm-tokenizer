@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { logoIcon } from '../../src/logo';
 import { emptyTotals } from '../../src/usage/aggregate';
 import type { ImportSummary } from '../../src/usage/importer';
 import { UsagePanel, openUsageSettings } from '../../src/usage/panel';
@@ -115,6 +116,7 @@ function fakeContext(): vscode.ExtensionContext {
             update: (key: string, value: unknown) => (state.set(key, value), Promise.resolve()),
         },
         extension: { packageJSON: { version: '2.2.0' } },
+        extensionUri: vscode.Uri.file(path.join(os.tmpdir(), 'llm-tokenizer-extension')),
     } as unknown as vscode.ExtensionContext;
 }
 
@@ -154,6 +156,12 @@ suite('usage panel', () => {
     teardown(() => {
         (vscode.window as unknown as { createWebviewPanel: unknown }).createWebviewPanel = create;
         page.panel.dispose();
+    });
+
+    test("its tab shows the logo's T", () => {
+        const { service } = fakeService();
+        UsagePanel.show(context, service, log);
+        assert.deepStrictEqual((page.panel as { iconPath?: unknown }).iconPath, logoIcon(context.extensionUri));
     });
 
     test('brought back from hidden, it holds the service again and looks at once', async () => {
