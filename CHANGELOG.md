@@ -4,7 +4,7 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
-## [2.2.0] - 2026-10-09
+## [2.2.0] - 2026-10-20
 
 ### Added
 - **Claude Code usage, off by default.** How many tokens Claude Code
@@ -39,7 +39,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
     this one.
   - It needs the editor's `node:sqlite`, which every VS Code this version
     supports has; an editor without it is told why nothing shows. Tested on
-    VS Code 1.141.0 and 1.105.0, on macOS.
+    VS Code 1.141.0 on Windows, Linux and macOS, and on 1.105.0, the oldest
+    this version accepts, on Linux and macOS.
   - **Before going back to 2.1.2:** its Clear Downloaded Tokenizers deletes
     this extension's whole storage, and this history with it.
 
