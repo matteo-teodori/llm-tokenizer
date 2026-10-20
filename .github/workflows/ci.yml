@@ -86,13 +86,19 @@ jobs:
       - run: npm ci
 
       # Extension tests drive a real VS Code instance, which needs a display
-      # server on Linux.
+      # server on Linux. The output is kept, so that a failure can be named.
       - name: Test (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a npm test
+        shell: bash
+        run: xvfb-run -a npm test 2>&1 | tee test-output.log
       - name: Test
         if: runner.os != 'Linux'
-        run: npm test
+        shell: bash
+        run: npm test 2>&1 | tee test-output.log
+      # Anyone can read a run's annotations; its log needs a token.
+      - name: Name the failing tests
+        if: failure() && hashFiles('test-output.log') != ''
+        run: node scripts/annotate-test-failures.mjs test-output.log
 
   # The oldest VS Code that package.json's engines accepts, whose runtime is
   # older than the one the matrix above gets. One OS is enough to catch an API
@@ -110,7 +116,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - run: xvfb-run -a npm run test:floor
+      - name: Test
+        shell: bash
+        run: xvfb-run -a npm run test:floor 2>&1 | tee test-output.log
+      - name: Name the failing tests
+        if: failure() && hashFiles('test-output.log') != ''
+        run: node scripts/annotate-test-failures.mjs test-output.log
 
   package:
     name: Package VSIX
