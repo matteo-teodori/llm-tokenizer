@@ -1,0 +1,562 @@
+import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+import { dedupe } from '../../src/usage/accounting';
+import { totalsOf } from '../../src/usage/aggregate';
+import { createHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
+import { LEASE_TAKEOVER_MS, SCHEMA_VERSION, UsageStore, loadSqlite, type FileCheckpoint, type OpenResult } from '../../src/usage/store';
+import type { UsageRequest } from '../../src/usage/types';
+
+const sqlite = loadSqlite();
+
+function req(overrides: Partial<UsageRequest> = {}): UsageRequest {
+    return {
+        provider: 'claude-code',
+        messageId: 'msg_1',
+        requestId: 'req_1',
+        sessionId: 'session-a',
+        kind: 'main',
+        isMain: true,
+        timestamp: Date.UTC(2026, 9, 9, 10, 0),
+        model: 'claude-opus-5-5',
+        variant: null,
+        speed: null,
+        inferenceGeo: null,
+        input: 0,
+        cacheCreation: 0,
+        cacheRead: 0,
+        output: 0,
+        cacheWrite5m: null,
+        cacheWrite1h: null,
+        thinking: null,
+        effort: null,
+        webSearchRequests: null,
+        webFetchRequests: null,
+        claudeCodeVersion: '2.1.292',
+        agentId: null,
+        runId: null,
+        file: '/root/projects/p/session-a.jsonl',
+        byteOffset: 0,
+        parserVersion: 1,
+        ...overrides,
+    };
+}
+
+function seeded(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+        a = (a + 0x6d2b79f5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+function ready(result: OpenResult): UsageStore {
+    assert.strictEqual(result.status, 'ready', JSON.stringify(result));
+    return result.store;
+}
+
+suite('usage history store', () => {
+    let dir: string;
+    let file: string;
+    const opened: UsageStore[] = [];
+
+    function open(options = {}): OpenResult {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const result = UsageStore.open(sqlite, file, options);
+        if (result.status !== 'failed' && result.status !== 'corrupt') {
+            opened.push(result.store);
+        }
+        return result;
+    }
+
+    setup(() => {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-usage-'));
+        file = path.join(dir, 'claude-code-usage', 'usage.sqlite');
+    });
+
+    teardown(() => {
+        for (const store of opened.splice(0)) {
+            try {
+                store.close();
+            } catch {
+                // Already closed by the test.
+            }
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('a new history opens in WAL mode at the current schema', () => {
+        const result = open();
+        const store = ready(result);
+        assert.strictEqual(result.status === 'ready' && result.journal, 'wal');
+        assert.strictEqual(store.generation(), 0);
+        assert.match(store.storeId(), /^[0-9a-z]+-[0-9a-z]+$/);
+        assert.ok(fs.existsSync(file));
+        assert.strictEqual(SCHEMA_VERSION, 2);
+    });
+
+    test('the upsert keeps the record the comparator prefers, in any order', () => {
+        // The SQL twin of accounting.ts, against the JavaScript one. Paths
+        // include a BMP and an astral character, which UTF-16 and UTF-8 order
+        // differently.
+        const store = ready(open());
+        const random = seeded(4242);
+        const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
+
+        const everything: UsageRequest[] = [];
+        for (let round = 0; round < 150; round++) {
+            const batch = Array.from({ length: 6 }, () =>
+                req({
+                    messageId: `m${round}-${pick([1, 2, 3])}`,
+                    parserVersion: pick([1, 1, 2]),
+                    isMain: pick([true, false]),
+                    cacheRead: pick([0, 5, null]),
+                    output: pick([null, 0, 7, 7, 30]),
+                    file: pick(['/r/a.jsonl', '/r/b.jsonl', '/r/\uffff.jsonl', '/r/\u{10000}.jsonl']),
+                    byteOffset: pick([0, 10, 20]),
+                }),
+            );
+            everything.push(...batch);
+            store.transaction(() => store.upsertRequests(batch));
+        }
+
+        const byId = (a: UsageRequest, b: UsageRequest) => (a.messageId < b.messageId ? -1 : a.messageId > b.messageId ? 1 : 0);
+        const expected = [...dedupe(everything).values()].sort(byId);
+        assert.ok(expected.length > 100);
+        assert.deepStrictEqual([...store.requests()].sort(byId), expected);
+    });
+
+    test('the oracle survives the store, re-imported and reordered', () => {
+        const store = ready(open());
+        const oracle = [
+            req({ messageId: 'R1', input: 120, cacheRead: 800, cacheCreation: 50, output: 20, byteOffset: 0 }),
+            req({ messageId: 'R1', input: 120, cacheRead: 800, cacheCreation: 50, output: 60, byteOffset: 900 }),
+            req({ messageId: 'R2', input: 70, cacheRead: 100, cacheCreation: 10, output: 30, byteOffset: 1800 }),
+        ];
+        store.transaction(() => store.upsertRequests([...oracle].reverse()));
+        store.transaction(() => store.upsertRequests(oracle));
+        const totals = totalsOf(store.requests());
+        assert.deepStrictEqual(
+            [totals.input, totals.cacheRead, totals.cacheCreation, totals.output, totals.processed, totals.coverage.requests],
+            [190, 900, 60, 90, 1_240, 2],
+        );
+    });
+
+    test('an unknown counter stays unknown, not zero', () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ cacheRead: null, thinking: null, output: 4 })]));
+        const [row] = [...store.requests()];
+        assert.strictEqual(row.cacheRead, null);
+        assert.strictEqual(row.thinking, null);
+        assert.strictEqual(totalsOf([row]).provenance, 'partial');
+    });
+
+    test('a newer parser replaces older rows, and an older one never replaces newer', () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ parserVersion: 2, output: 1 })]));
+        store.transaction(() => store.upsertRequests([req({ parserVersion: 1, output: 999 })]));
+        assert.strictEqual([...store.requests()][0].output, 1, 'an older parser overwrote a newer row');
+
+        // A bump re-reads a file: its old rows go first, so a changed key
+        // cannot leave doubles behind.
+        store.transaction(() => {
+            store.deleteRequestsFromFile('claude-code', req().file);
+            store.upsertRequests([req({ messageId: 'msg_1b', parserVersion: 3, output: 5 })]);
+        });
+        assert.deepStrictEqual([...store.requests()].map(r => r.messageId), ['msg_1b']);
+    });
+
+    test('a checkpoint reads back as written, a 64-bit file id included', () => {
+        const store = ready(open());
+        const checkpoint: FileCheckpoint = {
+            provider: 'claude-code',
+            path: '/root/projects/p/session-a.jsonl',
+            root: '/root',
+            kind: 'main',
+            sessionId: 'session-a',
+            runId: null,
+            agentId: null,
+            projectDir: 'p',
+            dev: '16777220',
+            // Past 2^63: as a number, SQLite refused it, and anything past
+            // 2^53 could not be read back.
+            ino: '18446744073709551557',
+            size: 2048,
+            mtimeMs: 1_791_000_000_000,
+            offset: 2000,
+            tailHash: 'abc123',
+            parserVersion: 1,
+            oversizeLines: 1,
+            malformedLines: 2,
+            newestVersion: '2.1.292',
+        };
+        store.transaction(() => store.putFile(checkpoint));
+        assert.deepStrictEqual(store.getFile('claude-code', checkpoint.path), checkpoint);
+        assert.strictEqual(store.getFile('claude-code', '/elsewhere.jsonl'), undefined);
+    });
+
+    test('Clear empties the history, bumps the generation, and keeps the file', () => {
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertRequests([req()]);
+            store.putFile({
+                provider: 'claude-code', path: '/f', root: '/r', kind: 'main', sessionId: 's', runId: null, agentId: null,
+                projectDir: 'p', dev: null, ino: null, size: 1, mtimeMs: 1, offset: 1, tailHash: null, parserVersion: 1,
+                oversizeLines: 0, malformedLines: 0, newestVersion: null,
+            });
+            store.putReadGuard({ provider: 'claude-code', path: '/f', inProgress: true, crashCount: 1, lastCrash: 1 });
+        });
+        const id = store.storeId();
+        store.clear();
+        assert.strictEqual([...store.requests()].length, 0);
+        assert.strictEqual(store.getFile('claude-code', '/f'), undefined);
+        assert.strictEqual(store.getReadGuard('claude-code', '/f'), undefined);
+        assert.strictEqual(store.generation(), 1);
+        assert.strictEqual(store.storeId(), id, 'Clear made a new store rather than emptying this one');
+        assert.ok(fs.existsSync(file), 'the database file was removed');
+    });
+
+    test('Clear removes the copies set aside beside the history too, and nothing else', () => {
+        const store = ready(open());
+        // A history set aside with its journal, an older version's corrupt
+        // copy, and a migration's backup.
+        const folder = path.dirname(file);
+        const copies = [path.join(folder, 'usage-0a1b2c3d4e.sqlite'), path.join(folder, 'usage-0a1b2c3d4e.sqlite-wal'), `${file}.corrupt-1791000000000`, `${file}.bak-v0`];
+        const others = [`${file}.notes`, path.join(folder, 'other.sqlite.corrupt-1'), path.join(folder, 'usage.current'), path.join(dir, 'usage.sqlite.bak-v0')];
+        for (const f of [...copies, ...others]) {
+            // The pointer names this history.
+            fs.writeFileSync(f, f.endsWith('usage.current') ? 'usage.sqlite' : 'x');
+        }
+        assert.ok(copies.every(f => fs.existsSync(f)));
+        store.clear();
+        assert.deepStrictEqual(copies.filter(f => fs.existsSync(f)), [], 'a copy of the history was kept');
+        assert.deepStrictEqual(others.filter(f => !fs.existsSync(f)), [], 'a file that is not a copy was removed');
+        // Its own journal is not a copy: the history still works.
+        store.transaction(() => store.upsertRequests([req()]));
+        assert.strictEqual([...store.requests()].length, 1);
+    });
+
+    test('Clear never removes the history another window has just started in its place', () => {
+        const store = ready(open());
+        const folder = path.dirname(file);
+        // Started after this window found its history, before its Clear removed the copies.
+        const theirs = createHistory(folder);
+        assert.strictEqual(publishHistory(folder, theirs, resolveHistory(folder).pointer), theirs);
+        fs.writeFileSync(`${file}.bak-v0`, 'x');
+        assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 0 });
+        assert.deepStrictEqual([fs.existsSync(theirs), fs.existsSync(`${file}.bak-v0`)], [true, false]);
+    });
+
+    /** Files in the history's folder whose bytes hold `marker`. */
+    function holding(marker: string): string[] {
+        const folder = path.dirname(file);
+        return fs.readdirSync(folder).filter(name => fs.statSync(path.join(folder, name)).isFile() && fs.readFileSync(path.join(folder, name)).includes(marker));
+    }
+
+    /** `n` requests whose model id carries `marker`, as text a recovery tool would find. */
+    const marked = (marker: string, n: number) => Array.from({ length: n }, (_, i) => req({ messageId: `m${i}`, requestId: `r${i}`, model: `${marker}-${i}` }));
+
+    test('Clear leaves nothing of the history readable on disk, while the history stays open', () => {
+        // Another window's worker has it open too, idle, as a status item keeps it.
+        const store = ready(open());
+        const other = ready(open());
+        store.transaction(() => store.upsertRequests(marked('Secret-Client-0xC0FFEE', 400)));
+        assert.ok(holding('Secret-Client-0xC0FFEE').length > 0);
+        assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 0 });
+        assert.deepStrictEqual(holding('Secret-Client-0xC0FFEE'), [], 'the deleted history is still on disk');
+        assert.strictEqual([...other.requests()].length, 0);
+    });
+
+    test("a Clear another window's read holds off is finished, once that read ends, by whichever window comes next", () => {
+        const store = ready(open({ busyTimeoutMs: 50 }));
+        const reader = ready(open({ busyTimeoutMs: 50 }));
+        store.transaction(() => store.upsertRequests(marked('Secret-Client-0xBEEF', 400)));
+        reader.read(() => {
+            // The read has begun: its snapshot holds the old pages.
+            assert.strictEqual([...reader.requests()].length, 400);
+            assert.strictEqual(store.clear().settled, false);
+        });
+        // The other window's own next request: it was told nothing, the history was.
+        assert.deepStrictEqual(reader.finishClear(), { settled: true, copiesLeft: 0 });
+        assert.deepStrictEqual(holding('Secret-Client-0xBEEF'), []);
+        // Finished: nothing is left to do, in either window.
+        assert.deepStrictEqual(store.finishClear(), { settled: true, copiesLeft: 0 });
+    });
+
+    test('a copy beside the history that cannot be removed leaves the Clear done; it is counted, and removed later', () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req()]));
+        // A folder where a file was expected stands in for one held open elsewhere.
+        fs.mkdirSync(`${file}.corrupt-1/inside`, { recursive: true });
+        assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 1 });
+        assert.strictEqual([...store.requests()].length, 0);
+        assert.deepStrictEqual(store.finishClear(), { settled: true, copiesLeft: 1 }, 'tried again, and counted again');
+        // Let go of; and a copy set aside after the Clear, which is not the Clear's to remove.
+        fs.rmSync(`${file}.corrupt-1`, { recursive: true });
+        fs.writeFileSync(`${file}.corrupt-1`, 'x');
+        fs.writeFileSync(`${file}.corrupt-2`, 'y');
+        assert.deepStrictEqual(store.finishClear(), { settled: true, copiesLeft: 0 });
+        assert.deepStrictEqual([fs.existsSync(`${file}.corrupt-1`), fs.existsSync(`${file}.corrupt-2`)], [false, true]);
+        fs.writeFileSync(`${file}.corrupt-1`, 'x');
+        store.finishClear();
+        assert.ok(fs.existsSync(`${file}.corrupt-1`), 'a finished Clear went on removing files');
+    });
+
+    test('a copy an earlier build set aside by renaming it is named, the newest first, until Clear removes it', () => {
+        const store = ready(open());
+        assert.strictEqual(store.setAside(), undefined);
+        fs.writeFileSync(`${file}.corrupt-1790000000000`, 'old');
+        fs.writeFileSync(`${file}.corrupt-1791000000000`, 'older history, newer copy');
+        assert.strictEqual(store.setAside(), 'usage.sqlite.corrupt-1791000000000');
+        store.clear();
+        assert.strictEqual(store.setAside(), undefined);
+    });
+
+    test("the latest main request, and what the session shows of its window, on that model alone", () => {
+        const store = ready(open());
+        const at = (minute: number) => Date.UTC(2026, 9, 9, 10) + minute * 60_000;
+        let n = 0;
+        const sent = (model: string, minute: number, context: number, extra: Partial<UsageRequest> = {}) => {
+            n++;
+            return req({ messageId: `m${n}`, requestId: `r${n}`, byteOffset: n, model, timestamp: at(minute), input: context, ...extra });
+        };
+        const latest = () => {
+            const l = store.latestMainRequest('session-a');
+            return [l?.model, l?.variant, l?.input, l?.largestContext];
+        };
+        store.transaction(() =>
+            store.upsertRequests([
+                // Sonnet 4.6 in its larger window first, far past 200K.
+                sent('claude-sonnet-4-6', 0, 300_000, { variant: '1m' }),
+                // Then Opus 4.6: one record names [1m], the latest does not.
+                sent('claude-opus-4-6', 1, 120_000, { variant: '1m' }),
+                sent('claude-opus-4-6', 2, 90_000),
+                // A subagent's, in the main file: its own context, never the session's.
+                sent('claude-opus-4-6', 3, 400_000, { isMain: false }),
+            ]),
+        );
+        assert.deepStrictEqual(latest(), ['claude-opus-4-6', '1m', 90_000, 120_000]);
+        // Back on Sonnet, with no record naming [1m]: nothing from before Opus counts.
+        store.transaction(() => store.upsertRequests([sent('claude-sonnet-4-6', 4, 50_000)]));
+        assert.deepStrictEqual(latest(), ['claude-sonnet-4-6', null, 50_000, 50_000]);
+        // A compaction's size before, since then, is a context the window held;
+        // one while Opus ran says nothing of Sonnet's.
+        const compaction = (uuid: string, minute: number, preTokens: number) => ({ uuid, sessionId: 'session-a', kind: 'main' as const, timestamp: at(minute), trigger: 'auto', preTokens, postTokens: 1 });
+        store.transaction(() => store.insertCompactions('claude-code', [compaction('on-opus', 1.5, 500_000), compaction('since', 5, 230_000)]));
+        assert.deepStrictEqual(latest(), ['claude-sonnet-4-6', null, 50_000, 230_000]);
+    });
+
+    test('a version 1 history gains the speed and where each request ran, after a backup, and keeps every row', () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ messageId: 'kept', input: 5 })]));
+        store.close();
+        opened.length = 0;
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        // As a build before these columns left it.
+        const db = new sqlite.DatabaseSync(file);
+        db.exec('ALTER TABLE requests DROP COLUMN speed; ALTER TABLE requests DROP COLUMN inference_geo; PRAGMA user_version = 1');
+        db.close();
+
+        const migrated = ready(open());
+        assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.input, r.speed, r.inferenceGeo]), [['kept', 5, null, null]]);
+        migrated.transaction(() => migrated.upsertRequests([req({ messageId: 'new', requestId: 'req_2', speed: 'fast', inferenceGeo: 'us' })]));
+        assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.speed, r.inferenceGeo]).sort(), [['kept', null, null], ['new', 'fast', 'us']]);
+        // The backup is the history as it was.
+        const backup = new sqlite.DatabaseSync(`${file}.bak-v1`, { readOnly: true });
+        try {
+            assert.deepStrictEqual(
+                [{ ...backup.prepare('PRAGMA user_version').get() }, backup.prepare('SELECT message_id FROM requests').all().map(r => ({ ...r }))],
+                [{ user_version: 1 }, [{ message_id: 'kept' }]],
+            );
+        } finally {
+            backup.close();
+        }
+    });
+
+    test("a request's more complete record replaces its speed and where it ran with the rest of it", () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ messageId: 'm', output: 1 })]));
+        store.transaction(() => store.upsertRequests([req({ messageId: 'm', output: 50, byteOffset: 10, speed: 'fast', inferenceGeo: 'us' })]));
+        assert.deepStrictEqual([...store.requests()].map(r => [r.output, r.speed, r.inferenceGeo]), [[50, 'fast', 'us']]);
+    });
+
+    test('request sums are apart by speed, where the requests ran, and their prompt size past 100,000 and 200,000', () => {
+        const store = ready(open());
+        let n = 0;
+        const sent = (input: number, extra: Partial<UsageRequest> = {}) =>
+            req({ messageId: `m${++n}`, requestId: `r${n}`, input, cacheCreation: 0, cacheRead: 0, output: 1, ...extra });
+        store.transaction(() =>
+            store.upsertRequests([
+                // Input, cache writes and cache reads together: 100,000, 100,001, 200,000 and 200,001.
+                sent(100_000),
+                sent(60_000, { cacheRead: 40_001 }),
+                sent(200_000),
+                sent(100_000, { cacheCreation: 100_001 }),
+                sent(10, { speed: 'fast' }),
+                sent(10, { inferenceGeo: 'us' }),
+                // A counter missing: its size is unknown.
+                sent(10, { cacheRead: null }),
+            ]),
+        );
+        const sums = store.bucketSums(0).map(s => [s.promptSize, s.speed, s.inferenceGeo, s.requests]);
+        assert.deepStrictEqual(sums.sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1)), [
+            ['100k-to-200k', null, null, 2],
+            ['over-200k', null, null, 1],
+            ['up-to-100k', 'fast', null, 1],
+            ['up-to-100k', null, 'us', 1],
+            ['up-to-100k', null, null, 1],
+            [null, null, null, 1],
+        ]);
+    });
+
+    test('a read sees one snapshot, whatever another window commits during it', () => {
+        const store = ready(open());
+        const other = ready(open());
+        store.transaction(() => store.upsertRequests([req()]));
+        const seen = store.read(() => {
+            const before = [...store.requests()].length;
+            other.transaction(() => other.upsertRequests([req({ messageId: 'msg_2', requestId: 'req_2' })]));
+            return [before, [...store.requests()].length];
+        });
+        assert.deepStrictEqual(seen, [1, 1]);
+        assert.strictEqual([...store.requests()].length, 2);
+        assert.throws(() => store.read(() => { throw new Error('inside'); }), /inside/);
+        assert.strictEqual(store.read(() => [...store.requests()].length), 2, 'a failed read left its transaction open');
+    });
+
+    test('a history created by a newer version opens read-only', () => {
+        const first = ready(open());
+        first.close();
+        opened.length = 0;
+        assert.ok(sqlite);
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+        raw.close();
+
+        const result = open();
+        assert.strictEqual(result.status, 'read-only');
+        const store = result.store;
+        assert.strictEqual([...store.requests()].length, 0, 'it should still be readable');
+        assert.throws(() => store.transaction(() => store.upsertRequests([req()])), /newer LLM Tokenizer/);
+    });
+
+    test('a corrupt history opens as corrupt, and is left exactly as it is', () => {
+        // Not renamed, not rewritten: a window may still have it open, and
+        // it is the only copy of what the records on disk no longer hold.
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const bytes = Buffer.from('this is not a database, '.repeat(400));
+        fs.writeFileSync(file, bytes);
+        assert.deepStrictEqual(open(), { status: 'corrupt' });
+        assert.ok(fs.readFileSync(file).equals(bytes), 'the corrupt file was touched');
+    });
+
+    test('a rollback journal is used where WAL cannot be trusted', () => {
+        const result = open({ forceRollbackJournal: true });
+        ready(result);
+        assert.strictEqual(result.status === 'ready' && result.journal, 'delete');
+    });
+
+    test('one window holds the import lease until it goes quiet or is outdated', () => {
+        let now = 1_000_000;
+        const store = ready(open({ now: () => now }));
+
+        assert.ok(store.acquireLease('import', 'window-a', 1));
+        assert.ok(!store.acquireLease('import', 'window-b', 1), 'a fresh lease was taken over');
+        now += 1_000;
+        assert.ok(store.acquireLease('import', 'window-a', 1), 'its holder could not renew it');
+
+        now += LEASE_TAKEOVER_MS + 1;
+        assert.ok(store.acquireLease('import', 'window-b', 1), 'a stale lease was not released');
+        assert.ok(!store.acquireLease('import', 'window-a', 1));
+
+        // A window still running an older parser yields to a newer one at once.
+        assert.ok(store.acquireLease('import', 'window-c', 2));
+        assert.ok(!store.acquireLease('import', 'window-b', 1));
+
+        // Released, it is free, for that parser or a newer one: not for the older.
+        store.releaseLease('import', 'window-c');
+        assert.ok(!store.acquireLease('import', 'window-b', 1), 'an older parser took the lease back');
+        assert.ok(store.acquireLease('import', 'window-d', 2), 'a released lease stayed held');
+    });
+
+    test('a window that read an old version while another migrated skips what is already applied', () => {
+        // Two windows opening one new store both read user_version 0; the
+        // second gets the write lock after the first committed. Measured on
+        // the editors' runtimes, its CREATE TABLE then failed in 1 opening in 5.
+        ready(open()).close();
+        opened.length = 0;
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const db = new sqlite.DatabaseSync(file);
+        try {
+            // A static that uses no `this`, called as a second window would.
+            const migrate = (UsageStore as unknown as { migrate: (db: unknown, file: string, from: number) => void }).migrate;
+            assert.doesNotThrow(() => migrate(db, file, 0));
+            assert.strictEqual((db.prepare('SELECT count(*) AS n FROM meta').get() as { n: number }).n, 2, 'the second window wrote its own meta rows');
+        } finally {
+            db.close();
+        }
+    });
+
+    test("a holder's pid is judged only on its own host", () => {
+        // On a home shared over a network filesystem, another machine's pid
+        // looks dead here; its lease must stand until its heartbeat ages.
+        let now = 1_000_000;
+        const store = ready(open({ now: () => now, isAlive: () => false }));
+        assert.ok(sqlite);
+        const raw = new sqlite.DatabaseSync(file);
+        try {
+            raw.prepare('INSERT OR REPLACE INTO lease (role, holder, host, pid, parser_version, heartbeat) VALUES (?, ?, ?, ?, ?, ?)')
+                .run('import', 'remote-window', 'some-other-host', 4242, 1, now);
+        } finally {
+            raw.close();
+        }
+        assert.ok(!store.acquireLease('import', 'this-window', 1), "another host's lease was taken on a local pid check");
+        now += LEASE_TAKEOVER_MS + 1;
+        assert.ok(store.acquireLease('import', 'this-window', 1), 'a stale remote lease was never released');
+    });
+
+    test('Clear leaves no lease behind: one an import cut short left names this machine and a pid', () => {
+        const store = ready(open());
+        assert.ok(store.acquireLease('import', 'Holder-Marker-0xBEEF', 1));
+        assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 0 });
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(file);
+        try {
+            assert.deepStrictEqual({ ...raw.prepare('SELECT count(*) AS n FROM lease').get() }, { n: 0 });
+        } finally {
+            raw.close();
+        }
+        assert.deepStrictEqual(holding('Holder-Marker-0xBEEF'), [], "the lease's holder is still on disk");
+        // Another window takes it at once.
+        assert.ok(store.acquireLease('import', 'next-window', 1));
+    });
+
+    test('once a newer parser has held the lease, an older one never takes it again, Clear or not', () => {
+        let now = 1_000_000;
+        const store = ready(open({ now: () => now }));
+        assert.ok(store.acquireLease('import', 'reloaded-window', 2));
+        store.releaseLease('import', 'reloaded-window');
+        assert.ok(!store.acquireLease('import', 'old-window', 1), 'the older parser took a free lease');
+        now += LEASE_TAKEOVER_MS * 10;
+        assert.ok(!store.acquireLease('import', 'old-window', 1), 'the older parser took it once the heartbeat aged');
+        assert.deepStrictEqual([store.outdated(1), store.outdated(2)], [true, false]);
+        store.clear();
+        assert.ok(store.outdated(1), 'Clear let the older parser back in');
+    });
+
+    test('a lease whose holder has exited is taken over at once', () => {
+        // A window closed mid-import, or a test run that ended: no need to
+        // wait out the heartbeat.
+        let holderAlive = true;
+        const store = ready(open({ isAlive: () => holderAlive }));
+        assert.ok(store.acquireLease('import', 'window-a', 1));
+        assert.ok(!store.acquireLease('import', 'window-b', 1));
+        holderAlive = false;
+        assert.ok(store.acquireLease('import', 'window-b', 1), 'a dead holder kept the lease');
+    });
+});

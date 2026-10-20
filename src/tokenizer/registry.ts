@@ -20,6 +20,14 @@ export interface ModelInfo {
     encoder: EncoderSpec;
     /** Input context window in tokens. Omitted when the model has no published limit. */
     contextLimit?: number;
+    /**
+     * The window Claude Code runs the model with when its `[1m]`
+     * extended-context variant is not selected, set only where that is smaller
+     * than `contextLimit`. A session's share of its window needs it: the same
+     * id can then run with either window, and only the record's variant says
+     * which.
+     */
+    claudeCodeBaseContext?: number;
 }
 
 export { MODELS, MODEL_ALIASES, DEFAULT_MODEL_ID };
@@ -35,6 +43,18 @@ export function findModel(id: string): ModelInfo | undefined {
 
     const alias = MODEL_ALIASES[id];
     return alias ? BY_ID.get(alias) : undefined;
+}
+
+/**
+ * Look up a model by its exact id, never following an alias.
+ *
+ * For labelling what a model actually did, as opposed to choosing a tokenizer:
+ * an alias maps a retired id onto a different, live model, so following one
+ * would credit a retired model's usage to its replacement. An id the registry
+ * does not list stays unresolved, and is shown as recorded.
+ */
+export function modelById(id: string): ModelInfo | undefined {
+    return BY_ID.get(id);
 }
 
 /**

@@ -4,6 +4,117 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.2.0] - 2026-10-20
+
+### Added
+- **Claude Code usage, off by default.** How many tokens Claude Code
+  processed, read from the session records it keeps on your machine. Turn on
+  **Enable Claude Code Usage**, then run **Show Claude Code Usage**, or
+  click the LLM Tokenizer T at the top right of an editor.
+  - The panel shows today, 7 days, 30 days or the whole history, for all
+    projects or this workspace: tokens processed by category and by day,
+    models, delegated work, effort, projects, sessions, the usage limits
+    reached, and diagnostics.
+  - **Show Claude Code Usage in Status Bar** shows how full the context of
+    the session running in this workspace is, in the window Claude Code's
+    own rules give the model, the organization's managed settings included.
+  - **Export CSV** gives every count a hand-made cost calculation needs, per
+    day and model, apart by speed, where each request ran and its prompt
+    size, which the price depends on too, and no prices.
+  - Each request is counted once, from its most complete record: Claude Code
+    writes a line per streaming update, and summing them would count about
+    twice the tokens.
+  - Kept, in a database in this extension's storage: each request's token
+    counts, model, effort, speed, where it ran, time, ids and Claude Code
+    version; the folder
+    each session started in; compactions' sizes and the usage limits
+    reached; which transcripts were read and how far; and this machine's
+    name, which each import writes. Prompts, responses, thinking and tool
+    contents are never kept, and nothing is sent anywhere. **Clear Claude
+    Code Usage History** removes it, and leaves nothing of it readable on
+    disk. The README lists everything kept.
+  - Every setting is machine-scoped, so a repository's own settings cannot
+    turn it on; in a dev container, the container's settings can.
+  - A history written by a later version of LLM Tokenizer opens read-only in
+    this one.
+  - It needs the editor's `node:sqlite`, which every VS Code this version
+    supports has; an editor without it is told why nothing shows. Tested on
+    VS Code 1.141.0 on Windows, Linux and macOS, and on 1.105.0, the oldest
+    this version accepts, on Linux and macOS.
+  - **Before going back to 2.1.2:** its Clear Downloaded Tokenizers deletes
+    this extension's whole storage, and this history with it.
+
+### Changed
+- **The extension's pages show the logo's T in their tabs**, the token
+  summary as well as Claude Code usage, rather than a blank page.
+- **The model registry, checked again against each provider's documentation
+  on 2026-10-20.**
+  - Added: Gemini 4 Argon, estimated, as Google's SDK maps it to no
+    vocabulary.
+  - Gemini 3.5 Flash and 3.7 Flash are not shut down, but Google routes
+    their requests to 3.6 Flash and 3.8 Flash, so a saved choice of either
+    moves to its successor, which is estimated.
+  - MiMo V2.5 Pro and V2.5 move to V2.6 Pro and V2.6 Flash: Xiaomi has
+    routed them there since 14 October, and retires both on 21 October.
+
+  That makes 96 models across 13 providers, 61 of them counted with the
+  model's own tokenizer.
+- **Tokenizers are downloaded from one commit of their repository**, the one
+  this version names, rather than from whatever its main branch holds, and
+  each file is checked against its hash when it is downloaded and whenever
+  it is read. A change upstream no longer changes a count shown as exact,
+  and a cached file that is not the one named is not used: it is downloaded
+  again, where downloads are allowed.
+
+### Fixed
+- **The token summary's Copy and Export CSV guard spreadsheet formulas
+  alike.** Copy had no guard, so a file named `+x.ts` pasted into a
+  spreadsheet as a formula, and Export CSV looked only at a name's first
+  character, so one with a space, an invisible character or a full-width
+  sign before its `=` was exported as one. Both now look past those, read
+  compatibility forms as the plain signs, and guard a leading `"` as well.
+  The page's content security policy also forbids form posts and a base
+  URL.
+- **Clear Downloaded Tokenizers deletes only the tokenizers.** It deleted
+  the extension's whole storage directory, not just the tokenizers in it.
+- **Changing an unrelated setting rescanned the whole workspace.** Turning
+  `downloadTokenizers` on or off, for one, recounted every file. Only the
+  four settings that change a count or the display do that now, and turning
+  downloads on starts the current model's download straight away rather
+  than at the next reload.
+- **The summary page works from the keyboard.** Sorting a column and
+  opening a file took a mouse. The column headers and the file names are
+  buttons now, the sorted column tells a screen reader which way it is
+  sorted, and the context meter announces its value.
+
+### Internal
+- The bundles that ship are listed once, in `scripts/bundles.mjs`, which
+  the build, the third-party notices and the dependency audit all read. A
+  bundle added to the build alone would otherwise have shipped packages
+  that neither check saw.
+- The test host keeps away from the developer's own profile and home.
+  Every test configuration gets a user-data directory of its own, skips
+  the login shell's environment, and points `CLAUDE_CONFIG_DIR` at a
+  fixture, and the F5 entry point refuses to run if it points anywhere
+  else.
+- The suite also runs on VS Code 1.105.0, the oldest version
+  `package.json` accepts: `npm run test:floor` locally, and on Linux in CI
+  and before every release.
+- CONTRIBUTING's layout and commands cover what exists now, and its
+  changelog rule matches the dated sections this file uses.
+- `WorkerHost` takes a heap limit and a worker's `workerData`, can let a
+  worker go without being disposed, and resolves its stop once the thread
+  has ended. It gives up on a request when the worker goes silent, no
+  longer when it is slow: any message from the worker restarts every
+  request's wait. The registry records the window Claude Code gives Opus
+  4.6 and Sonnet 4.6 without their `[1m]` variant.
+- Under test, the extension keeps the usage history in a folder of its
+  own, emptied as each run starts.
+- The Claude Code usage feature is a bundle of its own, `out/usage.js`,
+  loaded only once the feature is on or one of its commands runs. Off, it
+  adds nothing measurable to activation: within 0.1 ms of the code before
+  the feature, on Node 26.3 and on VS Code 1.105 and 1.141.
+
 ## [2.1.2] - 2026-10-09
 
 ### Added

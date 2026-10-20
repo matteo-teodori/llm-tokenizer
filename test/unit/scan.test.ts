@@ -121,6 +121,38 @@ suite('gitignore handling', () => {
         assert.strictEqual(context.isIgnored(vscode.Uri.joinPath(root, 'drop.log'), false), true);
         assert.strictEqual(context.isIgnored(vscode.Uri.joinPath(root, 'keep.log'), false), false);
     });
+
+    test("a pattern with more than three '**' is not applied, and costs nothing on a deep path", async () => {
+        // This line, and one file 36 folders deep, held the extension host's
+        // thread for 16 s in ignore 7.0.8: a repository's own .gitignore.
+        const { context, root } = await contextFor(`${'**/a/'.repeat(8)}**/b\n*.log\n**/dist/**\n`);
+        const deep = vscode.Uri.joinPath(root, ...Array<string>(36).fill('a'), 'c');
+        const started = Date.now();
+        assert.strictEqual(context.isIgnored(deep, false), false);
+        assert.ok(Date.now() - started < 250, `matching took ${Date.now() - started} ms`);
+        // The lines around it still apply.
+        assert.strictEqual(context.isIgnored(vscode.Uri.joinPath(root, 'app.log'), false), true);
+        assert.strictEqual(context.isIgnored(vscode.Uri.joinPath(root, 'x', 'dist', 'y.js'), false), true);
+    });
+
+    test('an ignore file that is not a small regular file is not read', async function () {
+        const { root } = await contextFor();
+        const ignoreFile = path.join(root.fsPath, '.gitignore');
+        const create = () => FolderContext.create({ uri: root, name: 'fixture', index: 0 }, true);
+        // Larger than any real one.
+        await fs.writeFile(ignoreFile, `*.log\n${'# padding\n'.repeat(120_000)}`);
+        assert.strictEqual((await create()).isIgnored(vscode.Uri.joinPath(root, 'app.log'), false), false);
+        if (process.platform === 'win32') {
+            return;
+        }
+        // A link to /dev/zero, as a repository can check one out: read whole, it filled 2 GiB.
+        await fs.rm(ignoreFile);
+        await fs.symlink('/dev/zero', ignoreFile);
+        const started = Date.now();
+        const context = await create();
+        assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
+        assert.strictEqual(context.isIgnored(vscode.Uri.joinPath(root, 'app.log'), false), false);
+    });
 });
 
 suite('file eligibility', () => {

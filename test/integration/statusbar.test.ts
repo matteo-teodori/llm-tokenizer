@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 
-import { StatusBarManager } from '../../src/statusbar';
+import { StatusBarManager, applyStatusColour, contextStatus } from '../../src/statusbar';
 import { findModel } from '../../src/tokenizer/registry';
 import type { ModelInfo } from '../../src/tokenizer/registry';
 
@@ -250,5 +250,33 @@ suite('status bar visibility', () => {
             manager.applyDisplayMode(true);
             assert.strictEqual(visibility()[0], false, `mode ${mode} showed a stale file count`);
         }
+    });
+});
+
+suite('context colouring, as exported', () => {
+    // Exported for the other status items that show a count against a limit,
+    // so its thresholds and its colours are pinned here as well as through
+    // the manager.
+    test('the thresholds sit at 80% and 100% of the limit', () => {
+        const turbo = model('gpt-4-turbo'); // 128,000 tokens
+        assert.strictEqual(contextStatus(102_399, turbo), 'ok');
+        assert.strictEqual(contextStatus(102_400, turbo), 'warning');
+        assert.strictEqual(contextStatus(127_999, turbo), 'warning');
+        assert.strictEqual(contextStatus(128_000, turbo), 'error');
+        assert.strictEqual(contextStatus(10_000_000, { ...turbo, contextLimit: undefined }), 'ok');
+    });
+
+    test('a status sets the background, and clearing it leaves nothing behind', () => {
+        const item = { color: 'red', backgroundColor: undefined } as unknown as vscode.StatusBarItem;
+
+        applyStatusColour(item, 'error');
+        assert.strictEqual(colourId(item.backgroundColor), 'statusBarItem.errorBackground');
+        assert.strictEqual(item.color, undefined, 'a foreground colour was left on the item');
+
+        applyStatusColour(item, 'warning');
+        assert.strictEqual(colourId(item.backgroundColor), 'statusBarItem.warningBackground');
+
+        applyStatusColour(item, 'ok');
+        assert.strictEqual(item.backgroundColor, undefined);
     });
 });

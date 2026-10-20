@@ -25,7 +25,7 @@ import * as path from 'path';
 export type EncoderKind = 'tiktoken' | 'hf' | 'tiktokenModel' | 'heuristic';
 
 /**
- * tiktoken encodings we ship. Must stay in sync with `ENCODINGS` in build.mjs.
+ * tiktoken encodings we ship. Must stay in sync with `ENCODINGS` in scripts/bundles.mjs.
  *
  * `p50k_base` and `r50k_base` are deliberately absent: no model in the registry
  * uses them and they cost ~400 KB gzipped in the VSIX.
@@ -41,6 +41,9 @@ export interface HfSpec {
     kind: 'hf';
     /** Hugging Face repo holding a downloadable `tokenizer.json`. Must be ungated. */
     repo: string;
+    /** The commit it is read at, and its file's hash: see `PinnedSource`. */
+    revision: string;
+    keptSha256: string;
     /**
      * Fallback used until the tokenizer has been downloaded, or if the download
      * fails. Keeps the extension useful offline instead of showing nothing.
@@ -57,8 +60,21 @@ export interface TiktokenModelSpec {
     kind: 'tiktokenModel';
     /** Hugging Face repo holding a downloadable `tiktoken.model`. Must be ungated. */
     repo: string;
+    revision: string;
+    keptSha256: string;
     fallback: HeuristicSpec;
 }
+
+/**
+ * Where a downloaded vocabulary comes from: a repo at one commit, never at
+ * whatever its main branch holds now, so a change upstream never changes a
+ * count until the registry moves to it. `keptSha256` is the SHA-256 of the
+ * file as the store keeps it, and is checked on every download and every
+ * read: tokenizer.json as `JSON.stringify` writes it out again once parsed,
+ * which is not the published file's own hash, and tiktoken.model as it is.
+ * `scripts/pin-tokenizers.mjs` works out both for a registry refresh.
+ */
+export type PinnedSource = Pick<HfSpec, 'repo' | 'revision' | 'keptSha256'>;
 
 export interface HeuristicSpec {
     kind: 'heuristic';

@@ -19,7 +19,8 @@
  * This gates on the shipped closure and reports the rest without failing.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { bundledPackages, dependencyClosure } from './bundled-packages.mjs';
 
 const root = new URL('..', import.meta.url);
@@ -30,8 +31,9 @@ const shipped = dependencyClosure(root, await bundledPackages(root));
 // not the signal here — the report is.
 let report;
 try {
-    report = execFileSync('npm', ['audit', '--json'], {
-        cwd: new URL('.', root).pathname,
+    // Through a shell: on Windows npm is npm.cmd, which nothing else starts.
+    report = execSync('npm audit --json', {
+        cwd: fileURLToPath(root),
         encoding: 'utf8',
         maxBuffer: 32 * 1024 * 1024,
         stdio: ['ignore', 'pipe', 'ignore'],

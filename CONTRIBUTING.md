@@ -18,16 +18,39 @@ than a real repository.
 ## Layout
 
 ```
-src/            extension source, bundled by esbuild into out/
-  tokenizer/    the tokenizer engine: registry, encoders, worker protocol
-  scan.ts       workspace traversal, gitignore handling, file eligibility
-  extension.ts  activation, commands, event wiring
+src/              extension source, bundled by esbuild into out/
+  extension.ts    activation, commands, event wiring
+  tokenizer/      the tokenizer engine: registry, encoders, store, worker protocol
+  worker.ts       the tokenizer worker thread
+  workerHost.ts   starting a worker, correlating its requests, surviving its crashes
+  scan.ts         workspace traversal, gitignore handling, file eligibility
+  countCache.ts   per-file counts, keyed on model and file version
+  statusbar.ts    the file and project items, and their context-limit colouring
+  webview.ts      the summary panel and the messages it handles
+  summary/        the summary page: aggregation, languages, rendering
+  html.ts         escaping, the webview CSP, and the text helpers a page script runs
+  charts.ts       the theme tokens, meter and ranked bars the pages share
+  logo.ts         the logo's T, as the pages' tab icon
+  usage/          Claude Code usage: finding and reading its records, the history
+                  store, the rollups and reports, the panel and the status item.
+                  onDemand.ts and settings.ts are in out/extension.js; the
+                  service, the panel and the status item are bundled apart, into
+                  out/usage.js, which onDemand.ts loads only once the feature is
+                  on or one of its commands runs; what reads the records and the
+                  history is in out/usageWorker.js
+  usageWorker.ts  the usage worker: the one thread that reads Claude Code's records
+                  or touches the history
 test/
-  unit/         logic that does not need a real workspace
-  integration/  drives the extension host and the bundled worker
-  fixtures/     a deliberately awkward workspace the tests assert against
-scripts/        build-time tooling
-build.mjs       the bundler
+  unit/           logic that does not need a real workspace
+  integration/    drives the extension host and the bundled worker
+  fixtures/       a deliberately awkward workspace the tests assert against, the
+                  crashing workers, and a stand-in for ~/.claude whose totals are
+                  worked out by hand in its README
+scripts/          build-time tooling; bundles.mjs lists the bundles that ship
+  logo-icons.mjs  makes media/logo-*.png from icon.png; run it whenever icon.png changes
+  pin-tokenizers.mjs  checks the commit and hash every downloaded vocabulary is pinned to
+media/            the logo's T at 64 px, for dark themes and for light ones
+build.mjs         the bundler
 ```
 
 `out/` holds the shipped bundles. `.test-out/` holds compiled tests and is never
@@ -41,9 +64,21 @@ packaged.
 | `npm run watch` | Rebuild on change |
 | `npm run check-types` | Type-check without emitting |
 | `npm run lint` | ESLint, type-aware |
-| `npm test` | Compile the tests and run them in VS Code |
+| `npm test` | Compile the tests and run them in the current VS Code |
+| `npm run test:floor` | The same suite on VS Code 1.105.0, the oldest `package.json` accepts |
 | `npm run sync-manifest` | Regenerate the settings dropdown from the registry |
-| `npm run package` | Everything a release needs, without publishing |
+| `npm run notices` | Regenerate `THIRD-PARTY-NOTICES.md` from the packages the bundles inline |
+| `npm run audit-bundled` | Audit only the packages the bundles inline, which is what ships |
+| `node scripts/logo-icons.mjs` | Make the T icons in `media/` again from `icon.png` |
+| `node scripts/pin-tokenizers.mjs` | After `npm run compile`: check every vocabulary's pin against Hugging Face, and say where each repo's main has moved |
+| `npm run package` | Type-check, production build, and the manifest and notices checks |
+| `npm run release` | `package`, then the VSIX itself; nothing is published |
+
+To debug a test, use the **Extension Tests** launch configuration. Like
+`npm test`, it runs in a profile of its own, without the login shell's
+environment, and with `CLAUDE_CONFIG_DIR` pointed at a fixture; its entry
+point refuses to run if that points anywhere else, so no test can read your own
+Claude Code data.
 
 ## Adding or changing a model
 
@@ -67,7 +102,10 @@ For the encoder:
   Meta's Llama repositories (`meta-llama/`) and Google's Gemma 3 ones return
   401 without an account, so the registry points at ungated mirrors for those.
   Models may share a repo only when their `tokenizer.json` files are
-  byte-identical: compare sha256 hashes, never sizes. An API model that
+  byte-identical: compare sha256 hashes, never sizes. Pin the repo to the
+  commit you checked, with its `revision` and `keptSha256`:
+  `node scripts/pin-tokenizers.mjs` prints both for wherever main is now. An
+  API model that
   publishes no tokenizer of its own may use an open checkpoint's repo only when
   the provider says first-hand that it is, or is based on, that checkpoint:
   Qwen's "official version based on", Zhipu documenting FlashX under Flash's
@@ -86,8 +124,11 @@ provider's billing are worse than no counts.
 
 - Keep the change focused; separate mechanical refactors from behaviour changes.
 - Add a test that fails without your fix.
-- Run `npm run lint && npm test` before pushing.
-- Add a `CHANGELOG.md` entry under `## [Unreleased]`. Leave `version` in
-  `package.json` alone — releases set it.
+- Run `npm run lint && npm test` before pushing; CI also runs
+  `npm run test:floor`.
+- Add a `CHANGELOG.md` entry under the release in progress: a dated section,
+  `## [x.y.z] - YYYY-MM-DD`, opened by the first change that needs an entry,
+  whose date is set again when it is tagged. Leave `version` in `package.json`
+  alone — releases set it.
 
 Commit messages explain *why*, not what. The diff already says what.

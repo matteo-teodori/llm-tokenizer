@@ -1,8 +1,9 @@
 name: Release
 
-# Publishes on a version tag. Package once and publish that exact artifact to
-# both registries — building twice risks shipping two different bundles under
-# one version number.
+# Publishes on a version tag. All of CI runs on the tagged commit first, on
+# the three systems and the engines floor, and the VSIX its package job built
+# is the one published to both registries: building twice risks shipping two
+# different bundles under one version number.
 on:
   push:
     tags: ['v*']
@@ -14,29 +15,18 @@ on:
         default: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  # First, and cheap: a tag that does not match package.json fails here, not
+  # after every test has run.
+  tag:
+    name: Tag matches package.json
     runs-on: ubuntu-latest
-    environment: marketplace
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
         with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-
-      - name: Verify
-        run: |
-          npm run check-types
-          npm run lint
-          npm run sync-manifest -- --check
-          node scripts/third-party-notices.mjs --check
-      - name: Test
-        run: xvfb-run -a npm test
-
+          persist-credentials: false
       - name: Check the tag matches package.json
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -47,14 +37,38 @@ jobs:
             exit 1
           fi
 
-      - name: Package
-        id: package
-        run: npx @vscode/vsce package --no-dependencies --out llm-tokenizer.vsix
+  ci:
+    name: CI
+    needs: tag
+    uses: ./.github/workflows/ci.yml
 
-      - uses: actions/upload-artifact@v4
+  publish:
+    name: Publish
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    runs-on: ubuntu-latest
+    environment: marketplace
+    permissions:
+      # The GitHub release.
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      # The publishing tools, at the versions the lockfile pins. No package's
+      # install script runs in the job that holds the tokens, and nothing is
+      # built or tested here: that was CI's.
+      - run: npm ci --ignore-scripts
+
+      - name: Download the VSIX CI built
+        id: download
+        uses: actions/download-artifact@v4
         with:
           name: vsix
-          path: llm-tokenizer.vsix
 
       # The three steps below are deliberately independent of each other's
       # outcome. A step whose `if` contains no status function is implicitly
@@ -62,23 +76,28 @@ jobs:
       # skipped the other and the GitHub release — and re-running the job could
       # not recover, because the registry that had succeeded now rejected the
       # duplicate version and failed the job again before reaching the rest.
-      # `!cancelled()` lifts that gate; `steps.package.outcome` keeps it honest,
-      # so a failed verify, test or package still never reaches a publish. Both
-      # publishes take --skip-duplicate, which makes a re-run idempotent.
+      # `!cancelled()` lifts that gate; `steps.download.outcome` keeps it
+      # honest, so a failed download never reaches a publish. Both publishes
+      # take --skip-duplicate, which makes a re-run idempotent.
+      # VSCE_PAT is an Azure DevOps token for all organizations, a kind Azure
+      # DevOps stops honouring on 2026-12-01 (code.visualstudio.com, Publishing
+      # Extensions). Before then, publish with Microsoft Entra ID instead:
+      # azure/login with a federated credential, then
+      # `vsce publish --azure-credential`, which vsce 2.26.1 and later take.
       - name: Publish to the VS Code Marketplace
-        if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && steps.package.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.download.outcome == 'success' }}
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx @vscode/vsce publish --no-dependencies --skip-duplicate --packagePath llm-tokenizer.vsix
+        run: ./node_modules/.bin/vsce publish --no-dependencies --skip-duplicate --packagePath llm-tokenizer.vsix
 
       - name: Publish to Open VSX
-        if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && steps.package.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.download.outcome == 'success' }}
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        run: npx ovsx publish --skip-duplicate llm-tokenizer.vsix
+        run: ./node_modules/.bin/ovsx publish --skip-duplicate llm-tokenizer.vsix
 
       - name: Create the GitHub release
-        if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && steps.package.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.download.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" llm-tokenizer.vsix --generate-notes --verify-tag || gh release upload "$GITHUB_REF_NAME" llm-tokenizer.vsix --clobber
+        run: gh release create "$GITHUB_REF_NAME" llm-tokenizer.vsix --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag || gh release upload "$GITHUB_REF_NAME" llm-tokenizer.vsix --repo "$GITHUB_REPOSITORY" --clobber

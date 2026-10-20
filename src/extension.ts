@@ -13,6 +13,7 @@ import {
     DEBOUNCE_DELAY_MS,
     PROJECT_UPDATE_DELAY_MS,
     PROJECT_SCAN_MAX_DELAY_MS,
+    MAX_TOKENIZED_FILE_BYTES,
 } from './constants';
 import {
     FolderContext,
@@ -28,6 +29,8 @@ import {
 } from './scan';
 import { accuracyOf, isDownloadable } from './tokenizer/encoders';
 import { CountCache, isBinaryOutcome } from './countCache';
+import { registerClaudeCodeUsage } from './usage/onDemand';
+import { affectsUsage } from './usage/settings';
 import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 
 const CONFIG_SECTION = 'llm-tokenizer';
@@ -37,6 +40,8 @@ const CONFIG_SECTION = 'llm-tokenizer';
 // ═══════════════════════════════════════════════════════════════
 
 let log: vscode.LogOutputChannel;
+/** The extension's own folder: where its pages' tab icon is. */
+let extensionUri: vscode.Uri;
 let tokenizer: TokenizerService;
 let statusBar: StatusBarManager;
 let currentModel: ModelInfo;
@@ -96,6 +101,7 @@ function invalidateCounts(): void {
 export function activate(context: vscode.ExtensionContext): void {
     log = vscode.window.createOutputChannel('LLM Tokenizer', { log: true });
     context.subscriptions.push(log);
+    extensionUri = context.extensionUri;
 
     const store = new TokenizerStore(context.globalStorageUri);
     tokenizer = new TokenizerService(path.join(context.extensionPath, 'out', 'worker.js'), store, log);
@@ -109,7 +115,9 @@ export function activate(context: vscode.ExtensionContext): void {
     registerEventListeners(context);
 
     void refreshFileStatusBar(vscode.window.activeTextEditor);
-    void refreshProjectCount();
+    const startupScan = refreshProjectCount();
+    // Off, this registers its three commands and a settings listener, nothing more.
+    registerClaudeCodeUsage(context, log, startupScan);
 
     // If the startup model needs a tokenizer and the user has opted into
     // downloads, fetch it now rather than leaving them on an estimate until
@@ -298,6 +306,18 @@ function buildModelPickerItems(): ModelQuickPickItem[] {
 }
 
 /**
+ * Whether a tokenizer may be downloaded. The one network access the README
+ * promises can be turned off: a workspace may turn it off for itself, never
+ * on, so a repository's own .vscode/settings.json cannot make the extension
+ * contact huggingface.co for a person who said no, Restricted Mode or not.
+ */
+export function downloadsAllowed(configuration: Pick<vscode.WorkspaceConfiguration, 'inspect'>): boolean {
+    const value = configuration.inspect<boolean>('downloadTokenizers');
+    const own = value?.globalValue ?? value?.defaultValue ?? true;
+    return own && value?.workspaceValue !== false && value?.workspaceFolderValue !== false;
+}
+
+/**
  * Download the model's real tokenizer so counts become exact.
  *
  * @param interactive whether to prompt and show progress, or fail silently.
@@ -325,7 +345,7 @@ async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Pro
         return;
     }
 
-    if (!vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('downloadTokenizers', true)) {
+    if (!downloadsAllowed(vscode.workspace.getConfiguration(CONFIG_SECTION))) {
         if (interactive) {
             void vscode.window.showWarningMessage(
                 'Tokenizer downloads are turned off. Enable llm-tokenizer.downloadTokenizers to get exact counts.',
@@ -393,6 +413,28 @@ async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Pro
 // Event listeners
 // ═══════════════════════════════════════════════════════════════
 
+/** The settings whose change can alter what is counted, or what is shown. */
+const RESCAN_SETTINGS = ['ignoreGitignoredFiles', 'defaultModel', 'statusBarDisplay', 'enableProjectScan'];
+
+/**
+ * What a settings change calls for.
+ *
+ * Every `llm-tokenizer.*` change used to re-derive the status bar and rescan
+ * the whole workspace, a toggle of `downloadTokenizers` included, which
+ * changes neither. That one instead starts the download that activation
+ * would have, so turning downloads on no longer waits for a reload.
+ */
+export function settingsChangeEffects(
+    event: Pick<vscode.ConfigurationChangeEvent, 'affectsConfiguration'>,
+): { rescan: boolean; download: boolean; usage: boolean } {
+    return {
+        rescan: RESCAN_SETTINGS.some(key => event.affectsConfiguration(`${CONFIG_SECTION}.${key}`)),
+        download: event.affectsConfiguration(`${CONFIG_SECTION}.downloadTokenizers`),
+        // Handled by the usage service's own listener.
+        usage: affectsUsage(event),
+    };
+}
+
 function registerEventListeners(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => debounceStatusBar(editor)),
@@ -456,7 +498,14 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
         // mode or the gitignore setting did nothing until some unrelated event
         // happened to fire.
         vscode.workspace.onDidChangeConfiguration(e => {
-            if (!e.affectsConfiguration(CONFIG_SECTION)) {
+            const effects = settingsChangeEffects(e);
+            // ensureExactTokenizer reads the setting itself, so turning
+            // downloads off here does nothing, as it should: what is on disk
+            // stays usable.
+            if (effects.download) {
+                void ensureExactTokenizer(currentModel, false);
+            }
+            if (!effects.rescan) {
                 return;
             }
 
@@ -672,6 +721,14 @@ async function countFile(
 ): Promise<FileOutcome> {
     try {
         const stat = await vscode.workspace.fs.stat(uri);
+        // A regular file, or a link to one: a device or a FIFO reports size 0
+        // and would be read without end.
+        if (!(stat.type & vscode.FileType.File)) {
+            return { skip: 'unreadable' };
+        }
+        if (stat.size > MAX_TOKENIZED_FILE_BYTES) {
+            return { skip: 'too-large' };
+        }
         const cached = countCache.get(model.id, uri, stat.mtime);
         if (cached) {
             return isBinaryOutcome(cached) ? { skip: 'binary' } : cached;
@@ -941,7 +998,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                 modelLabel: model.label,
                 exact: result.exact,
                 contextStatus: contextStatus(result.total, model),
-            });
+            }, extensionUri);
         },
     );
 }

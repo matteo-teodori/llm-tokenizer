@@ -1,9 +1,9 @@
 /**
- * HTML escaping for the summary webview.
+ * HTML escaping for the extension's webview pages.
  *
- * Everything the webview renders — file names, folder names, skip reasons — is
+ * Everything a page renders — file names, folder names, skip reasons — is
  * workspace-controlled. On macOS and Linux a file may legitimately be named
- * `<img src=x onerror=alert(1)>.ts`, and the webview runs with `enableScripts`
+ * `<img src=x onerror=alert(1)>.ts`, and the webviews run with `enableScripts`
  * enabled, so unescaped interpolation is script execution inside the extension's
  * own webview context.
  */
@@ -44,5 +44,65 @@ export function contentSecurityPolicy(nonce: string): string {
         "default-src 'none'",
         "style-src 'unsafe-inline'",
         `script-src 'nonce-${nonce}'`,
+        // Not covered by default-src: no form posts anywhere, no base URL.
+        "form-action 'none'",
+        "base-uri 'none'",
     ].join('; ');
 }
+
+/**
+ * Embed data for a page's own script.
+ *
+ * `</script>` inside a string would end the block early, and U+2028/9 are line
+ * terminators in JavaScript but legal inside JSON strings.
+ */
+export function embed(value: unknown): string {
+    return JSON.stringify(value)
+        .replace(/</g, '\\u003c')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
+}
+
+/**
+ * Text helpers for a page's own script, as source to paste into it. A page
+ * that builds rows from embedded data escapes its own text, and its exports
+ * must not let a file name act as a separator or a formula.
+ *
+ * - `escapeText(s)` escapes as `escapeHtml` does, for `innerHTML`.
+ * - `cell(value)` turns control characters, tabs and line breaks among them,
+ *   into a space. A path is whatever the file system allowed, which on Unix
+ *   includes tabs and newlines; left in, one such name shifts every following
+ *   column or splits the row in two.
+ * - `csv(value)` quotes a CSV field. Quoting alone does not stop a spreadsheet
+ *   treating a cell as a formula: a file named `=cmd|'/c calc'!A1.ts` is
+ *   executable content once the export is opened, so a leading `= + - @` gets
+ *   an apostrophe, which forces it to text.
+ * - `pasteCell(value)` is `cell` with the same guard, for Copy: pasted into a
+ *   spreadsheet, a tab-separated cell is read as a formula just the same.
+ *   The guard looks past whatever a spreadsheet may pass over or draw as
+ *   nothing before the sign: spaces, format characters such as direction
+ *   marks, combining marks, and the letters that are blank. It reads the
+ *   signs in their compatibility forms too, full-width, small or raised, and
+ *   the minus sign, and takes a leading `"`, which a paste reads as the start
+ *   of a quoted cell whose contents are then a formula.
+ */
+export const PAGE_TEXT_HELPERS = `
+    function escapeText(s) {
+        return s.replace(/[&<>"']/g, c =>
+            ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function cell(value) {
+        return String(value).replace(/\\p{Cc}+/gu, ' ');
+    }
+
+    function csv(value) {
+        return '"' + pasteCell(value).replace(/"/g, '""') + '"';
+    }
+
+    function pasteCell(value) {
+        const text = cell(value);
+        const lead = text.normalize('NFKC').replace(/^[\\s\\p{Z}\\p{Cc}\\p{Cf}\\p{M}\\u115f\\u1160\\u3164\\uffa0\\u2800]+/u, '');
+        return /^["=+\\-@\\u2212]/.test(lead) ? "'" + text : text;
+    }
+`;

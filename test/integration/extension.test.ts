@@ -1,8 +1,13 @@
 import * as assert from 'assert';
+import { execFileSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { logoIcon } from '../../src/logo';
 import { showMultiFileSummary, type MultiFileSummaryConfig } from '../../src/webview';
-import { resolveInitialModel } from '../../src/extension';
+import { downloadsAllowed, resolveInitialModel, settingsChangeEffects } from '../../src/extension';
 import { STORAGE_KEY } from '../../src/constants';
 import { MODEL_ALIASES } from '../../src/tokenizer/registry';
 
@@ -31,6 +36,21 @@ suite('extension', () => {
 
     test('activates', () => {
         assert.strictEqual(vscode.extensions.getExtension(EXTENSION_ID)?.isActive, true);
+    });
+
+    test('the test host reads a stand-in Claude Code config, never the real one', () => {
+        // .vscode-test.mjs points CLAUDE_CONFIG_DIR at a fixture, and passes
+        // --force-disable-user-env so the login shell's environment cannot
+        // override it. Without both, a test could read ~/.claude.
+        const fixtures = path.resolve(__dirname, '..', '..', '..', 'test', 'fixtures');
+        const configDir = process.env.CLAUDE_CONFIG_DIR;
+        // Windows names one folder in either case, its drive letter included:
+        // the runner writes D:, and the extension host's own paths say d:.
+        const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
+        assert.ok(
+            configDir && fold(path.resolve(configDir)).startsWith(fold(fixtures + path.sep)),
+            `CLAUDE_CONFIG_DIR is ${configDir ?? 'unset'}, not inside ${fixtures}`,
+        );
     });
 
     test('a legacy id in the setting does not fabricate a stored choice', async () => {
@@ -114,6 +134,63 @@ suite('extension', () => {
         assert.ok(notices[0].includes(`"${replaced[0]}" is no longer available`), notices[0]);
     });
 
+    test('only a setting that changes a count or the display rescans the workspace', () => {
+        // Every llm-tokenizer.* change rescanned the whole workspace, a toggle
+        // of downloadTokenizers included, which changes neither; turning it on
+        // instead waited for a reload to start the download.
+        const changed = (...keys: string[]) => ({
+            affectsConfiguration: (section: string) =>
+                keys.some(key => key === section || key.startsWith(`${section}.`)),
+        });
+
+        assert.deepStrictEqual(settingsChangeEffects(changed(`${CONFIG}.downloadTokenizers`)), {
+            rescan: false,
+            download: true,
+            usage: false,
+        });
+        for (const key of ['ignoreGitignoredFiles', 'defaultModel', 'statusBarDisplay', 'enableProjectScan']) {
+            assert.deepStrictEqual(
+                settingsChangeEffects(changed(`${CONFIG}.${key}`)),
+                { rescan: true, download: false, usage: false },
+                key,
+            );
+        }
+        // Claude Code usage reads no workspace file, so it never rescans.
+        for (const key of ['llm-tokenizer.enableClaudeCodeUsage', 'llm-tokenizer.claudeCodeDataDirectory', 'claudeCode.environmentVariables']) {
+            assert.deepStrictEqual(settingsChangeEffects(changed(key)), { rescan: false, download: false, usage: true }, key);
+        }
+        assert.deepStrictEqual(settingsChangeEffects(changed('editor.fontSize')), {
+            rescan: false,
+            download: false,
+            usage: false,
+        });
+
+        // A setting added later must be given an effect here too, or changing
+        // it would do nothing until the window reloads.
+        const manifest = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON as {
+            contributes: { configuration: { properties: Record<string, unknown> } };
+        };
+        for (const key of Object.keys(manifest.contributes.configuration.properties)) {
+            const effects = settingsChangeEffects(changed(key));
+            assert.ok(effects.rescan || effects.download || effects.usage, `changing ${key} has no effect`);
+        }
+    });
+
+    test("a workspace can turn tokenizer downloads off for itself, never on against the person's own setting", () => {
+        // A repository's .vscode/settings.json set to true made the extension
+        // contact huggingface.co for someone who had turned downloads off,
+        // in Restricted Mode too.
+        const at = (value: { globalValue?: boolean; workspaceValue?: boolean; workspaceFolderValue?: boolean }) =>
+            downloadsAllowed({ inspect: <T>() => ({ key: 'downloadTokenizers', defaultValue: true as T, ...value }) as never });
+        assert.strictEqual(at({}), true);
+        assert.strictEqual(at({ globalValue: false }), false);
+        assert.strictEqual(at({ globalValue: false, workspaceValue: true }), false);
+        assert.strictEqual(at({ globalValue: false, workspaceFolderValue: true }), false);
+        assert.strictEqual(at({ workspaceValue: false }), false);
+        assert.strictEqual(at({ globalValue: true, workspaceFolderValue: false }), false);
+        assert.strictEqual(at({ globalValue: true, workspaceValue: true }), true);
+    });
+
     test('repeated summaries reuse one panel instead of stacking up', () => {
         // Every run used to create its own panel. Ten counts left ten tabs, each
         // created with retainContextWhenHidden and each holding its rendered
@@ -130,11 +207,15 @@ suite('extension', () => {
             contextStatus: { percentage: 0, status: 'ok', limit: 922_000 },
         });
 
-        const first = showMultiFileSummary(summary(1));
+        const extensionUri = vscode.extensions.getExtension(EXTENSION_ID)?.extensionUri;
+        assert.ok(extensionUri);
+        const first = showMultiFileSummary(summary(1), extensionUri);
         try {
+            // Its tab shows the logo's T, as every page of the extension does.
+            assert.deepStrictEqual(first.iconPath, logoIcon(extensionUri));
             for (let i = 2; i <= 5; i++) {
                 assert.strictEqual(
-                    showMultiFileSummary(summary(i)),
+                    showMultiFileSummary(summary(i), extensionUri),
                     first,
                     `run ${i} created a second panel`,
                 );
@@ -145,7 +226,7 @@ suite('extension', () => {
 
         // Closing it releases the reference, so the next run opens a fresh one
         // rather than reviving a disposed panel.
-        const reopened = showMultiFileSummary(summary(6));
+        const reopened = showMultiFileSummary(summary(6), extensionUri);
         try {
             assert.notStrictEqual(reopened, first, 'a disposed panel was reused');
         } finally {
@@ -168,6 +249,43 @@ suite('extension', () => {
         for (const command of contributed) {
             assert.ok(registered.has(command), `${command} is contributed but not registered`);
         }
+    });
+
+    test('every menu names a contributed command, and every command icon is a file that ships', () => {
+        const extension = vscode.extensions.getExtension(EXTENSION_ID);
+        assert.ok(extension);
+        const manifest = extension.packageJSON as {
+            contributes: {
+                commands: { command: string; icon?: string | { light: string; dark: string } }[];
+                menus: Record<string, { command: string; when?: string; group?: string }[]>;
+            };
+        };
+        const contributed = new Set(manifest.contributes.commands.map(c => c.command));
+        for (const [menu, items] of Object.entries(manifest.contributes.menus)) {
+            for (const item of items) {
+                assert.ok(contributed.has(item.command), `${menu} names ${item.command}, which is not contributed`);
+            }
+        }
+        // A missing file is an empty button. .vscodeignore lets media/*.png into the VSIX.
+        // A Windows checkout ends its lines with CRLF.
+        const shipped = fs.readFileSync(path.join(extension.extensionPath, '.vscodeignore'), 'utf8').split(/\r?\n/).includes('!media/*.png');
+        const files = (icon: string | { light: string; dark: string } | undefined) => (icon === undefined ? [] : typeof icon === 'string' ? [icon] : [icon.light, icon.dark]);
+        for (const { command, icon } of manifest.contributes.commands) {
+            for (const file of files(icon)) {
+                assert.ok(fs.existsSync(path.join(extension.extensionPath, file)), `${command}'s icon ${file} does not exist`);
+                assert.ok(shipped && /^media\/[^/]+\.png$/.test(file), `${command}'s icon ${file} is not one the VSIX ships`);
+            }
+        }
+        // The usage panel is one click from any editor's title, the panel's
+        // own included, while the feature is on: off, the button would be
+        // there for everyone, and say only that it is off.
+        const title = manifest.contributes.menus['editor/title']?.find(item => item.command === 'llm-tokenizer.showClaudeCodeUsage');
+        assert.ok(title?.group?.startsWith('navigation'), 'Show Claude Code Usage is not a button in the editor title');
+        assert.strictEqual(title?.when, 'config.llm-tokenizer.enableClaudeCodeUsage', 'the button shows while the feature is off, or hides somewhere while it is on');
+        // The button and the tabs are one icon: the logo's T.
+        const show = manifest.contributes.commands.find(c => c.command === 'llm-tokenizer.showClaudeCodeUsage');
+        const tab = logoIcon(extension.extensionUri);
+        assert.deepStrictEqual(files(show?.icon).map(file => vscode.Uri.joinPath(extension.extensionUri, file).toString()), [tab.light.toString(), tab.dark.toString()]);
     });
 
     test('every contributed setting is readable with its declared type', () => {
@@ -340,6 +458,29 @@ suite('extension', () => {
         // is asserted in the walk test below.
         await vscode.commands.executeCommand('llm-tokenizer.countTokens', file);
         await vscode.commands.executeCommand('llm-tokenizer.countTokens', folder.uri);
+    });
+
+    test('a FIFO handed to Count Tokens is refused at once, never read', async function () {
+        if (process.platform === 'win32') {
+            this.skip();
+        }
+        // Its size is 0, so it passed the size check, and the read never ended.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-fifo-'));
+        const fifo = path.join(dir, 'pipe.ts');
+        execFileSync('mkfifo', [fifo]);
+        const window = vscode.window as unknown as { showWarningMessage: unknown };
+        const original = window.showWarningMessage;
+        const warnings: string[] = [];
+        window.showWarningMessage = (message: string) => (warnings.push(message), Promise.resolve(undefined));
+        try {
+            const count = vscode.commands.executeCommand('llm-tokenizer.countTokens', vscode.Uri.file(fifo));
+            const outcome = await Promise.race([count.then(() => 'done'), new Promise(resolve => setTimeout(() => resolve('still reading'), 5_000))]);
+            assert.strictEqual(outcome, 'done');
+            assert.ok(warnings.some(w => w.includes('pipe.ts was not counted')), warnings.join(' | '));
+        } finally {
+            window.showWarningMessage = original;
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     test('discovery over the fixture workspace finds exactly the right files', async () => {

@@ -1,9 +1,19 @@
 name: CI
 
 on:
+  # Every branch: a branch is tried on all three systems before it reaches
+  # main, with a pull request or without one.
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
+  # Again by hand, from the Actions tab.
+  workflow_dispatch:
+  # The release runs all of this on the tagged commit before it publishes.
+  workflow_call:
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -18,6 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -65,6 +77,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -72,20 +86,51 @@ jobs:
       - run: npm ci
 
       # Extension tests drive a real VS Code instance, which needs a display
-      # server on Linux.
+      # server on Linux. The output is kept, so that a failure can be named.
       - name: Test (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a npm test
+        shell: bash
+        run: xvfb-run -a npm test 2>&1 | tee test-output.log
       - name: Test
         if: runner.os != 'Linux'
-        run: npm test
+        shell: bash
+        run: npm test 2>&1 | tee test-output.log
+      # Anyone can read a run's annotations; its log needs a token.
+      - name: Name the failing tests
+        if: failure() && hashFiles('test-output.log') != ''
+        run: node scripts/annotate-test-failures.mjs test-output.log
+
+  # The oldest VS Code that package.json's engines accepts, whose runtime is
+  # older than the one the matrix above gets. One OS is enough to catch an API
+  # or a runtime feature the floor lacks, and it costs a second VS Code
+  # download (about 150 MB) on this job only.
+  floor:
+    name: Test (engines floor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Test
+        shell: bash
+        run: xvfb-run -a npm run test:floor 2>&1 | tee test-output.log
+      - name: Name the failing tests
+        if: failure() && hashFiles('test-output.log') != ''
+        run: node scripts/annotate-test-failures.mjs test-output.log
 
   package:
     name: Package VSIX
     runs-on: ubuntu-latest
-    needs: [check, test]
+    needs: [check, test, floor]
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}

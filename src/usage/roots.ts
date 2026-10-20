@@ -1,0 +1,384 @@
+/**
+ * Where Claude Code keeps its data: the one module that reads the home
+ * directory or CLAUDE_CONFIG_DIR. Everything downstream takes roots as
+ * arguments, which a source-invariant test enforces.
+ *
+ * Claude Code 2.1.295 builds its panel's environment from `process.env`, then
+ * lets the last absolute CLAUDE_CONFIG_DIR entry of its
+ * `claudeCode.environmentVariables` setting override it, and also honours
+ * `env.CLAUDE_CONFIG_DIR` in `~/.claude/settings.json`. A terminal CLI can
+ * write somewhere else again, so every distinct root that exists is read; the
+ * global key makes any overlap harmless. Only `<root>/projects` is ever read
+ * under a root, and from a root's `settings.json` only its `env` entries for
+ * the three variables below: `~/.claude/ide` holds auth lock files.
+ */
+
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+export type RootSource = 'setting' | 'editor-environment' | 'process-environment' | 'managed-settings' | 'claude-settings' | 'default';
+
+export interface RootCandidate {
+    path: string;
+    source: RootSource;
+    exists: boolean;
+    /** Given as a relative path, which is never read: listed so that the panel says why. */
+    notAbsolute?: true;
+}
+
+export interface RootInputs {
+    /** `llm-tokenizer.claudeCodeDataDirectory`. */
+    setting: string;
+    /**
+     * The user-level value of `claudeCode.environmentVariables`, from
+     * `inspect().globalValue`: never `get()`, which without Claude Code
+     * installed returned a cloned repository's workspace value.
+     */
+    editorEnvironment: unknown;
+    env: NodeJS.ProcessEnv;
+    /** `os.homedir()`, or a fixture under test. */
+    home: string;
+    platform: NodeJS.Platform;
+    /** Under test, the only folders a root may be inside. */
+    confineTo?: string[];
+    /** The folder of Claude Code's managed settings files, an organization's: none read without it. */
+    managedSettingsDir?: string;
+}
+
+export interface ResolvedRoots {
+    /** Every candidate considered, in order, for diagnostics. */
+    candidates: RootCandidate[];
+    /** The distinct ones that exist: what is read. */
+    roots: RootCandidate[];
+    /** Candidates outside `confineTo`, never read. */
+    refused: RootCandidate[];
+    /**
+     * CLAUDE_CODE_SKIP_PROMPT_HISTORY is set where Claude Code would see it:
+     * the environment, Claude Code's environmentVariables setting, or the
+     * `env` of a root's settings.json. Then it keeps no transcripts, and
+     * there is nothing to read.
+     */
+    historyDisabled: boolean;
+    /**
+     * CLAUDE_CODE_DISABLE_1M_CONTEXT is set where it holds every session to a
+     * 200K window: the environment, Claude Code's environmentVariables
+     * setting, or managed settings.
+     */
+    largeContextDisabled: boolean;
+    /** The roots whose own settings.json sets it: their sessions are held to 200K too. */
+    largeContextDisabledRoots: string[];
+}
+
+/**
+ * This machine's inputs, besides the two settings. Under test the home is a
+ * folder in the fixtures that does not exist, so `~/.claude` and its settings
+ * file resolve to nothing, and every root must lie in the fixtures or the
+ * temporary folder: no test can read the developer's own records.
+ */
+export function machineRootInputs(test?: { fixtures: string }): Omit<RootInputs, 'setting' | 'editorEnvironment'> {
+    return {
+        env: process.env,
+        home: test ? path.join(test.fixtures, 'claude-home') : os.homedir(),
+        platform: process.platform,
+        confineTo: test ? [test.fixtures, os.tmpdir()] : undefined,
+        // Under test, the fixtures': the machine's own policy would make the tests its.
+        managedSettingsDir: test ? path.join(test.fixtures, 'claude-managed') : defaultManagedSettingsDir(process.platform, process.env),
+    };
+}
+
+/** Where Claude Code's managed settings files are, per its docs (code.claude.com/docs/en/managed-settings). */
+function defaultManagedSettingsDir(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined {
+    switch (platform) {
+        case 'darwin':
+            return '/Library/Application Support/ClaudeCode';
+        case 'win32':
+            return path.win32.join(env.ProgramFiles ?? 'C:\\Program Files', 'ClaudeCode');
+        case 'linux':
+            return '/etc/claude-code';
+        default:
+            return undefined;
+    }
+}
+
+/**
+ * The kept `env` entries of the managed settings files: managed-settings.json,
+ * then managed-settings.d/*.json in name order, a later file's value for a
+ * variable over an earlier one's. Policies delivered by MDM, the Windows
+ * registry or the claude.ai console are not files, and are not read.
+ */
+function managedEnv(dir: string | undefined): SettingsEnv {
+    if (!dir) {
+        return {};
+    }
+    const merged: SettingsEnv = { ...settingsEnv(path.join(dir, 'managed-settings.json')) };
+    let names: string[] = [];
+    try {
+        names = fs.readdirSync(path.join(dir, 'managed-settings.d')).filter(n => n.endsWith('.json') && !n.startsWith('.')).sort();
+    } catch {
+        // Absent, which is normal.
+    }
+    for (const name of names) {
+        Object.assign(merged, settingsEnv(path.join(dir, 'managed-settings.d', name)));
+    }
+    return merged;
+}
+
+/** settings.json is read for three keys; a file this large is not a settings file. */
+const MAX_SETTINGS_BYTES = 1 << 20;
+
+/** The only `env` entries of a settings.json that are kept. */
+const SETTINGS_VARIABLES = ['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_SKIP_PROMPT_HISTORY', 'CLAUDE_CODE_DISABLE_1M_CONTEXT'] as const;
+type SettingsEnv = Partial<Record<(typeof SETTINGS_VARIABLES)[number], string>>;
+
+/** The roots to read, with every candidate and where it came from. */
+export function resolveRoots(inputs: RootInputs): ResolvedRoots {
+    const homeSettings = settingsEnv(path.join(inputs.home, '.claude', 'settings.json'));
+    const managed = managedEnv(inputs.managedSettingsDir);
+    const proposed: { path: string | null; source: RootSource }[] = [
+        { path: homeRelative(inputs.setting.trim(), inputs.home) || null, source: 'setting' },
+        { path: editorConfigDir(inputs.editorEnvironment, inputs.platform), source: 'editor-environment' },
+        { path: inputs.env.CLAUDE_CONFIG_DIR ?? null, source: 'process-environment' },
+        { path: managed.CLAUDE_CONFIG_DIR ?? null, source: 'managed-settings' },
+        { path: homeSettings.CLAUDE_CONFIG_DIR ?? null, source: 'claude-settings' },
+        { path: path.join(inputs.home, '.claude'), source: 'default' },
+    ];
+
+    const candidates: RootCandidate[] = [];
+    for (const { path: candidate, source } of proposed) {
+        // Each is accepted only as an absolute path, as Claude Code does.
+        if (candidate && path.isAbsolute(candidate)) {
+            const resolved = path.resolve(candidate);
+            candidates.push({ path: resolved, source, exists: isDirectory(resolved) });
+        } else if (candidate && source === 'setting') {
+            // This extension's own setting is listed, so the panel says why it is not read.
+            candidates.push({ path: candidate, source, exists: false, notAbsolute: true });
+        }
+    }
+
+    const roots: RootCandidate[] = [];
+    const refused: RootCandidate[] = [];
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+        if (!candidate.exists) {
+            continue;
+        }
+        // Under test, what is read under the root must stay inside too: its
+        // projects or sessions folder, or its settings.json, can be a link
+        // that leads out. One that does not exist reads nothing; a link that
+        // leads nowhere now could lead out later, so it counts as outside.
+        const confined = (p: string, mustExist: boolean) => {
+            if (!inputs.confineTo) {
+                return true;
+            }
+            if (!exists(p)) {
+                return !mustExist;
+            }
+            const real = resolved(p);
+            return real !== undefined && inputs.confineTo.some(allowed => isInside(real, realPath(allowed)));
+        };
+        const read = ['projects', 'sessions', 'settings.json'].map(name => path.join(candidate.path, name));
+        if (!confined(candidate.path, true) || !read.every(p => confined(p, false))) {
+            refused.push(candidate);
+            continue;
+        }
+        // Read under the spelling on disk: transcripts are known by their
+        // path, so a root reached under another spelling would be read again
+        // from the start.
+        const identity = realPath(candidate.path);
+        if (!seen.has(identity)) {
+            seen.add(identity);
+            roots.push({ ...candidate, path: identity });
+        }
+    }
+    // A root is a configuration folder, read with its own settings.json;
+    // ~/.claude's is among them whenever it exists. Managed settings stand
+    // above the files, so a variable they set is theirs to decide.
+    const rootSettings = roots.map(root => ({ root: root.path, env: settingsEnv(path.join(root.path, 'settings.json')) }));
+    type Flag = Exclude<(typeof SETTINGS_VARIABLES)[number], 'CLAUDE_CONFIG_DIR'>;
+    const everywhere = (name: Flag) =>
+        name in managed ? isTruthy(managed[name]) : [inputs.env[name], editorVariable(inputs.editorEnvironment, inputs.platform, name)].some(isTruthy);
+    const inRoot = (name: Flag, env: SettingsEnv) => !(name in managed) && isTruthy(env[name]);
+    return {
+        candidates,
+        roots,
+        refused,
+        historyDisabled: everywhere('CLAUDE_CODE_SKIP_PROMPT_HISTORY') || rootSettings.some(r => inRoot('CLAUDE_CODE_SKIP_PROMPT_HISTORY', r.env)),
+        largeContextDisabled: everywhere('CLAUDE_CODE_DISABLE_1M_CONTEXT'),
+        largeContextDisabledRoots: rootSettings.filter(r => inRoot('CLAUDE_CODE_DISABLE_1M_CONTEXT', r.env)).map(r => r.root),
+    };
+}
+
+/** What chose a root, in words, for the diagnostics. */
+export function sourceLabel(source: RootSource): string {
+    switch (source) {
+        case 'setting':
+            return 'the Claude Code Data Directory setting';
+        case 'editor-environment':
+            return "CLAUDE_CONFIG_DIR in Claude Code's environmentVariables setting";
+        case 'process-environment':
+            return 'CLAUDE_CONFIG_DIR';
+        case 'managed-settings':
+            return 'env.CLAUDE_CONFIG_DIR in managed settings';
+        case 'claude-settings':
+            return 'env.CLAUDE_CONFIG_DIR in ~/.claude/settings.json';
+        case 'default':
+            return 'the default';
+    }
+}
+
+/** `p` with the home folder shown as `~`, for display only. */
+export function tildePath(p: string, home: string = os.homedir()): string {
+    const relative = path.relative(home, p);
+    return relative === '' ? '~' : relative.startsWith('..') || path.isAbsolute(relative) ? p : `~${path.sep}${relative}`;
+}
+
+/** A flag counts as set when it is 1, true, yes or on, ignoring case: only a hint, for an empty state. */
+function isTruthy(value: string | undefined | null): boolean {
+    return typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+/**
+ * The setting with a leading `~` or `${userHome}` as the home folder, as the
+ * panel itself writes paths; anything else as it is.
+ */
+function homeRelative(value: string, home: string): string {
+    const match = /^(~|\$\{userHome\})(?=$|[\\/])/.exec(value);
+    return match ? path.join(home, value.slice(match[0].length)) : value;
+}
+
+/**
+ * The CLAUDE_CONFIG_DIR entry of `claudeCode.environmentVariables`: the last
+ * absolute one, whether the setting is a list of `{ name, value }` or an
+ * object, with the name upper-cased on Windows. Nothing else from the setting
+ * is kept.
+ */
+function editorConfigDir(setting: unknown, platform: NodeJS.Platform): string | null {
+    return editorVariable(setting, platform, 'CLAUDE_CONFIG_DIR', v => path.isAbsolute(v));
+}
+
+/** The last value of `variable` in `claudeCode.environmentVariables` that `accept` takes. */
+function editorVariable(
+    setting: unknown,
+    platform: NodeJS.Platform,
+    variable: string,
+    accept: (value: string) => boolean = () => true,
+): string | null {
+    const wanted = (name: unknown) =>
+        typeof name === 'string' && (platform === 'win32' ? name.toUpperCase() : name) === variable;
+    let found: string | null = null;
+    const consider = (value: unknown) => {
+        if (typeof value === 'string' && accept(value)) {
+            found = value;
+        }
+    };
+    if (Array.isArray(setting)) {
+        for (const entry of setting) {
+            if (typeof entry === 'object' && entry !== null && wanted((entry as { name?: unknown }).name)) {
+                consider((entry as { value?: unknown }).value);
+            }
+        }
+    } else if (typeof setting === 'object' && setting !== null) {
+        for (const [name, value] of Object.entries(setting)) {
+            if (wanted(name)) {
+                consider(value);
+            }
+        }
+    }
+    return found;
+}
+
+/** The `env` entries of a Claude Code settings file that are kept, and nothing else from it. */
+function settingsEnv(file: string): SettingsEnv {
+    const kept: SettingsEnv = {};
+    let fd: number | undefined;
+    try {
+        // A regular file only: reading a FIFO would block the extension host.
+        // Opened without blocking, then checked and read by the descriptor,
+        // so that nothing swapped in after a check is read, and no more than
+        // the size checked.
+        fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || stat.size > MAX_SETTINGS_BYTES) {
+            return kept;
+        }
+        const bytes = Buffer.alloc(stat.size);
+        const read = fs.readSync(fd, bytes, 0, stat.size, 0);
+        const parsed = JSON.parse(bytes.subarray(0, read).toString('utf8')) as unknown;
+        const env = (parsed as { env?: unknown } | null)?.env;
+        if (typeof env === 'object' && env !== null) {
+            for (const name of SETTINGS_VARIABLES) {
+                const value = (env as Record<string, unknown>)[name];
+                if (typeof value === 'string') {
+                    kept[name] = value;
+                }
+            }
+        }
+    } catch {
+        // Missing, unreadable or not JSON: nothing set there.
+    } finally {
+        if (fd !== undefined) {
+            fs.closeSync(fd);
+        }
+    }
+    return kept;
+}
+
+/** Anything at all at `p`, a broken link included. */
+function exists(p: string): boolean {
+    try {
+        fs.lstatSync(p);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function isDirectory(candidate: string): boolean {
+    try {
+        return fs.statSync(candidate).isDirectory();
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * The path as the file system holds it. The native call returns the case on
+ * disk, so a folder typed in another case on Windows or macOS, as a picked
+ * folder or the drive letter often is, is still one root.
+ */
+function realPath(candidate: string): string {
+    return resolved(candidate) ?? candidate;
+}
+
+/**
+ * The path as the file system holds it, or undefined where it leads nowhere.
+ *
+ * On a mapped drive the native call gives the network share's path,
+ * `\\server\share\…`, which the editor can refuse, unless that host is among
+ * its allowed UNC hosts, where it reads the drive itself. There the path
+ * keeps its drive, with its links resolved and the case as typed; one that
+ * leads to a share through a link is kept as it was given.
+ */
+function resolved(candidate: string): string | undefined {
+    try {
+        const real = fs.realpathSync.native(candidate);
+        if (!isUnc(real) || isUnc(candidate)) {
+            return real;
+        }
+        const kept = fs.realpathSync(candidate);
+        return isUnc(kept) ? candidate : kept;
+    } catch {
+        return undefined;
+    }
+}
+
+function isUnc(p: string): boolean {
+    return /^[\\/]{2}/.test(p);
+}
+
+/** Whether `child` is `parent` or inside it, both already resolved. */
+function isInside(child: string, parent: string): boolean {
+    const relative = path.relative(parent, child);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}

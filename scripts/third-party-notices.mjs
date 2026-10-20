@@ -12,9 +12,9 @@
  *
  * The package list comes from `bundled-packages.mjs`, which derives it from
  * esbuild's metafile rather than from package.json, so a dependency that stops
- * being bundled drops out and a new one cannot be forgotten. Run `npm run
- * build` first — the entry points are read from source, but the encodings list
- * comes from the built output.
+ * being bundled drops out and a new one cannot be forgotten. Nothing needs
+ * building first: the bundles, encodings included, are listed in
+ * `bundles.mjs`, and esbuild resolves them from source.
  */
 
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';

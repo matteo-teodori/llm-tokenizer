@@ -118,9 +118,11 @@ export class StatusBarManager {
     }
 }
 
-type Status = 'ok' | 'warning' | 'error';
+/** Where a count stands against its model's context limit. */
+export type Status = 'ok' | 'warning' | 'error';
 
-function contextStatus(count: number, model: ModelInfo): Status {
+/** Exported for any other status item that shows a count against a limit. */
+export function contextStatus(count: number, model: ModelInfo): Status {
     if (!model.contextLimit) {
         return 'ok';
     }
@@ -154,7 +156,7 @@ function icon(status: Status): string {
  * `backgroundColor` accepts only these two colours, and the API guarantees the
  * status bar will pick a readable foreground to go with them.
  */
-function applyStatusColour(item: vscode.StatusBarItem, status: Status): void {
+export function applyStatusColour(item: vscode.StatusBarItem, status: Status): void {
     // Cleared explicitly: a badge left over from a previous file would
     // otherwise stay behind on a count that is now well within limits.
     item.color = undefined;

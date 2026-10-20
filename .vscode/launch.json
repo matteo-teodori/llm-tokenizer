@@ -27,8 +27,14 @@
             "args": [
                 "--extensionDevelopmentPath=${workspaceFolder}",
                 "--extensionTestsPath=${workspaceFolder}/.test-out/test",
+                "--disable-extensions",
+                "--force-disable-user-env",
+                "--user-data-dir=${workspaceFolder}/.vscode-test/ud-f5",
                 "${workspaceFolder}/test/fixtures/workspace"
             ],
+            "env": {
+                "CLAUDE_CONFIG_DIR": "${workspaceFolder}/test/fixtures/claude-config"
+            },
             "outFiles": [
                 "${workspaceFolder}/out/**/*.js",
                 "${workspaceFolder}/.test-out/**/*.js"

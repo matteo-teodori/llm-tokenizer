@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 
 import { ContextStatusResult, ProcessedFile, SkippedFile, IgnoredFile } from './types';
 import { contentSecurityPolicy, createNonce } from './html';
+import { logoIcon } from './logo';
 import {
     byFolder,
     byLanguage,
@@ -91,8 +92,8 @@ function buildView(config: MultiFileSummaryConfig): SummaryView {
 let summaryPanel: vscode.WebviewPanel | undefined;
 let summaryListener: vscode.Disposable | undefined;
 
-/** Create and show the multi-file token summary. */
-export function showMultiFileSummary(config: MultiFileSummaryConfig): vscode.WebviewPanel {
+/** Create and show the multi-file token summary; `extensionUri` is where its tab icon is. */
+export function showMultiFileSummary(config: MultiFileSummaryConfig, extensionUri: vscode.Uri): vscode.WebviewPanel {
     const panel = summaryPanel ?? vscode.window.createWebviewPanel(
         'llmTokenizer.summary',
         'Token Summary',
@@ -109,6 +110,7 @@ export function showMultiFileSummary(config: MultiFileSummaryConfig): vscode.Web
         panel.reveal();
     } else {
         summaryPanel = panel;
+        panel.iconPath = logoIcon(extensionUri);
         panel.onDidDispose(() => {
             summaryPanel = undefined;
             summaryListener?.dispose();

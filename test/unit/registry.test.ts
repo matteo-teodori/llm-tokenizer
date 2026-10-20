@@ -193,9 +193,10 @@ suite('accuracy labelling', () => {
         assert.strictEqual(accuracyOf({ kind: 'heuristic', charsPerToken: 3 }), 'estimated');
 
         const fallback = { kind: 'heuristic', charsPerToken: 3 } as const;
-        assert.strictEqual(accuracyOf({ kind: 'hf', repo: 'a/b', fallback }), 'after-download');
+        const pin = { repo: 'a/b', revision: 'c'.repeat(40), keptSha256: 'd'.repeat(64) };
+        assert.strictEqual(accuracyOf({ kind: 'hf', ...pin, fallback }), 'after-download');
         assert.strictEqual(
-            accuracyOf({ kind: 'tiktokenModel', repo: 'a/b', fallback }),
+            accuracyOf({ kind: 'tiktokenModel', ...pin, fallback }),
             'after-download',
         );
     });
@@ -301,6 +302,23 @@ suite('registry data that the manifest depends on', () => {
         );
     });
 
+    test('every downloaded vocabulary is read at one commit and checked by hash, one pin per repo', () => {
+        // Read at main, a change upstream changed counts shown as exact.
+        const pins = new Map<string, string>();
+        for (const model of MODELS) {
+            const encoder = model.encoder;
+            if (encoder.kind !== 'hf' && encoder.kind !== 'tiktokenModel') {
+                continue;
+            }
+            assert.match(encoder.revision, /^[0-9a-f]{40}$/, `${model.id} names no commit`);
+            assert.match(encoder.keptSha256, /^[0-9a-f]{64}$/, `${model.id} names no hash`);
+            const pin = `${encoder.revision} ${encoder.keptSha256}`;
+            assert.strictEqual(pins.get(encoder.repo) ?? pin, pin, `${encoder.repo} is pinned two ways`);
+            pins.set(encoder.repo, pin);
+        }
+        assert.ok(pins.size > 0);
+    });
+
     test('models sharing a downloaded vocabulary really do share one', () => {
         // The registry deliberately points several models at one repo so a
         // single download covers a family. That is only sound when the
@@ -326,6 +344,34 @@ suite('registry data that the manifest depends on', () => {
                 `${repo} is shared across providers ${[...providers].join(', ')}`,
             );
         }
+    });
+
+    test("Claude Code's base window is set only on Anthropic rows, and only below the limit", () => {
+        for (const model of MODELS) {
+            if (model.claudeCodeBaseContext === undefined) {
+                continue;
+            }
+            assert.strictEqual(model.provider, 'Anthropic', `${model.id} is not a Claude model`);
+            assert.ok(
+                Number.isInteger(model.claudeCodeBaseContext) &&
+                    model.contextLimit !== undefined &&
+                    model.claudeCodeBaseContext > 0 &&
+                    model.claudeCodeBaseContext < model.contextLimit,
+                `${model.id}: a base window of ${model.claudeCodeBaseContext} against a limit of ${String(model.contextLimit)}`,
+            );
+        }
+    });
+
+    test('in Claude Code, Opus 4.6 and Sonnet 4.6 run at 200K unless [1m] is chosen, and no other model has two windows', () => {
+        // code.claude.com/docs/en/model-config, read 2026-10-10: "Opus 4.6 and
+        // Sonnet 4.6 reach 1M only through their [1m] variant", while the 1M
+        // models from 4.7 on run with it "by default, with no [1m] suffix
+        // needed". A share of the wrong window would read 20% at a full 200K.
+        const twoWindows = MODELS.filter(m => m.claudeCodeBaseContext !== undefined).map(m => [m.id, m.claudeCodeBaseContext]);
+        assert.deepStrictEqual(twoWindows, [
+            ['claude-opus-4-6', 200_000],
+            ['claude-sonnet-4-6', 200_000],
+        ]);
     });
 
     test('no context limit is a round marketing number where a real cap is known', () => {

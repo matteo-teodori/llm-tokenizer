@@ -4,7 +4,7 @@
   <h1>LLM Tokenizer</h1>
 
   <p><b>The ultimate AI token counter for your IDE.</b><br>
-  Token counting for 99 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
+  Token counting for 96 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
 
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
@@ -31,12 +31,17 @@ LLM Tokenizer gives you **instant visibility** into your token usage directly wi
 
 Stop copying and pasting into web calculators. Get precise counts right where you code.
 
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/token-summary-light.png">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/token-summary-dark.png" alt="A folder's count: 2.4K tokens for GPT-5.6 Sol, exact, by folder and by language, with each file's tokens">
+</picture>
+
 
 
 ## Features
 
 ### 🎯 Core Features
-- **Exact counts, not guesses**: 64 of the 99 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
+- **Exact counts, not guesses**: 61 of the 96 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
 - **Real-time Token Count**: The active file's token count in the Status Bar
 - **Context Limit Warnings**: Indicators at 80% and 100% of the model's *usable input* limit
 - **Project-wide Counting**: Workspace totals with caching, cancellation, and multi-root support
@@ -45,12 +50,16 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 - **Selection Counting**: Count only the text you highlighted
 - **Runs off the UI thread**: Tokenizing happens in a worker thread, so the editor never blocks
 - **Persistent Preferences**: Your model choice is remembered
+- **Claude Code usage (optional, off by default)**: how many tokens Claude Code processed, by day, project, session and model, read from its own records on your machine. See [Claude Code Usage](#claude-code-usage).
 
 ### 🔒 Privacy
 **Your code never leaves your machine.** There is no telemetry and no network
 request that contains file contents. The only network access is a one-time
 download of a model's *vocabulary file* from huggingface.co, which you can turn
-off with `llm-tokenizer.downloadTokenizers`.
+off with `llm-tokenizer.downloadTokenizers`; a repository's own settings can
+turn it off for that repository, never back on. Claude Code usage, if you turn it
+on, reads Claude Code's own session records on this machine and sends nothing
+anywhere.
 
 ### ⚙️ Configuration
 - `llm-tokenizer.defaultModel`: Model used until you pick one
@@ -58,10 +67,13 @@ off with `llm-tokenizer.downloadTokenizers`.
 - `llm-tokenizer.ignoreGitignoredFiles`: Exclude gitignored files from folder and workspace totals
 - `llm-tokenizer.enableProjectScan`: Turn off workspace-wide counting on very large repositories
 - `llm-tokenizer.downloadTokenizers`: Allow the one-time tokenizer download that makes counts exact
+- `llm-tokenizer.enableClaudeCodeUsage`: Read Claude Code's session records to show its usage (off by default)
+- `llm-tokenizer.claudeCodeDataDirectory`: Claude Code's configuration folder, when Claude Code's own rules would not find it
+- `llm-tokenizer.showClaudeCodeUsageInStatusBar`: Show the live context of the Claude Code session in this workspace (off by default)
 
 ## Supported Models
 
-99 models across 13 providers. Every id is checked against the provider's own
+96 models across 13 providers. Every id is checked against the provider's own
 documentation, and models that a provider has retired are removed. A model you
 picked from the status bar is migrated automatically; an old id in the
 `defaultModel` setting keeps working, though VS Code flags it until you update
@@ -79,8 +91,8 @@ Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 | OpenAI     | GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 (+mini), GPT-5.3 Codex, GPT-5.2, GPT-5.1, GPT-5, GPT-4.1, GPT-4o (+mini), o3, o4-mini, gpt-oss 120b/20b, GPT-4 Turbo, GPT-3.5 Turbo | Exact |
 | OpenAI     | GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, GPT-6 Astra | Estimated³ |
 | Anthropic  | Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1, Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
-| Google     | Gemini 3.5 Flash, 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
-| Google     | Gemini 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.5 Flash-Lite | Estimated² |
+| Google     | Gemini 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
+| Google     | Gemini 4 Argon, 3.8 Flash, 3.6 Flash, 3.5 Flash-Lite | Estimated² |
 | xAI        | Grok 4.7, 4.6, 4.5, 4.3, 4.20, Grok Build 0.1 | Estimated |
 | DeepSeek   | DeepSeek V4.1 Flash, V4 Pro | Exact¹ |
 | Meta       | Muse Glimmer 30B, Llama 4 Scout, Llama 4 Maverick, Llama 3.3 70B, Llama 3.1 8B | Exact¹ |
@@ -93,10 +105,12 @@ Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 | MiniMax    | MiniMax M3, M2.7, M2.5, M2.1, M2 | Exact¹ |
 | MiniMax    | MiniMax M3.1 Flash (preview) | Estimated⁴ |
 | Moonshot   | Kimi K3, K2.7 Code, K2.6 | Exact¹ |
-| Xiaomi     | MiMo V2.6 Pro, V2.6 Flash, V2.5 Pro, V2.5 | Exact¹ |
+| Xiaomi     | MiMo V2.6 Pro, V2.6 Flash | Exact¹ |
 | Tencent    | Hy4 preview, Hy3 | Exact¹ |
 
-¹ After a one-time tokenizer download.
+¹ After a one-time tokenizer download, from the commit of the vocabulary's
+repository that this version names, and checked against its hash: a later
+change upstream changes no count until a new version moves to it.
 
 ² Google's SDK does not map these releases to a published vocabulary yet, so
 they fall back to a character estimate.
@@ -129,6 +143,7 @@ Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
 - **Ignore Gitignored Files**: exclude `.gitignore` matches from counts (on by default)
 - **Enable Project Scan**: turn off workspace-wide counting on very large repositories
 - **Download Tokenizers**: allow the one-time download that makes counts exact
+- **Enable Claude Code Usage**, **Claude Code Data Directory** and **Show Claude Code Usage in Status Bar**: see [Claude Code Usage](#claude-code-usage)
 
 ### Context Warnings
 - **Normal**: under 80% of the model's usable input limit
@@ -136,6 +151,116 @@ Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
 - **Error**: at or over 100%
 
 A leading `≈` means the count is an estimate rather than an exact tokenization.
+
+## Claude Code Usage
+
+How many tokens Claude Code processed, read from the session records Claude
+Code keeps on your machine. It is off by default: turn on
+**Enable Claude Code Usage** in Settings, then run **Show Claude Code Usage**,
+or, while it is on, click the LLM Tokenizer **T** at the top right of an
+editor.
+
+<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects and sessions, and the status item's tooltip shows the running session's context">
+
+**The panel** shows today, the last 7 or 30 days, or everything since the
+history starts, for all projects or for this workspace:
+- tokens processed, split into input, cache writes, cache reads and output,
+  with how much of the input was read from the cache;
+- a column per day, in your time zone;
+- models, the main conversation against subagents and workflows, and effort;
+- projects and sessions, sortable, and the usage limits you reached;
+- diagnostics: what was read, what was skipped and why, and where from.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-light.png">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.1B tokens processed in 12,565 requests and 96 sessions, split into cache reads, cache writes, input and output, by day and by model">
+</picture>
+
+*Processed* is everything a request sent or received: input, cache writes,
+cache reads and output. Cache reads are most of it, because Claude Code sends
+the conversation again with every turn and the cache serves it. A total marked
+`≥` is a lower bound: some request did not report every counter.
+
+**The status item** (**Show Claude Code Usage in Status Bar**) shows how full
+the context of the Claude Code session running in this workspace is, as a
+share of the model's window where that window is known, amber from 80%. The
+window follows Claude Code's own rules: Opus 4.6 and Sonnet 4.6 run in 1M
+when a record names `[1m]`, or when the session has held more than 200K;
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` holds every model to 200K when it is set in
+the editor's environment, in Claude Code's **Environment Variables** setting,
+or in the `env` of the organization's managed settings files, and holds a
+data folder's own sessions when it is set in that folder's `settings.json`.
+A project's own `.claude/settings.json` is not read, nor are policies
+delivered by MDM, the Windows registry or as server-managed settings. A context larger
+than the window a model was thought to have is shown with a `?`, and no
+colour. It reads Claude Code's running-session files too.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-light.png">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-dark.png" alt="The status item at 532.8K · 53%, and its tooltip: the context's 532,842 of 1,000,000 tokens, the model, the last request, and today's tokens in this workspace">
+</picture>
+
+**Export CSV** copies to the clipboard, per day and model, every count a
+hand-made cost calculation needs: requests, input, cache writes (5-minute and
+1-hour), cache reads, output, thinking, web searches and fetches. Rows are apart
+by what a request's price depends on besides its model: its speed (`fast` is
+billed higher), where it ran (`us` is billed higher), and its prompt size (up to
+100,000 tokens, up to 200,000, or more: Claude Haiku 5.5 prices a request over
+100,000 higher). Its notes say how to read each of those. It gives no prices.
+**Copy** copies the sessions, for a spreadsheet.
+
+**What is kept, and where.** A database in this extension's own storage
+(the `claude-code-usage` folder in VS Code's global storage for LLM
+Tokenizer) keeps:
+- each request's token counts, model, effort, speed, where it ran, time and
+  Claude Code version, and its ids: message, request, session, and the
+  subagent or workflow run it came from;
+- the folder each session started in;
+- each transcript's path, size, file id and how far it was read, with a hash
+  of the last 64 bytes read, to tell what changed;
+- compactions' sizes, and the usage limits reached, with when they reset;
+- the window's process id and this machine's name, which each import writes
+  so that two windows never import at once.
+
+Prompts, responses, thinking and tool inputs or results are never kept, and
+nothing is sent anywhere. The history outlives Claude Code's own records,
+which Claude Code deletes after 30 days by default. A history that can no
+longer be read is set aside, left as it is, and a new one started, and the
+panel says so until it is cleared. **Clear Claude Code Usage History**
+removes the history and any copy set aside, and leaves nothing of either
+readable on disk. What another window still holds, a copy it has open or a
+read it has not finished, goes once that window lets go of it, the next
+time any window uses the history; Clear says when a copy has to wait.
+Anything still on disk is read again at the next refresh. The panel also
+remembers its range, its scope and your time zone, in the editor's own
+state.
+
+Its settings are machine settings, so a repository's settings cannot turn it
+on or point it at another folder. In a dev container, though, the container's
+settings can come from the repository's `devcontainer.json`.
+
+**Before uninstalling**, run **Clear Claude Code Usage History**: the editor
+may leave this extension's storage on disk after the extension is gone.
+
+### What it counts, and what it cannot see
+
+- Only the machine the extension runs on: other computers and claude.ai are
+  not seen. In a remote window that is normally the remote host, and the
+  panel names it.
+- Nothing Claude Code had already deleted before the first import.
+- Sessions run with `CLAUDE_CODE_SKIP_PROMPT_HISTORY`, which keeps no
+  transcripts at all.
+- `-p` and Agent SDK runs that `CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` trimmed.
+- Requests that never reach a transcript, such as title generation and
+  possibly compaction.
+- A request refused at a usage limit carries no tokens: it is listed as a
+  limit reached.
+- Records dated more than a day after this machine's clock, which only a
+  wrong clock writes: they are kept, and counted once this clock reaches
+  them.
+
+The records' format is internal to Claude Code and may change with it; the
+diagnostics say when lines could not be read.
 
 ## Accuracy
 
