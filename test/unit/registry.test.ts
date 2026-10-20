@@ -193,9 +193,10 @@ suite('accuracy labelling', () => {
         assert.strictEqual(accuracyOf({ kind: 'heuristic', charsPerToken: 3 }), 'estimated');
 
         const fallback = { kind: 'heuristic', charsPerToken: 3 } as const;
-        assert.strictEqual(accuracyOf({ kind: 'hf', repo: 'a/b', fallback }), 'after-download');
+        const pin = { repo: 'a/b', revision: 'c'.repeat(40), keptSha256: 'd'.repeat(64) };
+        assert.strictEqual(accuracyOf({ kind: 'hf', ...pin, fallback }), 'after-download');
         assert.strictEqual(
-            accuracyOf({ kind: 'tiktokenModel', repo: 'a/b', fallback }),
+            accuracyOf({ kind: 'tiktokenModel', ...pin, fallback }),
             'after-download',
         );
     });
@@ -299,6 +300,23 @@ suite('registry data that the manifest depends on', () => {
             'exact',
             `the default model ${model.id} must be exact offline`,
         );
+    });
+
+    test('every downloaded vocabulary is read at one commit and checked by hash, one pin per repo', () => {
+        // Read at main, a change upstream changed counts shown as exact.
+        const pins = new Map<string, string>();
+        for (const model of MODELS) {
+            const encoder = model.encoder;
+            if (encoder.kind !== 'hf' && encoder.kind !== 'tiktokenModel') {
+                continue;
+            }
+            assert.match(encoder.revision, /^[0-9a-f]{40}$/, `${model.id} names no commit`);
+            assert.match(encoder.keptSha256, /^[0-9a-f]{64}$/, `${model.id} names no hash`);
+            const pin = `${encoder.revision} ${encoder.keptSha256}`;
+            assert.strictEqual(pins.get(encoder.repo) ?? pin, pin, `${encoder.repo} is pinned two ways`);
+            pins.set(encoder.repo, pin);
+        }
+        assert.ok(pins.size > 0);
     });
 
     test('models sharing a downloaded vocabulary really do share one', () => {

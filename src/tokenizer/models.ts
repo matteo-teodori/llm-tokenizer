@@ -16,6 +16,7 @@
  * migrated rather than silently reset.
  */
 
+import type { PinnedSource } from './encoders';
 import type { ModelInfo } from './registry';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,20 +126,44 @@ const KIMI = 3.6;
 // and Google's Gemma 4 repos are not gated, which is why HF.museGlimmer and
 // HF.gemma4 point at them directly. Every repo below was checked to serve its
 // vocabulary anonymously: tokenizer.json, or tiktoken.model for Kimi.
+//
+// Each is read at the commit its main branch was at on 2026-10-20, and checked
+// by hash (see PinnedSource). The hashes quoted in the notes below are of the
+// files as published, which is how files were compared; `keptSha256` is not.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HF = {
-    llama3: 'unsloth/Llama-3.3-70B-Instruct',
-    llama4: 'unsloth/Llama-4-Scout-17B-16E-Instruct',
-    gemma3: 'unsloth/gemma-3-4b-it',
-    gemma4: 'google/gemma-4-E4B-it',
+    llama3: {
+        repo: 'unsloth/Llama-3.3-70B-Instruct',
+        revision: '99cd0d2c829e92a67c844f9144c2509632e5c87f',
+        keptSha256: '64ce3fe0bc608dcff769edf7e3ae10397917e34e6999a2f6e7a30435c00aa96f',
+    },
+    llama4: {
+        repo: 'unsloth/Llama-4-Scout-17B-16E-Instruct',
+        revision: 'afd8e498c87bda51c7ea8ec68ea2f7c066e6340b',
+        keptSha256: '94ae86a218eaf9a716216a3e22460afddf23115a8be3f5ab47385f6f650b2af4',
+    },
+    gemma3: {
+        repo: 'unsloth/gemma-3-4b-it',
+        revision: 'bf46152c47f5dd20b896357cb51abc4c03b8ee8c',
+        keptSha256: '8ef59ebecae680b6ab1ebc65c3855238032d55dea31d27968a6eacf458144ee9',
+    },
+    gemma4: {
+        repo: 'google/gemma-4-E4B-it',
+        revision: 'ee0ef6023621cff504d758262d4e04895a5af4a2',
+        keptSha256: '4453a86456cdf02b3c8f79091ffda7ca017619ff5da495b9eda12141d5793962',
+    },
     /**
      * DeepSeek V4 Pro's vocabulary. The path is the retired V4 Flash's repo,
      * kept so existing downloads stay valid: its tokenizer.json is
      * byte-identical (sha256 8f9f37ca…) to deepseek-ai/DeepSeek-V4-Pro-0813,
      * the snapshot the API serves for deepseek-v4-pro.
      */
-    deepseek: 'deepseek-ai/DeepSeek-V4-Flash',
+    deepseek: {
+        repo: 'deepseek-ai/DeepSeek-V4-Flash',
+        revision: '60d8d70770c6776ff598c94bb586a859a38244f1',
+        keptSha256: '3ad46a8c78edf140516eb696f948ae6e7c3522ec64993b219833145e2e9951d0',
+    },
     /**
      * V4.1 Flash keeps V4's vocabulary and merges but repurposes nine of its
      * added-token slots: it gains `<｜System｜>` (one token here, five under V4)
@@ -146,8 +171,16 @@ const HF = {
      * and table tokens. So its file differs (sha256 c90dfa01…) and it cannot
      * share V4 Pro's repo.
      */
-    deepseek41: 'deepseek-ai/DeepSeek-V4.1-Flash',
-    qwen: 'Qwen/Qwen3.6-27B',
+    deepseek41: {
+        repo: 'deepseek-ai/DeepSeek-V4.1-Flash',
+        revision: '314113f8a7dadb388215396ba5fbee2c610a04d6',
+        keptSha256: 'd61b8c48a04783579ecd50467a4a8eaa511b1d32e596209e18234c02fc0f393c',
+    },
+    qwen: {
+        repo: 'Qwen/Qwen3.6-27B',
+        revision: '6a9e13bd6fc8f0983b9b99948120bc37f49c13e9',
+        keptSha256: '8fc3b6de02de5a8e21d3867aba335e2d9a3c2263201f55daaed1feab3541bea4',
+    },
     /**
      * Qwen 3.8's files differ from 3.6's. The vocabulary and merges are the
      * same; 3.8 adds seven audio and TTS special tokens, which is enough for the
@@ -156,44 +189,76 @@ const HF = {
      * Qwen3.8-27B, Qwen3.8-Flash-Next and Qwen3.8-2.4T-A95B serve the same
      * tokenizer.json.
      */
-    qwen38: 'Qwen/Qwen3.8-27B',
-    mistral: 'mistralai/Mistral-Large-3-675B-Instruct-2512',
+    qwen38: {
+        repo: 'Qwen/Qwen3.8-27B',
+        revision: '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0',
+        keptSha256: 'ae50d65939a34a089eaf1e541c15c8a7d866079a5fe9a1d35454e0aa88577753',
+    },
+    mistral: {
+        repo: 'mistralai/Mistral-Large-3-675B-Instruct-2512',
+        revision: '383ffea2c7d60dfd44ca960e8e691709d4fdb9cd',
+        keptSha256: '9950b2af6f163d483c78e421669f0db942e73ae7d978d08c6d113c1b62fd105d',
+    },
     /**
      * Medium 3.5 and Small 4 share one tokenizer.json (sha256 2ba5b333…) that
      * is not Large 3's (57757562…). See the Mistral section for why that
      * matters.
      */
-    mistralMedium35: 'mistralai/Mistral-Medium-3.5-128B',
+    mistralMedium35: {
+        repo: 'mistralai/Mistral-Medium-3.5-128B',
+        revision: '22b2b868a15677cfa6061277ed2f653d1349a9ab',
+        keptSha256: '6cae75a689708819a8c395da8541eb8f3918131291df99474539a3209d32cd9c',
+    },
     /**
      * One repo for the whole GLM-5 line. Verified by hash: GLM-5, 5.1, 5.2, 5.3
      * and 5.3-Flash serve a byte-identical tokenizer.json (sha256 19e77364…),
      * and their tokenizer_config.json files differ only in model_max_length,
      * so a single download covers them all.
      */
-    glm: 'zai-org/GLM-5.2',
-    minimax: 'MiniMaxAI/MiniMax-M3',
-    minimaxLegacy: 'MiniMaxAI/MiniMax-M2',
-    /**
-     * MiMo V2.5 and V2.5 Pro have the same vocabulary and merges, but their
-     * tokenizer.json files differ (633518aa… and cdd40b08…: Pro lacks six
-     * audio and video tokens, and V2.5 uses an older serialisation), and only
-     * byte-identical files may share a repo, so each keeps its own.
-     */
-    mimo: 'XiaomiMiMo/MiMo-V2.5',
-    mimoPro: 'XiaomiMiMo/MiMo-V2.5-Pro',
+    glm: {
+        repo: 'zai-org/GLM-5.2',
+        revision: 'cf457fa734ab149ffef225f80893eb38c6ff5cdc',
+        keptSha256: 'f73933d2e4b633ce5a75f049a68b339790c52b966025e895aae0a0eda67d5cda',
+    },
+    minimax: {
+        repo: 'MiniMaxAI/MiniMax-M3',
+        revision: 'f0e1c1e04d40177e4673a22097036854f536e9c0',
+        keptSha256: '344bf7982f214f550119e613df190e03f9fc992b2c81c9782648b837386f637e',
+    },
+    minimaxLegacy: {
+        repo: 'MiniMaxAI/MiniMax-M2',
+        revision: '757303d492a50514c312788b5247a4f696a4c6a3',
+        keptSha256: 'cb3a1f4117827aa9c4fdc0e82370db4df611d0c3afa51bf6096159496818ed29',
+    },
     /**
      * V2.6 is published as -RL and -MOPD checkpoints of Pro and Flash, and all
      * four serve a byte-identical tokenizer.json (sha256 ff15eb92…), so one
      * download covers both V2.6 models.
      */
-    mimo26: 'XiaomiMiMo/MiMo-V2.6-Pro-RL',
-    hunyuan: 'tencent/Hy3',
-    hunyuan4: 'tencent/Hy4-preview',
+    mimo26: {
+        repo: 'XiaomiMiMo/MiMo-V2.6-Pro-RL',
+        revision: 'b61f21852680ee02a29e946e18cf8697f4844061',
+        keptSha256: 'dfcb73957bcaa76926f674d9d5cf7e5b2b5765bd005684e45d24d5031fc3ae22',
+    },
+    hunyuan: {
+        repo: 'tencent/Hy3',
+        revision: 'a960ebc3da325ba167f069f76c41eb62c9280d22',
+        keptSha256: '813f61e338a0d897442fa2c408a08cde88c2d4fd5066f56fcf82cc60085f23ec',
+    },
+    hunyuan4: {
+        repo: 'tencent/Hy4-preview',
+        revision: '705d81ee51566a186d645b74c974d642ef2828fe',
+        keptSha256: '78f27a91f96e1d64abecfcb5eaec0e291193e01594a1535ddff5e6deedf0df84',
+    },
     /**
      * Meta's current open-weight model. The Llama placeholder suits it: on the
      * corpus above it measures 4.155 chars/token, Llama 3.3 4.137.
      */
-    museGlimmer: 'meta-models/Muse-Glimmer-30B',
+    museGlimmer: {
+        repo: 'meta-models/Muse-Glimmer-30B',
+        revision: 'a4e59da52a7bc87ae7251dd5545c0dd437c44b68',
+        keptSha256: 'ab880a16a72b1c8941d6438044d40d435b0241bbee110c0534d9394464b421b1',
+    },
     /**
      * Moonshot publishes `tiktoken.model` rather than a `tokenizer.json`.
      *
@@ -201,12 +266,16 @@ const HF = {
      * K3, K2.7-Code, K2.6 and K2.5 (verified by hash), so pointing them all at
      * one repo means a single download covers every Kimi model.
      */
-    kimi: 'moonshotai/Kimi-K3',
-} as const;
+    kimi: {
+        repo: 'moonshotai/Kimi-K3',
+        revision: 'f831ab66814297da540d832a5235f8e904f29d06',
+        keptSha256: 'b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103',
+    },
+} as const satisfies Record<string, PinnedSource>;
 
 /** A `tiktokenModel` encoder with the estimate used until it is downloaded. */
-function rankTable(repo: string, charsPerToken: number): ModelInfo['encoder'] {
-    return { kind: 'tiktokenModel', repo, fallback: { kind: 'heuristic', charsPerToken } };
+function rankTable(source: PinnedSource, charsPerToken: number): ModelInfo['encoder'] {
+    return { kind: 'tiktokenModel', ...source, fallback: { kind: 'heuristic', charsPerToken } };
 }
 
 /**
@@ -218,8 +287,8 @@ function rankTable(repo: string, charsPerToken: number): ModelInfo['encoder'] {
  * 3.931, Tekken 3.855, GLM-5 4.128, MiniMax 4.114, MiMo 4.058, Hy 3.950 and
  * 3.993), so a count shown before the download leans high.
  */
-function hf(repo: string, charsPerToken: number): ModelInfo['encoder'] {
-    return { kind: 'hf', repo, fallback: { kind: 'heuristic', charsPerToken } };
+function hf(source: PinnedSource, charsPerToken: number): ModelInfo['encoder'] {
+    return { kind: 'hf', ...source, fallback: { kind: 'heuristic', charsPerToken } };
 }
 
 /**
@@ -258,11 +327,14 @@ export const MODELS: ModelInfo[] = [
     { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.2', label: 'GPT-5.2', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.1', label: 'GPT-5.1', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
-    // Scheduled shutdowns, still live today: o4-mini on 2026-10-23 (OpenAI's
-    // replacement is gpt-5.6-terra), gpt-5 and o3 on 2026-12-11 (gpt-5.6-sol),
-    // gpt-5.1 and gpt-5.3-codex on 2027-04-01 (gpt-6-sol). Remove each, with an
-    // alias to its replacement, at the first refresh after its date. The two
-    // legacy models at the end of this block go on 2026-10-23 as well.
+    // Scheduled shutdowns, still live today (api/docs/deprecations, read
+    // 2026-10-20): o4-mini on 2026-10-23 (OpenAI's replacement is
+    // gpt-5.6-terra), gpt-5 and o3 on 2026-12-11 (gpt-5.6-sol), gpt-4o,
+    // gpt-4o-mini and gpt-4.1 on 2027-01-14 (gpt-6-luna), gpt-5.1 and
+    // gpt-5.3-codex on 2027-04-01 (gpt-6-sol). Remove each, with an alias to
+    // its replacement, at the first refresh after its date, and re-point every
+    // alias that names it: `o3-mini` names o4-mini, and `gpt-4` gpt-4-turbo. The
+    // two legacy models at the end of this block go on 2026-10-23 as well.
     { id: 'gpt-5', label: 'GPT-5', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-4.1', label: 'GPT-4.1', provider: 'OpenAI', contextLimit: 1_047_576, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-4o', label: 'GPT-4o', provider: 'OpenAI', contextLimit: 128_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
@@ -327,10 +399,15 @@ export const MODELS: ModelInfo[] = [
     // vocabulary, estimated otherwise. Text only: the local tokenizer cannot
     // account for image or audio input.
     // ─────────────────────────────────────────────────────────────────────────
+    // gemini-3.5-flash and gemini-3.7-flash are not shut down, but Google
+    // routes their requests to gemini-3.6-flash and gemini-3.8-flash
+    // (gemini-api/docs/deprecations, read 2026-10-20), so they are aliased to
+    // those below. Gemini 4 Argon's window is input and output together, with
+    // no separate input cap (models/gemini-4-argon), and the SDK maps it to no
+    // vocabulary.
+    { id: 'gemini-4-argon', label: 'Gemini 4 Argon', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
     { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
-    { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
     { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
-    { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', provider: 'Google', contextLimit: 1_048_576, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
     { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
     { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (preview)', provider: 'Google', contextLimit: 1_048_576, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
     { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', provider: 'Google', contextLimit: 1_048_576, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
@@ -487,15 +564,12 @@ export const MODELS: ModelInfo[] = [
     // ─────────────────────────────────────────────────────────────────────────
     // Xiaomi MiMo / Tencent Hunyuan — exact.
     // ─────────────────────────────────────────────────────────────────────────
-    // The V2 series went offline on 2026-06-30 and mimo-v2-flash has been routed
-    // to mimo-v2.5 since 2026-06-18, so the Flash entry is gone (aliased below).
-    // V2.5 is next: Xiaomi routes mimo-v2.5-pro and mimo-v2.5 to the V2.6 models
-    // from 2026-10-14 and retires both names on 2026-10-21. Remove them then,
-    // aliased to their V2.6 replacements, and re-point mimo-v2-flash with them.
+    // Xiaomi has routed mimo-v2.5-pro to mimo-v2.6-pro, and mimo-v2.5 to
+    // mimo-v2.6-flash, since 2026-10-14, and retires both names on 2026-10-21
+    // (mimo.mi.com/docs/updates/deprecate, read 2026-10-20), so both are
+    // aliased below. The V2 series went offline on 2026-06-30.
     { id: 'mimo-v2.6-pro', label: 'MiMo V2.6 Pro', provider: 'Xiaomi', contextLimit: 1_048_576, encoder: hf(HF.mimo26, 3.6) },
     { id: 'mimo-v2.6-flash', label: 'MiMo V2.6 Flash', provider: 'Xiaomi', contextLimit: 1_048_576, encoder: hf(HF.mimo26, 3.6) },
-    { id: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro', provider: 'Xiaomi', contextLimit: 1_048_576, encoder: hf(HF.mimoPro, 3.6) },
-    { id: 'mimo-v2.5', label: 'MiMo V2.5', provider: 'Xiaomi', contextLimit: 1_048_576, encoder: hf(HF.mimo, 3.6) },
 
     // `hunyuan-hy3` was never a Tencent id — it appears on none of their model
     // tables, on either the international or the China site. The real ids are
@@ -547,6 +621,9 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     'gemini-3-flash': 'gemini-3-flash-preview',
     'gemini-3-pro': 'gemini-3.1-pro-preview',
     'gemini-2.5-flash-lite': 'gemini-3.5-flash-lite',
+    // Routed by Google to their successors, which count as estimates.
+    'gemini-3.5-flash': 'gemini-3.6-flash',
+    'gemini-3.7-flash': 'gemini-3.8-flash',
     'gemini-2.0-flash': 'gemini-2.5-flash',
     'gemini-1.5-pro': 'gemini-2.5-pro',
 
@@ -600,8 +677,10 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     // Tencent: `hunyuan-hy3` never existed as an API id.
     'hunyuan-hy3': 'hy3',
 
-    // Xiaomi: the V2 series is offline; Xiaomi itself routes Flash to V2.5.
-    'mimo-v2-flash': 'mimo-v2.5',
+    // Xiaomi: the V2 series is offline, and V2.5 is routed to V2.6, Pro to Pro.
+    'mimo-v2-flash': 'mimo-v2.6-flash',
+    'mimo-v2.5': 'mimo-v2.6-flash',
+    'mimo-v2.5-pro': 'mimo-v2.6-pro',
 
     // Zhipu / Moonshot.
     'glm-4.7': 'glm-5',

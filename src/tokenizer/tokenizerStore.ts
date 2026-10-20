@@ -12,10 +12,17 @@
  * Only ungated repos are referenced by the registry — Meta's Llama repos and
  * Google's Gemma 3 ones return 401 without a Hugging Face token, so mirrors are
  * used for those.
+ *
+ * Each is fetched at the commit the registry names, and its file is kept only
+ * when its hash is the registry's: on download, and again on every read, so a
+ * file cached from another commit, or by an older version that read the main
+ * branch, is never counted as exact. One that does not match is downloaded
+ * again, where downloads are allowed.
  */
 
+import { createHash } from 'crypto';
 import * as vscode from 'vscode';
-import type { TokenizerAsset } from './encoders';
+import type { DownloadableSpec, TokenizerAsset } from './encoders';
 
 /** Which shape of vocabulary a repo publishes. */
 export type AssetKind = TokenizerAsset['kind'];
@@ -76,6 +83,11 @@ export async function writeWhole(dir: vscode.Uri, name: string, contents: string
     }
 }
 
+/** SHA-256 of what the store keeps, as `PinnedSource.keptSha256` names it. */
+export function keptSha256(bytes: Uint8Array | string): string {
+    return createHash('sha256').update(bytes).digest('hex');
+}
+
 export class TokenizerDownloadError extends Error {
     constructor(readonly repo: string, message: string) {
         super(`Could not download the tokenizer for ${repo}: ${message}`);
@@ -101,25 +113,28 @@ export class TokenizerStore {
 
     constructor(private readonly storageUri: vscode.Uri) {}
 
-    /** The cached asset for `repo`, or undefined if it has never been downloaded. */
-    public async peek(repo: string, kind: AssetKind): Promise<TokenizerAsset | undefined> {
-        const cached = this.memory.get(repo);
+    /**
+     * The cached asset for `spec`, or undefined if it has never been
+     * downloaded, or what is on disk is not the file the registry names.
+     */
+    public async peek(spec: DownloadableSpec): Promise<TokenizerAsset | undefined> {
+        const cached = this.memory.get(spec.repo);
         if (cached) {
             return cached;
         }
 
         try {
-            const asset = await this.readFromDisk(repo, kind);
-            this.memory.set(repo, asset);
+            const asset = await this.readFromDisk(spec);
+            this.memory.set(spec.repo, asset);
             return asset;
         } catch {
             return undefined;
         }
     }
 
-    /** True when `repo` is already on disk, so the UI can offer an exact count. */
-    public async isDownloaded(repo: string, kind: AssetKind): Promise<boolean> {
-        return (await this.peek(repo, kind)) !== undefined;
+    /** True when `spec`'s vocabulary is already on disk, so the UI can offer an exact count. */
+    public async isDownloaded(spec: DownloadableSpec): Promise<boolean> {
+        return (await this.peek(spec)) !== undefined;
     }
 
     /**
@@ -127,23 +142,20 @@ export class TokenizerStore {
      *
      * @throws {TokenizerDownloadError} when the vocabulary cannot be obtained.
      */
-    public async fetch(
-        repo: string,
-        kind: AssetKind,
-        token?: vscode.CancellationToken,
-    ): Promise<TokenizerAsset> {
-        const cached = await this.peek(repo, kind);
+    public async fetch(spec: DownloadableSpec, token?: vscode.CancellationToken): Promise<TokenizerAsset> {
+        const cached = await this.peek(spec);
         if (cached) {
             return cached;
         }
 
+        const { repo } = spec;
         const existing = this.inFlight.get(repo);
         if (existing) {
             return existing;
         }
 
         const generation = this.generation;
-        const download: Promise<TokenizerAsset> = this.download(repo, kind, generation, token)
+        const download: Promise<TokenizerAsset> = this.download(spec, generation, token)
             .then(asset => {
                 // Still the caller's asset either way — it just no longer
                 // belongs in a cache the user has since emptied.
@@ -219,13 +231,20 @@ export class TokenizerStore {
         return vscode.Uri.joinPath(this.storageUri, repo.replace(/[/\\]/g, REPO_SEPARATOR));
     }
 
-    private async readFromDisk(repo: string, kind: AssetKind): Promise<TokenizerAsset> {
-        const dir = this.repoDir(repo);
+    private async readFromDisk(spec: DownloadableSpec): Promise<TokenizerAsset> {
+        const dir = this.repoDir(spec.repo);
         const decoder = new TextDecoder();
+        /** The vocabulary file, only when it is the one the registry names. */
+        const pinned = async (name: string): Promise<string> => {
+            const bytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name));
+            if (keptSha256(bytes) !== spec.keptSha256) {
+                throw new TokenizerDownloadError(spec.repo, `the cached ${name} is not the file this version names`);
+            }
+            return decoder.decode(bytes);
+        };
 
-        if (kind === 'tiktokenModel') {
-            const bytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, RANK_FILE));
-            return { kind: 'tiktokenModel', rankFile: decoder.decode(bytes) };
+        if (spec.kind === 'tiktokenModel') {
+            return { kind: 'tiktokenModel', rankFile: await pinned(RANK_FILE) };
         }
 
         const read = async (name: string): Promise<unknown> =>
@@ -233,7 +252,7 @@ export class TokenizerStore {
                 decoder.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name))),
             ) as unknown;
 
-        const tokenizerJSON = await read('tokenizer.json');
+        const tokenizerJSON = JSON.parse(await pinned('tokenizer.json')) as unknown;
 
         // Optional: some tokenizer-only mirrors omit it, and counting does not
         // need it.
@@ -248,18 +267,24 @@ export class TokenizerStore {
     }
 
     private async download(
-        repo: string,
-        kind: AssetKind,
+        spec: DownloadableSpec,
         generation: number,
         token?: vscode.CancellationToken,
     ): Promise<TokenizerAsset> {
+        const { repo } = spec;
         // Skipped when the user cleared the cache while this was in flight:
         // the directory has already been deleted, and writing now would put a
         // file back behind the delete.
         const stale = (): boolean => generation !== this.generation;
+        const check = (name: string, kept: string): void => {
+            if (keptSha256(kept) !== spec.keptSha256) {
+                throw new TokenizerDownloadError(repo, `${name} at ${spec.revision.slice(0, 12)} is not the file this version names`);
+            }
+        };
 
-        if (kind === 'tiktokenModel') {
-            const rankFile = await this.fetchText(repo, RANK_FILE, token);
+        if (spec.kind === 'tiktokenModel') {
+            const rankFile = await this.fetchText(spec, RANK_FILE, token);
+            check(RANK_FILE, rankFile);
             if (!stale()) {
                 const dir = this.repoDir(repo);
                 await vscode.workspace.fs.createDirectory(dir);
@@ -268,13 +293,16 @@ export class TokenizerStore {
             return { kind: 'tiktokenModel', rankFile };
         }
 
-        const tokenizerJSON = await this.fetchJson(repo, 'tokenizer.json', true, token);
-        const tokenizerConfig = (await this.fetchJson(repo, 'tokenizer_config.json', false, token)) ?? {};
+        const tokenizerJSON = await this.fetchJson(spec, 'tokenizer.json', true, token);
+        const tokenizerConfig = (await this.fetchJson(spec, 'tokenizer_config.json', false, token)) ?? {};
+        // Kept as it is written out again, which is what the hash is of.
+        const kept = JSON.stringify(tokenizerJSON);
+        check('tokenizer.json', kept);
 
         if (!stale()) {
             const dir = this.repoDir(repo);
             await vscode.workspace.fs.createDirectory(dir);
-            await writeWhole(dir, 'tokenizer.json', JSON.stringify(tokenizerJSON));
+            await writeWhole(dir, 'tokenizer.json', kept);
             await writeWhole(dir, 'tokenizer_config.json', JSON.stringify(tokenizerConfig));
         }
 
@@ -283,11 +311,12 @@ export class TokenizerStore {
 
     /** Fetch a file as text, for vocabularies that are not JSON. */
     private async fetchText(
-        repo: string,
+        spec: DownloadableSpec,
         file: string,
         token?: vscode.CancellationToken,
     ): Promise<string> {
-        const body = await this.fetchBody(repo, file, true, token);
+        const { repo } = spec;
+        const body = await this.fetchBody(spec, file, true, token);
         if (body === undefined) {
             throw new TokenizerDownloadError(repo, `${file} was empty`);
         }
@@ -297,12 +326,14 @@ export class TokenizerStore {
 
     /** Fetch a file's body, or undefined when it is optional and absent. */
     private async fetchBody(
-        repo: string,
+        spec: DownloadableSpec,
         file: string,
         required: boolean,
         token?: vscode.CancellationToken,
     ): Promise<string | undefined> {
-        const url = `${HF_ENDPOINT}/${repo}/resolve/main/${file}`;
+        const { repo } = spec;
+        // At the commit the registry names, never at whatever main holds now.
+        const url = `${HF_ENDPOINT}/${repo}/resolve/${spec.revision}/${file}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
         const cancel = token?.onCancellationRequested(() => controller.abort());
@@ -367,12 +398,13 @@ export class TokenizerStore {
     }
 
     private async fetchJson(
-        repo: string,
+        spec: DownloadableSpec,
         file: string,
         required: boolean,
         token?: vscode.CancellationToken,
     ): Promise<unknown> {
-        const body = await this.fetchBody(repo, file, required, token);
+        const { repo } = spec;
+        const body = await this.fetchBody(spec, file, required, token);
         if (body === undefined) {
             return undefined;
         }

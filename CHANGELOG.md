@@ -44,6 +44,24 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Changed
 - **The extension's pages show the logo's T in their tabs**, the token
   summary as well as Claude Code usage, rather than a blank page.
+- **The model registry, checked again against each provider's documentation
+  on 2026-10-20.**
+  - Added: Gemini 4 Argon, estimated, as Google's SDK maps it to no
+    vocabulary.
+  - Gemini 3.5 Flash and 3.7 Flash are not shut down, but Google routes
+    their requests to 3.6 Flash and 3.8 Flash, so a saved choice of either
+    moves to its successor, which is estimated.
+  - MiMo V2.5 Pro and V2.5 move to V2.6 Pro and V2.6 Flash: Xiaomi has
+    routed them there since 14 October, and retires both on 21 October.
+
+  That makes 96 models across 13 providers, 61 of them counted with the
+  model's own tokenizer.
+- **Tokenizers are downloaded from one commit of their repository**, the one
+  this version names, rather than from whatever its main branch holds, and
+  each file is checked against its hash when it is downloaded and whenever
+  it is read. A change upstream no longer changes a count shown as exact,
+  and a cached file that is not the one named is not used: it is downloaded
+  again, where downloads are allowed.
 
 ### Fixed
 - **Clear Downloaded Tokenizers deletes only the tokenizers.** It deleted

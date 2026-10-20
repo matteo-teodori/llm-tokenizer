@@ -4,7 +4,7 @@
   <h1>LLM Tokenizer</h1>
 
   <p><b>The ultimate AI token counter for your IDE.</b><br>
-  Token counting for 99 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
+  Token counting for 96 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
 
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
@@ -36,7 +36,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 ## Features
 
 ### 🎯 Core Features
-- **Exact counts, not guesses**: 64 of the 99 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
+- **Exact counts, not guesses**: 61 of the 96 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
 - **Real-time Token Count**: The active file's token count in the Status Bar
 - **Context Limit Warnings**: Indicators at 80% and 100% of the model's *usable input* limit
 - **Project-wide Counting**: Workspace totals with caching, cancellation, and multi-root support
@@ -68,7 +68,7 @@ anywhere.
 
 ## Supported Models
 
-99 models across 13 providers. Every id is checked against the provider's own
+96 models across 13 providers. Every id is checked against the provider's own
 documentation, and models that a provider has retired are removed. A model you
 picked from the status bar is migrated automatically; an old id in the
 `defaultModel` setting keeps working, though VS Code flags it until you update
@@ -86,8 +86,8 @@ Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 | OpenAI     | GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 (+mini), GPT-5.3 Codex, GPT-5.2, GPT-5.1, GPT-5, GPT-4.1, GPT-4o (+mini), o3, o4-mini, gpt-oss 120b/20b, GPT-4 Turbo, GPT-3.5 Turbo | Exact |
 | OpenAI     | GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, GPT-6 Astra | Estimated³ |
 | Anthropic  | Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1, Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
-| Google     | Gemini 3.5 Flash, 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
-| Google     | Gemini 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.5 Flash-Lite | Estimated² |
+| Google     | Gemini 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
+| Google     | Gemini 4 Argon, 3.8 Flash, 3.6 Flash, 3.5 Flash-Lite | Estimated² |
 | xAI        | Grok 4.7, 4.6, 4.5, 4.3, 4.20, Grok Build 0.1 | Estimated |
 | DeepSeek   | DeepSeek V4.1 Flash, V4 Pro | Exact¹ |
 | Meta       | Muse Glimmer 30B, Llama 4 Scout, Llama 4 Maverick, Llama 3.3 70B, Llama 3.1 8B | Exact¹ |
@@ -100,10 +100,12 @@ Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 | MiniMax    | MiniMax M3, M2.7, M2.5, M2.1, M2 | Exact¹ |
 | MiniMax    | MiniMax M3.1 Flash (preview) | Estimated⁴ |
 | Moonshot   | Kimi K3, K2.7 Code, K2.6 | Exact¹ |
-| Xiaomi     | MiMo V2.6 Pro, V2.6 Flash, V2.5 Pro, V2.5 | Exact¹ |
+| Xiaomi     | MiMo V2.6 Pro, V2.6 Flash | Exact¹ |
 | Tencent    | Hy4 preview, Hy3 | Exact¹ |
 
-¹ After a one-time tokenizer download.
+¹ After a one-time tokenizer download, from the commit of the vocabulary's
+repository that this version names, and checked against its hash: a later
+change upstream changes no count until a new version moves to it.
 
 ² Google's SDK does not map these releases to a published vocabulary yet, so
 they fall back to a character estimate.

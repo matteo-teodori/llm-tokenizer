@@ -15,7 +15,7 @@ import {
     type EncoderSpec,
 } from './encoders';
 import type { WorkerRequest, WorkerResponse } from './protocol';
-import { TokenizerStore, type AssetKind } from './tokenizerStore';
+import { TokenizerStore } from './tokenizerStore';
 import type { ModelInfo } from './registry';
 import { MAX_TOKENIZED_FILE_BYTES } from '../constants';
 import { WorkerHost } from '../workerHost';
@@ -164,7 +164,8 @@ export class TokenizerService implements vscode.Disposable {
             return;
         }
 
-        const { repo, kind } = model.encoder;
+        const spec = model.encoder;
+        const { repo } = spec;
         if (this.loadedRepos.has(repo) || this.unavailable.has(repo)) {
             return;
         }
@@ -186,7 +187,7 @@ export class TokenizerService implements vscode.Disposable {
         // a vocabulary that cannot be used.
         const epoch = this.host.epoch;
 
-        if (!(await this.store.isDownloaded(repo, kind))) {
+        if (!(await this.store.isDownloaded(spec))) {
             this.unavailable.add(repo);
             return;
         }
@@ -242,7 +243,7 @@ export class TokenizerService implements vscode.Disposable {
 
     /** True when a downloadable vocabulary is already loaded or on disk. */
     private async isVocabularyPresent(spec: DownloadableSpec): Promise<boolean> {
-        return this.loadedRepos.has(spec.repo) || this.store.isDownloaded(spec.repo, spec.kind);
+        return this.loadedRepos.has(spec.repo) || this.store.isDownloaded(spec);
     }
 
     /**
@@ -264,7 +265,8 @@ export class TokenizerService implements vscode.Disposable {
             return false;
         }
 
-        const { repo, kind } = model.encoder;
+        const spec = model.encoder;
+        const { repo } = spec;
         if (this.loadedRepos.has(repo)) {
             return true;
         }
@@ -277,20 +279,17 @@ export class TokenizerService implements vscode.Disposable {
             return existing;
         }
 
-        const load = this.loadTokenizer(repo, kind, token).finally(() => this.loading.delete(repo));
+        const load = this.loadTokenizer(spec, token).finally(() => this.loading.delete(repo));
         this.loading.set(repo, load);
         return load;
     }
 
-    private async loadTokenizer(
-        repo: string,
-        kind: AssetKind,
-        token?: vscode.CancellationToken,
-    ): Promise<boolean> {
+    private async loadTokenizer(spec: DownloadableSpec, token?: vscode.CancellationToken): Promise<boolean> {
+        const { repo } = spec;
         const generation = this.loadGeneration;
 
         try {
-            const asset = await this.store.fetch(repo, kind, token);
+            const asset = await this.store.fetch(spec, token);
             // Fetched now, whatever a count recorded while it was downloading.
             // Left in place, that "not on disk" outlived a load the crash budget
             // refused, and the model stayed an estimate for the session.
