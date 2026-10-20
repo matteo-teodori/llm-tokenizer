@@ -79,6 +79,11 @@ jobs:
       # `!cancelled()` lifts that gate; `steps.download.outcome` keeps it
       # honest, so a failed download never reaches a publish. Both publishes
       # take --skip-duplicate, which makes a re-run idempotent.
+      # VSCE_PAT is an Azure DevOps token for all organizations, a kind Azure
+      # DevOps stops honouring on 2026-12-01 (code.visualstudio.com, Publishing
+      # Extensions). Before then, publish with Microsoft Entra ID instead:
+      # azure/login with a federated credential, then
+      # `vsce publish --azure-credential`, which vsce 2.26.1 and later take.
       - name: Publish to the VS Code Marketplace
         if: ${{ !cancelled() && steps.download.outcome == 'success' }}
         env:
