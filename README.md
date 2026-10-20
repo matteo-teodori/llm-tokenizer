@@ -31,6 +31,11 @@ LLM Tokenizer gives you **instant visibility** into your token usage directly wi
 
 Stop copying and pasting into web calculators. Get precise counts right where you code.
 
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/token-summary-light.png">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/token-summary-dark.png" alt="A folder's count: 2.4K tokens for GPT-5.6 Sol, exact, by folder and by language, with each file's tokens">
+</picture>
+
 
 
 ## Features
@@ -155,6 +160,8 @@ Code keeps on your machine. It is off by default: turn on
 or, while it is on, click the LLM Tokenizer **T** at the top right of an
 editor.
 
+<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects and sessions, and the status item's tooltip shows the running session's context">
+
 **The panel** shows today, the last 7 or 30 days, or everything since the
 history starts, for all projects or for this workspace:
 - tokens processed, split into input, cache writes, cache reads and output,
@@ -163,6 +170,11 @@ history starts, for all projects or for this workspace:
 - models, the main conversation against subagents and workflows, and effort;
 - projects and sessions, sortable, and the usage limits you reached;
 - diagnostics: what was read, what was skipped and why, and where from.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-light.png">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.1B tokens processed in 12,565 requests and 96 sessions, split into cache reads, cache writes, input and output, by day and by model">
+</picture>
 
 *Processed* is everything a request sent or received: input, cache writes,
 cache reads and output. Cache reads are most of it, because Claude Code sends
@@ -182,6 +194,11 @@ A project's own `.claude/settings.json` is not read, nor are policies
 delivered by MDM, the Windows registry or as server-managed settings. A context larger
 than the window a model was thought to have is shown with a `?`, and no
 colour. It reads Claude Code's running-session files too.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-light.png">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-dark.png" alt="The status item at 532.8K · 53%, and its tooltip: the context's 532,842 of 1,000,000 tokens, the model, the last request, and today's tokens in this workspace">
+</picture>
 
 **Export CSV** copies to the clipboard, per day and model, every count a
 hand-made cost calculation needs: requests, input, cache writes (5-minute and
