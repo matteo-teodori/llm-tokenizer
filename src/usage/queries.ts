@@ -6,7 +6,9 @@
  * a workspace folder are compared after `realpath`, when the path still
  * exists, so `/var` and `/private/var`, or a symlinked checkout, are one
  * folder. A UNC path is compared as written, never resolved: on Windows that
- * would connect to the server it names, and a cwd comes from a record.
+ * would connect to the server it names, and a cwd comes from a record. So is
+ * one under /net or /Network, which the automounter would mount from the host
+ * it names, and wait on while that host does not answer.
  */
 
 import * as fs from 'fs';
@@ -89,7 +91,7 @@ export function inFolders(
 }
 
 function realOrSelf(p: string): string {
-    if (!path.isAbsolute(p) || /^[\\/]{2}/.test(p)) {
+    if (!path.isAbsolute(p) || /^[\\/]{2}/.test(p) || /^\/(net|Network)(\/|$)/.test(p)) {
         return p;
     }
     try {

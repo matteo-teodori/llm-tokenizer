@@ -7,7 +7,7 @@ import { BUCKET_MS, byDay, localDate } from '../../src/usage/aggregate';
 import { importRoots } from '../../src/usage/importer';
 import { comparablePath, isWithin, projectLabel, sessionRoot } from '../../src/usage/projects';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
-import { queryReport, reportSessions, type ReportQuery } from '../../src/usage/queries';
+import { inFolders, queryReport, reportSessions, type ReportQuery } from '../../src/usage/queries';
 import { buildReport, rangeSince, type RangeKey } from '../../src/usage/report';
 import { createHistory, currentHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
@@ -346,6 +346,27 @@ suite('usage report', () => {
             ['repo', 101],
             ['app', 10],
         ]);
+    });
+
+    test("a session's folder on a share or an automount is compared as written, never resolved", () => {
+        // Resolving one would connect to the host it names, and wait on it.
+        // The module itself, as queries.ts sees it, not this file's view of it.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const shared = require('fs') as { realpathSync: typeof fs.realpathSync };
+        const original = shared.realpathSync;
+        const resolved: string[] = [];
+        shared.realpathSync = Object.assign((p: fs.PathLike) => (resolved.push(String(p)), String(p)), { native: original.native }) as unknown as typeof fs.realpathSync;
+        try {
+            assert.ok(inFolders('/net/build-host/repo', ['/net/build-host/repo'], 'darwin'));
+            assert.ok(inFolders('/Network/Servers/host/repo/src', ['/Network/Servers/host/repo'], 'darwin'));
+            assert.ok(inFolders('\\\\srv\\share\\repo', ['\\\\srv\\share\\repo'], 'win32'));
+            assert.strictEqual(resolved.length, 0, resolved.join(', '));
+            // Anywhere else, resolved as before.
+            inFolders('/work/repo', ['/work'], 'darwin');
+            assert.ok(resolved.includes('/work/repo') && resolved.includes('/work'), resolved.join(', '));
+        } finally {
+            shared.realpathSync = original;
+        }
     });
 
     test('two cwds that encode to one folder are two projects', async () => {
