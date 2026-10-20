@@ -17,12 +17,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-export type RootSource = 'setting' | 'editor-environment' | 'process-environment' | 'claude-settings' | 'default';
+export type RootSource = 'setting' | 'editor-environment' | 'process-environment' | 'managed-settings' | 'claude-settings' | 'default';
 
 export interface RootCandidate {
     path: string;
     source: RootSource;
     exists: boolean;
+    /** Given as a relative path, which is never read: listed so that the panel says why. */
+    notAbsolute?: true;
 }
 
 export interface RootInputs {
@@ -40,6 +42,8 @@ export interface RootInputs {
     platform: NodeJS.Platform;
     /** Under test, the only folders a root may be inside. */
     confineTo?: string[];
+    /** The folder of Claude Code's managed settings files, an organization's: none read without it. */
+    managedSettingsDir?: string;
 }
 
 export interface ResolvedRoots {
@@ -56,8 +60,14 @@ export interface ResolvedRoots {
      * there is nothing to read.
      */
     historyDisabled: boolean;
-    /** CLAUDE_CODE_DISABLE_1M_CONTEXT is set there: every model is held to a 200K window. */
+    /**
+     * CLAUDE_CODE_DISABLE_1M_CONTEXT is set where it holds every session to a
+     * 200K window: the environment, Claude Code's environmentVariables
+     * setting, or managed settings.
+     */
     largeContextDisabled: boolean;
+    /** The roots whose own settings.json sets it: their sessions are held to 200K too. */
+    largeContextDisabledRoots: string[];
 }
 
 /**
@@ -72,7 +82,46 @@ export function machineRootInputs(test?: { fixtures: string }): Omit<RootInputs,
         home: test ? path.join(test.fixtures, 'claude-home') : os.homedir(),
         platform: process.platform,
         confineTo: test ? [test.fixtures, os.tmpdir()] : undefined,
+        // Under test, the fixtures': the machine's own policy would make the tests its.
+        managedSettingsDir: test ? path.join(test.fixtures, 'claude-managed') : defaultManagedSettingsDir(process.platform, process.env),
     };
+}
+
+/** Where Claude Code's managed settings files are, per its docs (code.claude.com/docs/en/managed-settings). */
+function defaultManagedSettingsDir(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined {
+    switch (platform) {
+        case 'darwin':
+            return '/Library/Application Support/ClaudeCode';
+        case 'win32':
+            return path.win32.join(env.ProgramFiles ?? 'C:\\Program Files', 'ClaudeCode');
+        case 'linux':
+            return '/etc/claude-code';
+        default:
+            return undefined;
+    }
+}
+
+/**
+ * The kept `env` entries of the managed settings files: managed-settings.json,
+ * then managed-settings.d/*.json in name order, a later file's value for a
+ * variable over an earlier one's. Policies delivered by MDM, the Windows
+ * registry or the claude.ai console are not files, and are not read.
+ */
+function managedEnv(dir: string | undefined): SettingsEnv {
+    if (!dir) {
+        return {};
+    }
+    const merged: SettingsEnv = { ...settingsEnv(path.join(dir, 'managed-settings.json')) };
+    let names: string[] = [];
+    try {
+        names = fs.readdirSync(path.join(dir, 'managed-settings.d')).filter(n => n.endsWith('.json') && !n.startsWith('.')).sort();
+    } catch {
+        // Absent, which is normal.
+    }
+    for (const name of names) {
+        Object.assign(merged, settingsEnv(path.join(dir, 'managed-settings.d', name)));
+    }
+    return merged;
 }
 
 /** settings.json is read for three keys; a file this large is not a settings file. */
@@ -85,10 +134,12 @@ type SettingsEnv = Partial<Record<(typeof SETTINGS_VARIABLES)[number], string>>;
 /** The roots to read, with every candidate and where it came from. */
 export function resolveRoots(inputs: RootInputs): ResolvedRoots {
     const homeSettings = settingsEnv(path.join(inputs.home, '.claude', 'settings.json'));
+    const managed = managedEnv(inputs.managedSettingsDir);
     const proposed: { path: string | null; source: RootSource }[] = [
-        { path: inputs.setting.trim() || null, source: 'setting' },
+        { path: homeRelative(inputs.setting.trim(), inputs.home) || null, source: 'setting' },
         { path: editorConfigDir(inputs.editorEnvironment, inputs.platform), source: 'editor-environment' },
         { path: inputs.env.CLAUDE_CONFIG_DIR ?? null, source: 'process-environment' },
+        { path: managed.CLAUDE_CONFIG_DIR ?? null, source: 'managed-settings' },
         { path: homeSettings.CLAUDE_CONFIG_DIR ?? null, source: 'claude-settings' },
         { path: path.join(inputs.home, '.claude'), source: 'default' },
     ];
@@ -99,6 +150,9 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
         if (candidate && path.isAbsolute(candidate)) {
             const resolved = path.resolve(candidate);
             candidates.push({ path: resolved, source, exists: isDirectory(resolved) });
+        } else if (candidate && source === 'setting') {
+            // This extension's own setting is listed, so the panel says why it is not read.
+            candidates.push({ path: candidate, source, exists: false, notAbsolute: true });
         }
     }
 
@@ -138,16 +192,20 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
         }
     }
     // A root is a configuration folder, read with its own settings.json;
-    // ~/.claude's is among them whenever it exists.
-    const rootSettings = roots.map(root => settingsEnv(path.join(root.path, 'settings.json')));
-    const flag = (name: Exclude<(typeof SETTINGS_VARIABLES)[number], 'CLAUDE_CONFIG_DIR'>) =>
-        [inputs.env[name], editorVariable(inputs.editorEnvironment, inputs.platform, name), ...rootSettings.map(e => e[name])].some(isTruthy);
+    // ~/.claude's is among them whenever it exists. Managed settings stand
+    // above the files, so a variable they set is theirs to decide.
+    const rootSettings = roots.map(root => ({ root: root.path, env: settingsEnv(path.join(root.path, 'settings.json')) }));
+    type Flag = Exclude<(typeof SETTINGS_VARIABLES)[number], 'CLAUDE_CONFIG_DIR'>;
+    const everywhere = (name: Flag) =>
+        name in managed ? isTruthy(managed[name]) : [inputs.env[name], editorVariable(inputs.editorEnvironment, inputs.platform, name)].some(isTruthy);
+    const inRoot = (name: Flag, env: SettingsEnv) => !(name in managed) && isTruthy(env[name]);
     return {
         candidates,
         roots,
         refused,
-        historyDisabled: flag('CLAUDE_CODE_SKIP_PROMPT_HISTORY'),
-        largeContextDisabled: flag('CLAUDE_CODE_DISABLE_1M_CONTEXT'),
+        historyDisabled: everywhere('CLAUDE_CODE_SKIP_PROMPT_HISTORY') || rootSettings.some(r => inRoot('CLAUDE_CODE_SKIP_PROMPT_HISTORY', r.env)),
+        largeContextDisabled: everywhere('CLAUDE_CODE_DISABLE_1M_CONTEXT'),
+        largeContextDisabledRoots: rootSettings.filter(r => inRoot('CLAUDE_CODE_DISABLE_1M_CONTEXT', r.env)).map(r => r.root),
     };
 }
 
@@ -160,6 +218,8 @@ export function sourceLabel(source: RootSource): string {
             return "CLAUDE_CONFIG_DIR in Claude Code's environmentVariables setting";
         case 'process-environment':
             return 'CLAUDE_CONFIG_DIR';
+        case 'managed-settings':
+            return 'env.CLAUDE_CONFIG_DIR in managed settings';
         case 'claude-settings':
             return 'env.CLAUDE_CONFIG_DIR in ~/.claude/settings.json';
         case 'default':
@@ -176,6 +236,15 @@ export function tildePath(p: string, home: string = os.homedir()): string {
 /** A flag counts as set when it is 1, true, yes or on, ignoring case: only a hint, for an empty state. */
 function isTruthy(value: string | undefined | null): boolean {
     return typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+/**
+ * The setting with a leading `~` or `${userHome}` as the home folder, as the
+ * panel itself writes paths; anything else as it is.
+ */
+function homeRelative(value: string, home: string): string {
+    const match = /^(~|\$\{userHome\})(?=$|[\\/])/.exec(value);
+    return match ? path.join(home, value.slice(match[0].length)) : value;
 }
 
 /**

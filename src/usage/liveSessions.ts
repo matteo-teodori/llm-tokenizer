@@ -30,6 +30,8 @@ import { SESSION_ID } from './protocol';
 export interface LiveSession {
     sessionId: string;
     cwd: string;
+    /** The root whose sessions folder named it, once read from one. */
+    root?: string;
     status: string | null;
     /** Epoch milliseconds, as Claude Code writes it; null when there is none, or none to believe. */
     updatedAt: number | null;
@@ -103,7 +105,8 @@ export async function readLiveSessions(
                 if (text === undefined) {
                     continue;
                 }
-                const session = parseLiveSession(text, isAlive, platform, now);
+                const parsed = parseLiveSession(text, isAlive, platform, now);
+                const session = parsed && { ...parsed, root };
                 const known = session && sessions.get(session.sessionId);
                 if (session && (!known || (session.updatedAt ?? 0) > (known.updatedAt ?? 0))) {
                     sessions.set(session.sessionId, session);

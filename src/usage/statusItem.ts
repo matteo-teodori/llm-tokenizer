@@ -39,11 +39,18 @@ export const LIVE_TICK_MS = 60_000;
  * and the newer models have 1M either way. CLAUDE_CODE_DISABLE_1M_CONTEXT
  * holds them all to 200K.
  */
-export function contextWindow(model: ModelInfo | undefined, variant: string | null, largeContextDisabled: boolean): number | undefined {
+export function contextWindow(
+    model: ModelInfo | undefined,
+    variant: string | null,
+    largeContextDisabled: boolean,
+    largestContext = 0,
+): number | undefined {
     if (!model?.contextLimit) {
         return undefined;
     }
-    const window = variant === '1m' ? model.contextLimit : (model.claudeCodeBaseContext ?? model.contextLimit);
+    // A context past the smaller window is the larger one's, named or not.
+    const larger = variant === '1m' || (model.claudeCodeBaseContext !== undefined && largestContext > model.claudeCodeBaseContext);
+    const window = larger ? model.contextLimit : (model.claudeCodeBaseContext ?? model.contextLimit);
     return largeContextDisabled ? Math.min(window, HELD_WINDOW) : window;
 }
 
@@ -74,11 +81,14 @@ export function describeLive(input: LiveInput): LiveView {
           ? latest.input + latest.cacheCreation + latest.cacheRead
           : null;
     const model = latest ? modelById(latest.model) : undefined;
-    const window = latest ? contextWindow(model, latest.variant, input.largeContextDisabled) : undefined;
+    // What the session held on this model, the latest request's own context included.
+    const own = latest && latest.input !== null && latest.cacheCreation !== null && latest.cacheRead !== null ? latest.input + latest.cacheCreation + latest.cacheRead : 0;
+    const largest = Math.max(latest?.largestContext ?? 0, own);
+    const window = latest ? contextWindow(model, latest.variant, input.largeContextDisabled, largest) : undefined;
     const share = occupancy !== null && window !== undefined && occupancy <= window ? occupancy / window : undefined;
     const status = share !== undefined && model && window !== undefined ? contextStatus(occupancy ?? 0, { ...model, contextLimit: window }) : undefined;
 
-    const figure = occupancy === null ? '—' : formatNumber(occupancy);
+    const figure = occupancy === null ? '—' : figureOf(occupancy);
     const icon = status === 'error' ? '$(error)' : status === 'warning' ? '$(warning)' : '$(comment-discussion)';
     const text =
         share !== undefined ? `${icon} ${figure} · ${percent(share)}` : occupancy === null ? `${icon} ${figure}` : `${icon} ${figure} ?`;
@@ -114,6 +124,23 @@ export function describeLive(input: LiveInput): LiveView {
     }
     tooltip.push('', 'Click to show Claude Code usage.');
     return { text, tooltip, status };
+}
+
+/**
+ * As formatNumber, but cut rather than rounded, as the share beside it is:
+ * 199,999 is 199.9K at 99%, never 200.0K at 99%.
+ */
+function figureOf(tokens: number): string {
+    if (tokens >= 1_000_000_000) {
+        return `${(Math.floor(tokens / 100_000_000) / 10).toFixed(1)}B`;
+    }
+    if (tokens >= 1_000_000) {
+        return `${(Math.floor(tokens / 100_000) / 10).toFixed(1)}M`;
+    }
+    if (tokens >= 1_000) {
+        return `${(Math.floor(tokens / 100) / 10).toFixed(1)}K`;
+    }
+    return String(tokens);
 }
 
 function percent(share: number): string {
@@ -239,7 +266,7 @@ export class UsageStatusItem implements vscode.Disposable {
         }
         const view = describeLive({
             ...context,
-            largeContextDisabled: resolved.largeContextDisabled,
+            largeContextDisabled: resolved.largeContextDisabled || (live.root !== undefined && resolved.largeContextDisabledRoots.includes(live.root)),
             todayProcessed: report && { tokens: report.totals.processed, partial: report.totals.provenance === 'partial' },
             formatTime: this.deps.formatTime,
         });

@@ -47,6 +47,10 @@ const HISTORY_FILE = /^usage(-[0-9a-z]+)?\.sqlite(-wal|-shm|-journal|\.bak-v.+|\
 const OWN_SUFFIXES = ['', '-wal', '-shm', '-journal'];
 /** A pointer holds one name; a larger file holds something else. */
 const MAX_POINTER_BYTES = 256;
+/** Held while the pointer is read, compared and replaced, so that only one window replaces it. */
+const LOCK = 'usage.current.lock';
+/** A lock older than this was left by a window that died holding it. */
+const LOCK_STALE_MS = 5_000;
 
 /** The history's files could not be told apart for a reason other than their absence. */
 export class HistoryFileError extends Error {
@@ -107,7 +111,7 @@ export function createHistory(folder: string): string {
  * @returns the history in use afterwards: `file`, or the one another window
  * published first, which is then used instead.
  */
-export function publishHistory(folder: string, file: string, over: Pointer): string {
+export function publishHistory(folder: string, file: string, over: Pointer, options: { lockWaitMs?: number } = {}): string {
     if (over.kind === 'unknown') {
         // Never replaced: the newest history is the one in use, and that is this one.
         return file;
@@ -123,13 +127,20 @@ export function publishHistory(folder: string, file: string, over: Pointer): str
         fs.closeSync(fd);
     }
     try {
-        return publishOver(folder, file, over, written, pointer);
+        return publishOver(folder, file, over, written, pointer, options.lockWaitMs ?? 3_000);
     } finally {
         fs.rmSync(written, { force: true });
     }
 }
 
-function publishOver(folder: string, file: string, over: Exclude<Pointer, { kind: 'unknown' }>, written: string, pointer: string): string {
+function publishOver(
+    folder: string,
+    file: string,
+    over: Exclude<Pointer, { kind: 'unknown' }>,
+    written: string,
+    pointer: string,
+    lockWaitMs: number,
+): string {
     if (over.kind === 'absent') {
         try {
             fs.linkSync(written, pointer);
@@ -145,15 +156,60 @@ function publishOver(folder: string, file: string, over: Exclude<Pointer, { kind
         }
         return published(folder, file);
     }
-    const now = readPointer(folder);
-    if (now.kind === 'absent') {
-        return publishOver(folder, file, now, written, pointer);
+    // Read, compared and replaced as one step: two windows replacing it at
+    // once both found the name they replace, and each kept its own history.
+    return underLock(folder, lockWaitMs, () => {
+        const now = readPointer(folder);
+        if (now.kind === 'absent') {
+            return publishOver(folder, file, now, written, pointer, lockWaitMs);
+        }
+        if (now.kind === 'name' && now.name === over.name) {
+            renameRetrying(written, pointer);
+            return file;
+        }
+        return published(folder, file);
+    });
+}
+
+/**
+ * Run `work` holding the pointer's lock, a file made exclusively. One left by
+ * a window that died holding it is taken over once it is LOCK_STALE_MS old.
+ *
+ * @throws HistoryFileError when another window holds it past `waitMs`.
+ */
+function underLock<T>(folder: string, waitMs: number, work: () => T): T {
+    const lock = path.join(folder, LOCK);
+    const until = Date.now() + waitMs;
+    for (;;) {
+        try {
+            fs.closeSync(fs.openSync(lock, 'wx'));
+            break;
+        } catch (error) {
+            if (codeOf(error) !== 'EEXIST') {
+                throw error;
+            }
+        }
+        let age: number;
+        try {
+            age = Date.now() - fs.statSync(lock).mtimeMs;
+        } catch {
+            // Let go of meanwhile.
+            continue;
+        }
+        if (age > LOCK_STALE_MS) {
+            fs.rmSync(lock, { force: true });
+            continue;
+        }
+        if (Date.now() >= until) {
+            throw new HistoryFileError('EBUSY');
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     }
-    if (now.kind === 'name' && now.name === over.name) {
-        renameRetrying(written, pointer);
-        return file;
+    try {
+        return work();
+    } finally {
+        fs.rmSync(lock, { force: true });
     }
-    return published(folder, file);
 }
 
 /** The history another window just published, or `file` while the pointer names none there. */
@@ -176,6 +232,28 @@ export function removeHistory(file: string): void {
 /** The names of a history's own files: the history, and SQLite's journals beside it. */
 export function ownFiles(history: string): string[] {
     return OWN_SUFFIXES.map(suffix => `${path.basename(history)}${suffix}`);
+}
+
+/**
+ * Remove every history file in `folder`, which holds no history in use:
+ * copies that earlier ones left. Returns how many could not be removed.
+ */
+export function removeLeftovers(folder: string): number {
+    let names: string[];
+    try {
+        names = fs.readdirSync(folder);
+    } catch {
+        return 0;
+    }
+    let left = 0;
+    for (const name of names.filter(n => HISTORY_FILE.test(n))) {
+        try {
+            fs.rmSync(path.join(folder, name), { force: true });
+        } catch {
+            left++;
+        }
+    }
+    return left;
 }
 
 /** The history files in `current`'s folder that are not `current`'s own: what Clear removes. */

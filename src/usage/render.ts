@@ -36,7 +36,7 @@ export interface PanelView {
     /** A model id's label, from the registry by exact id; the id itself when unknown. */
     modelLabel(id: string): string;
     /** Each root considered, as shown: `~`-relative, with what chose it in words. */
-    roots: { path: string; source: string; exists: boolean }[];
+    roots: { path: string; source: string; exists: boolean; notAbsolute?: true }[];
     historyDisabled: boolean;
     lastImport: LastImport | undefined;
     sqliteRuntime: { node: string; electron: string | null } | undefined;
@@ -91,7 +91,7 @@ function emptyState(view: PanelView): string | undefined {
             return `
             <section class="empty-state">
                 <h2>Claude Code usage is off</h2>
-                <p>Turned on, LLM Tokenizer reads Claude Code's own session records on this machine${view.where ? ` (${escapeHtml(view.where)})` : ''},
+                <p>Turned on, LLM Tokenizer reads Claude Code's own session records ${view.where ? escapeHtml(view.where) : 'on this machine'},
                 and shows how many tokens Claude Code processed: by day, project, session and model.</p>
                 <ul>
                     <li>Kept, in a database in this extension's own storage: each request's token counts, model, effort, time, ids and Claude Code version; the folder each session started in; compactions' sizes and the usage limits reached; which transcripts were read, and how far; and this machine's name, which each import writes.</li>
@@ -123,7 +123,7 @@ function emptyState(view: PanelView): string | undefined {
                     view.sqliteRuntime
                         ? ` (Node ${escapeHtml(view.sqliteRuntime.node)}${view.sqliteRuntime.electron ? `, Electron ${escapeHtml(view.sqliteRuntime.electron)}` : ''})`
                         : ''
-                }. VS Code 1.105 and later have it.</p>
+                }. It needs Node 22.13 or later, which VS Code has from 1.105.</p>
             </section>`;
         default:
             return undefined;
@@ -134,7 +134,7 @@ function rootList(view: PanelView): string {
     return `<ul class="plain-list">${view.roots
         .map(
             r =>
-                `<li><span class="path">${escapeHtml(r.path)}</span><span class="reason">${escapeHtml(r.source)}${r.exists ? '' : ', not found'}</span></li>`,
+                `<li><span class="path">${escapeHtml(r.path)}</span><span class="reason">${escapeHtml(r.source)}${r.notAbsolute ? ', not an absolute path' : r.exists ? '' : ', not found'}</span></li>`,
         )
         .join('')}</ul>`;
 }
@@ -155,7 +155,7 @@ function banner(view: PanelView): string {
         lines.push('This history was written by a newer LLM Tokenizer: it is shown, but not updated.');
     }
     if (view.status === 'failing') {
-        lines.push('The last import failed; what is shown may be out of date. <button type="button" data-action="showLog">Show Log</button>');
+        lines.push('The history could not be read or updated just now; what is shown may be out of date. <button type="button" data-action="showLog">Show Log</button>');
     }
     if (view.historyDisabled) {
         lines.push('CLAUDE_CODE_SKIP_PROMPT_HISTORY is set, so Claude Code keeps no transcripts, and nothing new can be read.');
@@ -739,24 +739,35 @@ ${PAGE_TEXT_HELPERS}
         return out.join('\\n');
     }
 
+    let shown = { controls: null, body: null, diagnostics: null };
     function show(fragments) {
-        // Focus is restored to the same control, found again by what it does.
+        // Focus is restored to the same control, found again by what it does,
+        // and in which table: two share their sort keys.
         const focused = document.activeElement;
-        const key = focused && focused.matches('button')
-            ? ['data-action', 'data-range', 'data-scope', 'data-sort-key'].map(a => focused.getAttribute(a) && '[' + a + '="' + focused.getAttribute(a) + '"]').filter(Boolean)[0]
-            : null;
-        controls.innerHTML = fragments.controls;
-        body.innerHTML = fragments.body;
-        const open = document.getElementById('diagnostics');
-        const wasOpen = !!(open && open.open);
-        slot.innerHTML = fragments.diagnostics;
-        const details = document.getElementById('diagnostics');
-        if (details && wasOpen) { details.open = true; }
+        let selector = null;
+        if (focused && focused.matches('button')) {
+            const attribute = ['data-action', 'data-range', 'data-scope', 'data-sort-key'].find(a => focused.getAttribute(a));
+            const table = attribute === 'data-sort-key' && focused.closest('table[id]');
+            selector = attribute ? (table ? '#' + table.id + ' ' : '') + 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' : null;
+        } else if (focused && focused.matches('#diagnostics > summary')) {
+            selector = '#diagnostics > summary';
+        }
+        // A region whose page has not changed is left as it is, focus and all.
+        if (fragments.controls !== shown.controls) { controls.innerHTML = fragments.controls; }
+        if (fragments.body !== shown.body) { body.innerHTML = fragments.body; }
+        if (fragments.diagnostics !== shown.diagnostics) {
+            const open = document.getElementById('diagnostics');
+            const wasOpen = !!(open && open.open);
+            slot.innerHTML = fragments.diagnostics;
+            const details = document.getElementById('diagnostics');
+            if (details && wasOpen) { details.open = true; }
+        }
+        shown = { controls: fragments.controls, body: fragments.body, diagnostics: fragments.diagnostics };
         exports = { csv: fragments.csv, copy: fragments.copy };
         document.querySelectorAll('table[data-sort]').forEach(applySort);
-        if (key) {
-            const again = document.querySelector('button' + key);
-            if (again) { again.focus(); }
+        if (selector) {
+            const again = document.querySelector(selector);
+            if (again && again !== document.activeElement) { again.focus(); }
         }
     }
 

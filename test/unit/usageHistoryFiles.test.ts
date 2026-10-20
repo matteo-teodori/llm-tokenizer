@@ -3,6 +3,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { Worker } from 'worker_threads';
 
 import {
     HistoryFileError,
@@ -202,6 +203,81 @@ suite('usage history files', () => {
         assert.strictEqual(currentHistory(folder), c);
         // No temporary file is left beside the pointer.
         assert.deepStrictEqual(fs.readdirSync(folder).filter(name => name.startsWith('usage.current.')), []);
+    });
+
+    test('one window at a time replaces the pointer: one that comes while another does waits, then follows it', () => {
+        // Both found the history corrupt. Read, compared and renamed with no
+        // lock, the second passed the compare while the first was between its
+        // compare and its rename: both renamed, and each kept its own history.
+        const a = start();
+        const found: Pointer = { kind: 'name', name: path.basename(a) };
+        const c = createHistory(folder);
+        const d = createHistory(folder);
+        // The module itself, as historyFiles.ts sees it, not this file's view of it.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const shared = require('fs') as { renameSync: typeof fs.renameSync };
+        const original = shared.renameSync;
+        let meanwhile: unknown;
+        let entered = false;
+        shared.renameSync = (from: fs.PathLike, to: fs.PathLike) => {
+            if (to === pointer && !entered) {
+                // The second window, while the first is about to rename.
+                entered = true;
+                try {
+                    meanwhile = publishHistory(folder, d, found, { lockWaitMs: 50 });
+                } catch (error) {
+                    meanwhile = error;
+                }
+            }
+            original(from, to);
+        };
+        try {
+            assert.strictEqual(publishHistory(folder, c, found), c);
+        } finally {
+            shared.renameSync = original;
+        }
+        assert.ok(meanwhile instanceof HistoryFileError && meanwhile.code === 'EBUSY', `the second window got in: ${String(meanwhile)}`);
+        // At its next request it follows the first, and the lock is gone.
+        assert.strictEqual(publishHistory(folder, d, found), c);
+        assert.strictEqual(currentHistory(folder), c);
+        assert.deepStrictEqual(fs.readdirSync(folder).filter(name => name.startsWith('usage.current.')), []);
+    });
+
+    test('a lock another window holds is waited on, then given up; one left by a window that died is taken over', () => {
+        const a = start();
+        const found: Pointer = { kind: 'name', name: path.basename(a) };
+        const lock = path.join(folder, 'usage.current.lock');
+        fs.writeFileSync(lock, '');
+        const c = createHistory(folder);
+        assert.throws(
+            () => publishHistory(folder, c, found, { lockWaitMs: 50 }),
+            (error: unknown) => error instanceof HistoryFileError && error.code === 'EBUSY',
+        );
+        // The request fails and changes nothing: not the pointer, not the other window's lock.
+        assert.strictEqual(fs.readFileSync(pointer, 'utf8'), path.basename(a));
+        assert.ok(fs.existsSync(lock), "another window's lock was removed");
+        // Older than any window holds it: left by one that died holding it.
+        const old = (Date.now() - 60_000) / 1000;
+        fs.utimesSync(lock, old, old);
+        assert.strictEqual(publishHistory(folder, c, found, { lockWaitMs: 50 }), c);
+        assert.strictEqual(fs.readFileSync(pointer, 'utf8'), path.basename(c));
+        assert.deepStrictEqual(fs.readdirSync(folder).filter(name => name.startsWith('usage.current.')), []);
+    });
+
+    test('a window that finds the lock held waits for it to be let go, then goes on', async () => {
+        const a = start();
+        const found: Pointer = { kind: 'name', name: path.basename(a) };
+        const lock = path.join(folder, 'usage.current.lock');
+        fs.writeFileSync(lock, '');
+        // Another window lets go of it while this one waits, well before it would count as left.
+        const other = new Worker(`setTimeout(() => require('fs').rmSync(${JSON.stringify(lock)}), 100)`, { eval: true });
+        const c = createHistory(folder);
+        try {
+            assert.strictEqual(publishHistory(folder, c, found, { lockWaitMs: 2_000 }), c);
+        } finally {
+            await other.terminate();
+        }
+        assert.strictEqual(currentHistory(folder), c);
     });
 
     test("copies are every history file beside the current one but the current one's own", () => {

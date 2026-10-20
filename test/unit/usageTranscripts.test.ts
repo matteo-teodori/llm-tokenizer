@@ -383,6 +383,26 @@ suite('usage transcripts', () => {
         assert.deepStrictEqual([...b.requests()].map(r => r.messageId).sort(), ['late0', 'late1', 'late2', 'm0', 'm1', 'm2']);
     });
 
+    test('a Clear in another window just before a guarded read ends the pass there: nothing is counted as crashed', async () => {
+        // The guard's write is refused because the history was cleared, not
+        // because the file crashed a read.
+        transcripts(2);
+        const a = freshStore();
+        const b = freshStore();
+        let seen = 0;
+        const summary = await importRoots(b, [tmp], {
+            guardedReadBytes: 0,
+            isCancelled: () => {
+                if (++seen === 2) {
+                    a.clear();
+                }
+                return false;
+            },
+        });
+        assert.deepStrictEqual([summary.cancelled, summary.skipped], [true, {}]);
+        assert.strictEqual([...b.requests()].length, 0, 'rows were written after the Clear');
+    });
+
     test("a file a newer parser read is left alone, and no parser restart goes downward", async () => {
         const [file] = transcripts(1);
         const store = freshStore();
@@ -430,6 +450,7 @@ suite('usage transcripts', () => {
         const file = path.join(tmp, 'projects', 'p', 's1.jsonl');
         fs.mkdirSync(path.dirname(file), { recursive: true });
         const iso = (ms: number) => new Date(ms).toISOString();
+        const skewed = Date.now() + 60 * 60 * 1000;
         fs.writeFileSync(
             file,
             line(assistant('ancient', 1, { timestamp: '-271821-04-20T00:00:00.000Z' })) +
@@ -438,7 +459,7 @@ suite('usage transcripts', () => {
                 line(assistant('future', 1, { timestamp: '2099-06-01T00:00:00.000Z' })) +
                 line(assistant('ahead', 1, { timestamp: iso(Date.now() + 2 * 24 * 60 * 60 * 1000) })) +
                 // A clock an hour ahead is another machine's, and its record counts.
-                line(assistant('skewed', 1, { timestamp: iso(Date.now() + 60 * 60 * 1000) })) +
+                line(assistant('skewed', 1, { timestamp: iso(skewed) })) +
                 line(assistant('ok', 1)) +
                 line({ ...assistant('q', 0), uuid: 'q', message: { model: '<synthetic>', id: 'q', usage: {} }, quotaLimits: { rateLimitType: 'five_hour', resetsAt: 1e13 } }),
         );
@@ -451,9 +472,12 @@ suite('usage transcripts', () => {
         // An hour ahead is another machine's clock, and counts; days ahead do not, yet.
         const now = at(Date.now());
         assert.deepStrictEqual([now.totals.coverage.requests, now.coverage.ahead, now.from], [2, 2, '2026-10-09']);
+        // The session's span ends at its last request counted, not at the one dated 2099.
+        assert.deepStrictEqual(now.sessions.map(s => [s.sessionId, s.lastTs]), [['s1', skewed]]);
         // Once this clock reaches them they count: nothing was dropped.
         const later = at(Date.UTC(2099, 5, 2));
         assert.deepStrictEqual([later.totals.coverage.requests, later.coverage.ahead], [4, 0]);
+        assert.deepStrictEqual(later.sessions.map(s => [s.sessionId, s.lastTs]), [['s1', Date.UTC(2099, 5, 1)]]);
     });
 
     test('a line too long to parse safely is skipped as oversize, and reading carries on', () => {
@@ -958,7 +982,9 @@ suite('usage roots', () => {
             platform: 'darwin',
         });
         assert.deepStrictEqual(resolved.roots.map(r => r.source), ['editor-environment']);
-        assert.ok(!resolved.candidates.some(c => c.source === 'setting'), 'a relative path was considered');
+        // Listed, so the page can say why it is not read; never read.
+        const setting = resolved.candidates.filter(c => c.source === 'setting');
+        assert.deepStrictEqual(setting, [{ path: 'relative/path', source: 'setting', exists: false, notAbsolute: true }]);
         assert.ok(resolved.candidates.some(c => c.source === 'default' && !c.exists));
     });
 
@@ -1008,7 +1034,7 @@ suite('usage roots', () => {
         const custom = dir('custom');
         const read = (env: NodeJS.ProcessEnv, editorEnvironment: unknown = undefined) => {
             const r = resolveRoots({ setting: '', editorEnvironment, env, home, platform: 'linux' });
-            return [r.historyDisabled, r.largeContextDisabled];
+            return [r.historyDisabled, r.largeContextDisabled || r.largeContextDisabledRoots.length > 0];
         };
         assert.deepStrictEqual(read({}), [false, false]);
         assert.deepStrictEqual(read({ CLAUDE_CODE_SKIP_PROMPT_HISTORY: '1', CLAUDE_CODE_DISABLE_1M_CONTEXT: 'true' }), [true, true]);
@@ -1023,6 +1049,44 @@ suite('usage roots', () => {
         settings(custom, { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' });
         assert.deepStrictEqual(read({}), [false, false], 'a folder that is not a root was read');
         assert.deepStrictEqual(read({ CLAUDE_CONFIG_DIR: custom }), [false, true]);
+    });
+
+    test("a root's own settings.json holds that root's sessions only; managed settings decide for every one", () => {
+        const work = dir('work');
+        const personal = dir('personal');
+        fs.writeFileSync(path.join(work, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } }));
+        const managedDir = path.join(home, 'managed');
+        const at = (env: NodeJS.ProcessEnv = {}) =>
+            resolveRoots({ setting: work, editorEnvironment: undefined, env: { CLAUDE_CONFIG_DIR: personal, ...env }, home, platform: 'darwin', managedSettingsDir: managedDir });
+        const once = at();
+        assert.deepStrictEqual([once.largeContextDisabled, once.largeContextDisabledRoots], [false, [fs.realpathSync(work)]]);
+
+        // managed-settings.json, then managed-settings.d in name order, the later file's value standing.
+        fs.mkdirSync(path.join(managedDir, 'managed-settings.d'), { recursive: true });
+        fs.writeFileSync(path.join(managedDir, 'managed-settings.json'), JSON.stringify({ env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } }));
+        assert.deepStrictEqual([at().largeContextDisabled, at({ CLAUDE_CODE_DISABLE_1M_CONTEXT: '0' }).largeContextDisabled], [true, true]);
+        fs.writeFileSync(path.join(managedDir, 'managed-settings.d', '20-model.json'), JSON.stringify({ env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '0' } }));
+        fs.writeFileSync(path.join(managedDir, 'managed-settings.d', '10-first.json'), JSON.stringify({ env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } }));
+        // A hidden file is not one of them.
+        fs.writeFileSync(path.join(managedDir, 'managed-settings.d', '.hidden.json'), JSON.stringify({ env: { CLAUDE_CODE_SKIP_PROMPT_HISTORY: '1' } }));
+        // Managed settings stand above the files, and above the environment.
+        const managed = at({ CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' });
+        assert.deepStrictEqual([managed.largeContextDisabled, managed.largeContextDisabledRoots, managed.historyDisabled], [false, [], false]);
+
+        // And where they say Claude Code writes is read too.
+        const fromPolicy = dir('from-policy');
+        fs.writeFileSync(path.join(managedDir, 'managed-settings.d', '30-dir.json'), JSON.stringify({ env: { CLAUDE_CONFIG_DIR: fromPolicy } }));
+        assert.ok(at().roots.some(r => r.source === 'managed-settings' && r.path === fs.realpathSync(fromPolicy)));
+    });
+
+    test('a data folder written with ~ is the home folder; one not absolute is listed, never read', () => {
+        const claude = dir('.claude-work');
+        const roots = (setting: string) => resolveRoots({ setting, editorEnvironment: undefined, env: {}, home, platform: process.platform });
+        for (const setting of ['~/.claude-work', '${userHome}/.claude-work']) {
+            assert.ok(roots(setting).roots.some(r => r.source === 'setting' && r.path === fs.realpathSync(claude)), setting);
+        }
+        const relative = roots('claude-work').candidates.find(c => c.source === 'setting');
+        assert.deepStrictEqual(relative && [relative.path, relative.exists, relative.notAbsolute], ['claude-work', false, true]);
     });
 
     test("on Windows the editor setting's names are case-insensitive", () => {

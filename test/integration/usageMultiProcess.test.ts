@@ -97,6 +97,38 @@ suite('Claude Code usage, two processes on one history', () => {
         }
     });
 
+    test('windows that find the history corrupt at once all move to one new history, and leave no other', async function () {
+        this.timeout(60_000);
+        const folder = path.join(tmp, 'store');
+        fs.mkdirSync(folder, { recursive: true });
+        const corrupt = `usage-${(Date.now() - 60_000).toString(36)}0123456789ab.sqlite`;
+        const bytes = Buffer.from('this is not a database, '.repeat(400));
+        fs.writeFileSync(path.join(folder, corrupt), bytes);
+        fs.writeFileSync(path.join(folder, 'usage.current'), corrupt);
+        const storeFile = path.join(folder, 'usage.sqlite');
+        const results = await Promise.all([1, 2, 3, 4].map(() => run(WINDOW, [WORKER, storeFile, FIXTURE_ROOT])));
+        for (const { code, out, err } of results) {
+            assert.strictEqual(code, 0, `${out}\n${err.slice(0, 600)}`);
+            assert.strictEqual((JSON.parse(out) as { type: string }).type, 'imported', out);
+        }
+        // One history started in its place, named by the pointer: none a window kept for itself.
+        const started = fs.readdirSync(folder).filter(name => /^usage-[0-9a-z]+\.sqlite$/.test(name) && name !== corrupt);
+        assert.strictEqual(started.length, 1, started.join(', '));
+        assert.strictEqual(fs.readFileSync(path.join(folder, 'usage.current'), 'utf8'), started[0]);
+        assert.ok(fs.readFileSync(path.join(folder, corrupt)).equals(bytes), 'the corrupt history was touched');
+
+        const sqlite = loadSqlite();
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const opened = UsageStore.open(sqlite, path.join(folder, started[0]));
+        assert.strictEqual(opened.status, 'ready');
+        try {
+            const totals = totalsOf(opened.store.requests());
+            assert.deepStrictEqual([totals.processed, totals.coverage.requests], [1_278, 4]);
+        } finally {
+            opened.store.close();
+        }
+    });
+
     test('a lease left by a process that died is taken at once, not after its heartbeat ages out', async function () {
         this.timeout(60_000);
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');

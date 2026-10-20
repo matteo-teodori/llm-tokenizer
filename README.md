@@ -210,6 +210,9 @@ Its settings are machine settings, so a repository's settings cannot turn it
 on or point it at another folder. In a dev container, though, the container's
 settings can come from the repository's `devcontainer.json`.
 
+**Before uninstalling**, run **Clear Claude Code Usage History**: the editor
+may leave this extension's storage on disk after the extension is gone.
+
 ### What it counts, and what it cannot see
 
 - Only the machine the extension runs on: other computers and claude.ai are

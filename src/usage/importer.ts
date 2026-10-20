@@ -241,6 +241,12 @@ async function runImport(
             if (unreadBytes(previous, state) > guardedReadBytes) {
                 flush();
                 guard = guardRead(store, file.path, now(), writeIfCurrent, countCrashes, () => summary.interrupted++);
+                if (!guard && cleared) {
+                    // The guard was refused because another window cleared
+                    // the history: the pass ends here, and nothing crashed.
+                    summary.cancelled = true;
+                    return false;
+                }
                 if (!guard) {
                     increment(summary.skipped, 'crashed');
                     continue;

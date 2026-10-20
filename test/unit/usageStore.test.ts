@@ -315,6 +315,39 @@ suite('usage history store', () => {
         assert.strictEqual(store.setAside(), undefined);
     });
 
+    test("the latest main request, and what the session shows of its window, on that model alone", () => {
+        const store = ready(open());
+        const at = (minute: number) => Date.UTC(2026, 9, 9, 10) + minute * 60_000;
+        let n = 0;
+        const sent = (model: string, minute: number, context: number, extra: Partial<UsageRequest> = {}) => {
+            n++;
+            return req({ messageId: `m${n}`, requestId: `r${n}`, byteOffset: n, model, timestamp: at(minute), input: context, ...extra });
+        };
+        const latest = () => {
+            const l = store.latestMainRequest('session-a');
+            return [l?.model, l?.variant, l?.input, l?.largestContext];
+        };
+        store.transaction(() =>
+            store.upsertRequests([
+                // Sonnet 4.6 in its larger window first, far past 200K.
+                sent('claude-sonnet-4-6', 0, 300_000, { variant: '1m' }),
+                // Then Opus 4.6: one record names [1m], the latest does not.
+                sent('claude-opus-4-6', 1, 120_000, { variant: '1m' }),
+                sent('claude-opus-4-6', 2, 90_000),
+                // A subagent's, in the main file: its own context, never the session's.
+                sent('claude-opus-4-6', 3, 400_000, { isMain: false }),
+            ]),
+        );
+        assert.deepStrictEqual(latest(), ['claude-opus-4-6', '1m', 90_000, 120_000]);
+        // Back on Sonnet, with no record naming [1m]: nothing from before Opus counts.
+        store.transaction(() => store.upsertRequests([sent('claude-sonnet-4-6', 4, 50_000)]));
+        assert.deepStrictEqual(latest(), ['claude-sonnet-4-6', null, 50_000, 50_000]);
+        // A compaction's size before, since then, is a context the window held;
+        // one while Opus ran says nothing of Sonnet's.
+        const compaction = (uuid: string, minute: number, preTokens: number) => ({ uuid, sessionId: 'session-a', kind: 'main' as const, timestamp: at(minute), trigger: 'auto', preTokens, postTokens: 1 });
+        store.transaction(() => store.insertCompactions('claude-code', [compaction('on-opus', 1.5, 500_000), compaction('since', 5, 230_000)]));
+        assert.deepStrictEqual(latest(), ['claude-sonnet-4-6', null, 50_000, 230_000]);
+    });
     test('a read sees one snapshot, whatever another window commits during it', () => {
         const store = ready(open());
         const other = ready(open());
@@ -419,6 +452,22 @@ suite('usage history store', () => {
         assert.ok(!store.acquireLease('import', 'this-window', 1), "another host's lease was taken on a local pid check");
         now += LEASE_TAKEOVER_MS + 1;
         assert.ok(store.acquireLease('import', 'this-window', 1), 'a stale remote lease was never released');
+    });
+
+    test('Clear leaves no lease behind: one an import cut short left names this machine and a pid', () => {
+        const store = ready(open());
+        assert.ok(store.acquireLease('import', 'Holder-Marker-0xBEEF', 1));
+        assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 0 });
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(file);
+        try {
+            assert.deepStrictEqual({ ...raw.prepare('SELECT count(*) AS n FROM lease').get() }, { n: 0 });
+        } finally {
+            raw.close();
+        }
+        assert.deepStrictEqual(holding('Holder-Marker-0xBEEF'), [], "the lease's holder is still on disk");
+        // Another window takes it at once.
+        assert.ok(store.acquireLease('import', 'next-window', 1));
     });
 
     test('once a newer parser has held the lease, an older one never takes it again, Clear or not', () => {

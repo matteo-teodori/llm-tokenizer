@@ -51,9 +51,11 @@ suite('usage status item: the window and what is shown', () => {
         assert.deepStrictEqual([at(500_000).status, at(500_000).text], ['ok', '$(comment-discussion) 500.0K · 50%']);
         assert.deepStrictEqual([at(800_000).status, at(800_000).text], ['warning', '$(warning) 800.0K · 80%']);
         assert.deepStrictEqual([at(1_000_000).status, at(1_000_000).text], ['error', '$(error) 1.0M · 100%']);
-        // Truncated, never rounded up past a threshold not crossed.
+        // Truncated, never rounded up past a threshold not crossed, the figure as the share.
         assert.strictEqual(at(799_999).status, 'ok');
-        assert.ok(at(799_999).text.endsWith('79%'));
+        assert.strictEqual(at(799_999).text, '$(comment-discussion) 799.9K · 79%');
+        const full = describeLive(live({ latest: latest({ model: 'claude-opus-4-6', input: 199_999, cacheCreation: 0, cacheRead: 0 }) }));
+        assert.strictEqual(full.text, '$(warning) 199.9K · 99%');
     });
 
     test('a compaction after the latest request shows what it left', () => {
@@ -76,8 +78,27 @@ suite('usage status item: the window and what is shown', () => {
         // Shown as written, in a plain-text tooltip.
         assert.ok(unknown.tooltip.includes('Model: [x](https://example.com) not-a-model'));
 
-        const over = describeLive(live({ latest: latest({ model: 'claude-opus-4-6', input: 250_000, cacheCreation: 0, cacheRead: 0 }) }));
+        // Past the only window a model is known to have: that window is wrong, and no share is made up.
+        const over = describeLive(live({ latest: latest({ model: 'claude-haiku-4-5', input: 250_000, cacheCreation: 0, cacheRead: 0 }) }));
         assert.deepStrictEqual([over.text, over.status], ['$(comment-discussion) 250.0K ?', undefined]);
+    });
+
+    test('a model with two windows ran in the larger once the session held more than the smaller, named or not', () => {
+        // Few records name [1m]: a context only the larger window takes says it too.
+        const opus46 = (occupied: number, largestContext?: number, largeContextDisabled = false) =>
+            describeLive(
+                live({
+                    latest: latest({ model: 'claude-opus-4-6', input: occupied, cacheCreation: 0, cacheRead: 0, ...(largestContext === undefined ? {} : { largestContext }) }),
+                    largeContextDisabled,
+                }),
+            ).text;
+        assert.strictEqual(opus46(150_000), '$(comment-discussion) 150.0K · 75%');
+        assert.strictEqual(opus46(150_000, 199_999), '$(comment-discussion) 150.0K · 75%');
+        assert.strictEqual(opus46(150_000, 250_000), '$(comment-discussion) 150.0K · 15%');
+        // The latest request is evidence of its own.
+        assert.strictEqual(opus46(250_000), '$(comment-discussion) 250.0K · 25%');
+        // CLAUDE_CODE_DISABLE_1M_CONTEXT still holds it to 200K.
+        assert.strictEqual(opus46(150_000, 250_000, true), '$(comment-discussion) 150.0K · 75%');
     });
 
     test("the tooltip adds today's tokens in this workspace, marked when a lower bound", () => {
@@ -164,8 +185,14 @@ suite('usage status item: running sessions', () => {
         // Valid, but larger than any real one: only the size cap keeps it out.
         fs.writeFileSync(path.join(dir, '4.json'), record({ sessionId: 'huge', updatedAt: 9, pad: 'x'.repeat(64 << 10) }));
 
-        const sessions = await readLiveSessions([tmp], { isAlive: () => true, platform: 'darwin' });
-        assert.deepStrictEqual(sessions.map(s => [s.sessionId, s.updatedAt]), [['newer', 3], ['older', 1]]);
+        // A second root, whose session is newer still: each is told which root named it,
+        // so that a root's own settings hold its sessions only.
+        const other = path.join(tmp, 'other-root');
+        fs.mkdirSync(path.join(other, 'sessions'), { recursive: true });
+        fs.writeFileSync(path.join(other, 'sessions', '5.json'), record({ sessionId: 'elsewhere', updatedAt: 5 }));
+
+        const sessions = await readLiveSessions([tmp, other], { isAlive: () => true, platform: 'darwin' });
+        assert.deepStrictEqual(sessions.map(s => [s.sessionId, s.updatedAt, s.root]), [['elsewhere', 5, other], ['newer', 3, tmp], ['older', 1, tmp]]);
     });
 
     test('a leftover file dated far ahead, whose pid still answers, never outranks the running session', async () => {
@@ -201,11 +228,19 @@ suite('usage status item: the item', () => {
             readLive?: () => Promise<LiveSession[]>;
             context?: Awaited<ReturnType<StatusItemService['liveContext']>>;
             started?: Promise<void>;
+            largeContextDisabledRoots?: string[];
         } = {},
     ) {
         const calls = { readLive: 0, holds: 0, released: 0, liveContext: 0 };
         const emitter = new vscode.EventEmitter<void>();
-        const resolved: ResolvedRoots = { candidates: [], roots: [{ path: '/claude', source: 'default', exists: true }], refused: [], historyDisabled: false, largeContextDisabled: false };
+        const resolved: ResolvedRoots = {
+            candidates: [],
+            roots: [{ path: '/claude', source: 'default', exists: true }],
+            refused: [],
+            historyDisabled: false,
+            largeContextDisabled: false,
+            largeContextDisabledRoots: options.largeContextDisabledRoots ?? [],
+        };
         const service: StatusItemService = {
             roots: resolved,
             onDidChange: emitter.event,
@@ -304,6 +339,20 @@ suite('usage status item: the item', () => {
         await elsewhere.statusItem.refresh();
         assert.deepStrictEqual([elsewhere.items[0].visible, elsewhere.calls.liveContext], [false, 0]);
         elsewhere.statusItem.dispose();
+    });
+
+    test("a data folder's own CLAUDE_CODE_DISABLE_1M_CONTEXT holds the sessions it names, and no other folder's", async () => {
+        const shownFor = async (root: string) => {
+            const h = harness({ sessions: [{ ...session('/work/repo'), root }], largeContextDisabledRoots: ['/claude-work'] });
+            await settle();
+            await h.statusItem.refresh();
+            const text = h.items[0].text;
+            h.statusItem.dispose();
+            return text;
+        };
+        // 850K on Opus 5.5: past the 200K the flag holds it to, so no share.
+        assert.strictEqual(await shownFor('/claude-work'), '$(comment-discussion) 850.0K ?');
+        assert.strictEqual(await shownFor('/claude'), '$(warning) 850.0K · 85%');
     });
 
     test('a failure shows a neutral dash; turned off, the item goes and the hold with it', async () => {

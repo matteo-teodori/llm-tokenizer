@@ -714,7 +714,7 @@ export function startClaudeCodeUsage(
     // this branch's imports.
     const usageFolder = path.join(context.globalStorageUri.fsPath, underTest ? 'claude-code-usage-test' : 'claude-code-usage');
     if (underTest) {
-        fs.rmSync(usageFolder, { recursive: true, force: true });
+        fs.rmSync(usageFolder, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
     const service = new UsageService({
         log,
@@ -776,18 +776,33 @@ async function refreshCommand(service: UsageService): Promise<void> {
         }
         return;
     }
-    const summary = await service.refresh();
-    if (summary) {
-        void vscode.window.showInformationMessage(
-            `LLM Tokenizer: read ${summary.read} changed of ${summary.files} Claude Code transcripts.`,
-        );
-    } else if (service.updatingElsewhere) {
-        void vscode.window.showInformationMessage(
-            'LLM Tokenizer: another window is updating the Claude Code usage history; this one shows it as it goes.',
-        );
-    } else if (service.status !== 'ready') {
-        void vscode.window.showWarningMessage('LLM Tokenizer: Claude Code usage could not be refreshed; see the log.');
+    const said = refreshMessage(await service.refresh(), service);
+    if (said?.kind === 'info') {
+        void vscode.window.showInformationMessage(said.text);
+    } else if (said) {
+        void vscode.window.showWarningMessage(said.text);
     }
+}
+
+/** What Refresh says, from the pass it ran and the state that left; nothing when all is well and nothing was read. */
+export function refreshMessage(
+    summary: ImportSummary | undefined,
+    state: { updatingElsewhere: boolean; status: UsageStatus },
+): { kind: 'info' | 'warning'; text: string } | undefined {
+    if (summary) {
+        return { kind: 'info', text: `LLM Tokenizer: read ${summary.read} changed of ${summary.files} Claude Code transcripts.` };
+    }
+    if (state.updatingElsewhere) {
+        return { kind: 'info', text: 'LLM Tokenizer: another window is updating the Claude Code usage history; this one shows it as it goes.' };
+    }
+    if (state.status === 'no-roots') {
+        // The log says so once, when the folder goes; this says it every time.
+        return { kind: 'warning', text: 'LLM Tokenizer: no Claude Code data folder was found. Show Claude Code Usage lists the places looked at.' };
+    }
+    if (state.status !== 'ready') {
+        return { kind: 'warning', text: 'LLM Tokenizer: Claude Code usage could not be refreshed; see the log.' };
+    }
+    return undefined;
 }
 
 async function clearCommand(service: UsageService): Promise<void> {

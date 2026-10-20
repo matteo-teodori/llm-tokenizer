@@ -115,6 +115,7 @@ function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fake
     let nextTables = firstTables;
     const details = { current: { open: false } as { open: boolean } | null };
     const focused: string[] = [];
+    const written: string[] = [];
     const document = {
         activeElement: null as unknown,
         getElementById: (id: string) =>
@@ -123,6 +124,7 @@ function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fake
                 : {
                       set innerHTML(_html: string) {
                           // The update writes the slots; what it wrote is the new DOM.
+                          written.push(id);
                           if (id === 'diagnostics-slot') {
                               details.current = { open: false };
                           }
@@ -142,6 +144,7 @@ function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fake
     return {
         posted,
         focused,
+        written,
         details,
         document,
         click: (target: unknown) => listeners.click({ target: { closest: () => target } }),
@@ -196,7 +199,11 @@ suite('usage page', () => {
         assert.ok(off.includes('Never kept: prompts, responses, thinking, tool inputs or results'));
         assert.ok(off.includes('data-action="openSettings"'));
         assert.ok(!off.includes('Remote settings'));
-        assert.ok(text(renderFragments(view({ status: 'off', report: undefined, remote: true, where: 'on box (ssh-remote)' }))).includes('Remote settings'));
+        const remote = text(renderFragments(view({ status: 'off', report: undefined, remote: true, where: 'on box (ssh-remote)' })));
+        assert.ok(remote.includes('Remote settings'));
+        // The host named once, not inside "this machine".
+        assert.ok(remote.includes('session records on box (ssh-remote),') && !remote.includes('records on this machine'), remote);
+        assert.ok(off.includes('session records on this machine,'));
 
         const noRoots = text(
             renderFragments(view({ status: 'no-roots', report: undefined, roots: [{ path: '~/.claude', source: 'the default', exists: false }] })),
@@ -207,7 +214,7 @@ suite('usage page', () => {
         assert.ok(noSqlite.includes('node:sqlite') && noSqlite.includes('Node 20.18.0') && noSqlite.includes('Electron 34.5.0'));
 
         const failing = text(renderFragments(view({ status: 'failing' })));
-        assert.ok(failing.includes('The last import failed') && failing.includes('data-action="showLog"'));
+        assert.ok(failing.includes('could not be read or updated just now') && failing.includes('data-action="showLog"'));
         assert.ok(text(renderFragments(view({ status: 'read-only' }))).includes('written by a newer LLM Tokenizer'));
         assert.ok(text(renderFragments(view({ historyDisabled: true }))).includes('CLAUDE_CODE_SKIP_PROMPT_HISTORY'));
 
@@ -411,7 +418,7 @@ suite('usage page', () => {
         const page = livePage(renderFragments(view()), [before]);
         page.click(before.button('label'));
         page.details.current = { open: true };
-        page.document.activeElement = { matches: () => true, getAttribute: (name: string) => (name === 'data-range' ? '30d' : null) };
+        page.document.activeElement = { matches: () => true, closest: () => null, getAttribute: (name: string) => (name === 'data-range' ? '30d' : null) };
 
         const after = fakeTable('sessions', 'processed', ['label', 'processed'], [...rows, { label: 'c', processed: '50' }]);
         const next = renderFragments(view({ report: report({ sessions: [{ ...report().sessions[0], label: 'moved', sessionId: 'next' }] }) }));
@@ -422,6 +429,31 @@ suite('usage page', () => {
         // And the exports are the update's.
         page.click({ dataset: { action: 'copy' } });
         assert.ok(page.posted.at(-1)?.text?.includes('next'));
+    });
+
+    test("focus on a table's header returns to that table's, not to the first one with the same key", () => {
+        // Projects and Sessions both sort by label and processed: the first
+        // match in the page was the Projects table's, so Enter sorted the wrong one.
+        const page = livePage(renderFragments(view()), [fakeTable('sessions', 'processed', ['label', 'processed'], [])]);
+        const sessions = { id: 'sessions' };
+        page.document.activeElement = { matches: (s: string) => s === 'button', closest: () => sessions, getAttribute: (name: string) => (name === 'data-sort-key' ? 'processed' : null) };
+        page.update(renderFragments(view({ zone: 'UTC' })), [fakeTable('sessions', 'processed', ['label', 'processed'], [])]);
+        assert.deepStrictEqual(page.focused, ['#sessions button[data-sort-key="processed"]']);
+        // The diagnostics' own header, which is no button, keeps its focus too.
+        page.document.activeElement = { matches: (s: string) => s === '#diagnostics > summary', closest: () => null, getAttribute: () => null };
+        page.update(renderFragments(view({ zone: 'Europe/Rome' })), []);
+        assert.strictEqual(page.focused.at(-1), '#diagnostics > summary');
+    });
+
+    test('an update that changes nothing in a region leaves that region as it is', () => {
+        const first = renderFragments(view());
+        const page = livePage(first, []);
+        page.update(first, []);
+        const once = page.written.length;
+        page.update(first, []);
+        assert.strictEqual(page.written.length, once, 'an unchanged page was written again');
+        page.update(renderFragments(view({ zone: 'UTC' })), []);
+        assert.ok(page.written.length > once);
     });
 
     test('sorting and every action work from the keyboard, as buttons', () => {

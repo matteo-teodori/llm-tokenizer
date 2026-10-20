@@ -24,7 +24,7 @@ import { importUnderLease } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS, rangeUntil } from './usage/report';
 import { PARSER_VERSION, sessionTranscripts } from './usage/transcripts';
-import { HistoryFileError, createHistory, publishHistory, removeHistory, resolveHistory, type Pointer } from './usage/historyFiles';
+import { HistoryFileError, createHistory, publishHistory, removeHistory, removeLeftovers, resolveHistory, type Pointer } from './usage/historyFiles';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import { SESSION_ID, type UsageFailure, type UsageWorkerRequest, type UsageWorkerResponse } from './usage/protocol';
 
@@ -255,6 +255,22 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
         return;
     }
 
+    if (request.type === 'clear' && !opened) {
+        // No history yet: nothing to clear but what earlier ones left, and
+        // none is started for the Clear.
+        let history: ReturnType<typeof resolveHistory>;
+        try {
+            history = resolveHistory(path.dirname(request.storeFile));
+        } catch {
+            reply({ type: 'failed', id: request.id, failure: 'store-io', errorName: 'StoreError' });
+            return;
+        }
+        if (history.file === undefined) {
+            const copiesLeft = removeLeftovers(path.dirname(request.storeFile));
+            reply({ type: 'cleared', id: request.id, generation: 0, settled: true, copiesLeft });
+            return;
+        }
+    }
     const result = storeAt(request.storeFile);
     // A history a newer version created can still be read.
     const readable = result.status === 'ready' || (result.status === 'read-only' && (request.type === 'query' || request.type === 'liveContext'));

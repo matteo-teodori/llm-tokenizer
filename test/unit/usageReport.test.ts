@@ -689,6 +689,22 @@ suite('usage worker queries', () => {
         }
     });
 
+    test('Clear where there is no history starts none, and removes what earlier builds left', async () => {
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const folder = path.dirname(storeFile);
+        const worker = host();
+        const nothing = await worker.send({ type: 'clear', id: 0, storeFile });
+        assert.ok(nothing.type === 'cleared' && nothing.settled && nothing.copiesLeft === 0, JSON.stringify(nothing));
+        assert.ok(!fs.existsSync(folder), 'Clear made the folder');
+        // A copy an earlier build set aside, with no history beside it.
+        fs.mkdirSync(folder, { recursive: true });
+        fs.writeFileSync(`${storeFile}.corrupt-1791000000000`, 'x');
+        fs.writeFileSync(path.join(folder, 'notes.txt'), 'not a history');
+        const copies = await worker.send({ type: 'clear', id: 0, storeFile });
+        assert.ok(copies.type === 'cleared' && copies.copiesLeft === 0, JSON.stringify(copies));
+        assert.deepStrictEqual(fs.readdirSync(folder), ['notes.txt']);
+    });
+
     test('a copy Clear could not remove is removed by a later request, and nothing set aside since', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();

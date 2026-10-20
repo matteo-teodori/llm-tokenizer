@@ -302,7 +302,12 @@ export class UsagePanel implements vscode.Disposable {
             remote: remote !== undefined,
             report,
             modelLabel: id => modelById(id)?.label ?? id,
-            roots: (resolved?.candidates ?? []).map(c => ({ path: tildePath(c.path), source: sourceLabel(c.source), exists: c.exists })),
+            roots: (resolved?.candidates ?? []).map(c => ({
+                path: c.notAbsolute ? c.path : tildePath(c.path),
+                source: sourceLabel(c.source),
+                exists: c.exists,
+                ...(c.notAbsolute ? { notAbsolute: true as const } : {}),
+            })),
             historyDisabled: resolved?.historyDisabled ?? false,
             lastImport: summary && {
                 files: summary.files,

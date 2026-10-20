@@ -18,6 +18,7 @@ import {
     UsageService,
     clearedMessage,
     readUsageSettings,
+    refreshMessage,
     type Clock,
     type UsageHost,
     type UsageServiceDeps,
@@ -708,6 +709,19 @@ suite('usage service', () => {
             'LLM Tokenizer: Claude Code usage history cleared, but one copy of it could not be removed yet, perhaps because another window has it open. It is removed as soon as it can be.',
         );
         assert.ok(clearedMessage({ settled: true, copiesLeft: 2 }).includes('2 copies of it could not be removed yet'));
+    });
+
+    test('Refresh says what it read, that another window reads, or why it could not; with no data folder, that', () => {
+        const at = (status: Parameters<typeof refreshMessage>[1]['status'], updatingElsewhere = false) => refreshMessage(undefined, { status, updatingElsewhere });
+        assert.deepStrictEqual(refreshMessage(summaryOf(3), { status: 'ready', updatingElsewhere: false })?.kind, 'info');
+        assert.deepStrictEqual(at('ready', true)?.text, 'LLM Tokenizer: another window is updating the Claude Code usage history; this one shows it as it goes.');
+        // The log says this once, when the folder goes: Refresh says it each time.
+        assert.deepStrictEqual(at('no-roots'), {
+            kind: 'warning',
+            text: 'LLM Tokenizer: no Claude Code data folder was found. Show Claude Code Usage lists the places looked at.',
+        });
+        assert.deepStrictEqual(at('failing')?.text, 'LLM Tokenizer: Claude Code usage could not be refreshed; see the log.');
+        assert.strictEqual(at('ready'), undefined);
     });
 
     test('the set-aside notice follows what is beside the history: shown while a copy is there', async () => {

@@ -143,10 +143,19 @@ export interface FileCheckpoint {
 export interface LatestRequest {
     timestamp: number;
     model: string;
+    /**
+     * The variant (`1m`) the session's latest record that names one gives,
+     * on this model: few records carry it, and the latest often does not.
+     */
     variant: string | null;
     input: number | null;
     cacheCreation: number | null;
     cacheRead: number | null;
+    /**
+     * The largest context the session's main conversation held on this
+     * model: a request's, or a compaction's size before.
+     */
+    largestContext?: number;
 }
 
 /**
@@ -561,11 +570,21 @@ export class UsageStore {
             .run({ provider, ...s });
     }
 
-    /** Every stored session, for the queries and the tests. */
-    sessions(): (SessionSighting & { provider: UsageProvider })[] {
+    /**
+     * Every stored session, for the queries and the tests. A session's last
+     * time is its last request's before `untilMs`, as a report counts them:
+     * one record dated ahead would otherwise stretch its span by years.
+     */
+    sessions(untilMs = Number.MAX_SAFE_INTEGER): (SessionSighting & { provider: UsageProvider })[] {
         return this.db
-            .prepare('SELECT provider, session_id, root, cwd, cwd_ts, project_dir, first_ts, last_ts FROM sessions ORDER BY session_id')
-            .all()
+            .prepare(
+                `SELECT provider, session_id, root, cwd, cwd_ts, project_dir, first_ts,
+                        CASE WHEN last_ts >= :until
+                             THEN (SELECT max(ts) FROM requests r WHERE r.provider = s.provider AND r.session_id = s.session_id AND r.ts < :until)
+                             ELSE last_ts END AS last_ts
+                 FROM sessions s ORDER BY session_id`,
+            )
+            .all({ until: untilMs })
             .map(row => ({
                 provider: row.provider as UsageProvider,
                 sessionId: row.session_id as string,
@@ -631,16 +650,52 @@ export class UsageStore {
                  ORDER BY ts DESC, byte_offset DESC LIMIT 1`,
             )
             .get(sessionId, untilMs);
-        return row
-            ? {
-                  timestamp: row.ts as number,
-                  model: row.model as string,
-                  variant: row.variant as string | null,
-                  input: row.input as number | null,
-                  cacheCreation: row.cache_creation as number | null,
-                  cacheRead: row.cache_read as number | null,
-              }
-            : undefined;
+        if (!row) {
+            return undefined;
+        }
+        const model = row.model as string;
+        // What the session shows of its window is taken only since it last
+        // ran another model: a session moved off a [1m] model, or one that
+        // compacted on it, says nothing of the next one's window.
+        const since =
+            (
+                this.db
+                    .prepare(
+                        `SELECT max(ts) AS ts FROM requests
+                         WHERE session_id = ? AND kind = 'main' AND is_main = 1 AND model != ? AND ts < ?`,
+                    )
+                    .get(sessionId, model, untilMs) as { ts: number | null }
+            ).ts ?? Number.MIN_SAFE_INTEGER;
+        const named =
+            (row.variant as string | null) ??
+            ((
+                this.db
+                    .prepare(
+                        `SELECT variant FROM requests
+                         WHERE session_id = ? AND kind = 'main' AND is_main = 1 AND model = ? AND variant IS NOT NULL AND ts > ? AND ts < ?
+                         ORDER BY ts DESC, byte_offset DESC LIMIT 1`,
+                    )
+                    .get(sessionId, model, since, untilMs) as { variant: string } | undefined
+            )?.variant ?? null);
+        const requested = this.db
+            .prepare(
+                `SELECT max(coalesce(input, 0) + coalesce(cache_creation, 0) + coalesce(cache_read, 0)) AS n FROM requests
+                 WHERE session_id = ? AND kind = 'main' AND is_main = 1 AND model = ? AND ts > ? AND ts < ?`,
+            )
+            .get(sessionId, model, since, untilMs) as { n: number | null };
+        const compacted = this.db
+            .prepare(`SELECT max(pre_tokens) AS n FROM compactions WHERE session_id = ? AND kind = 'main' AND ts > ? AND ts < ?`)
+            .get(sessionId, since, untilMs) as { n: number | null };
+        const largest = requested.n === null && compacted.n === null ? null : Math.max(requested.n ?? 0, compacted.n ?? 0);
+        return {
+            timestamp: row.ts as number,
+            model,
+            variant: named,
+            input: row.input as number | null,
+            cacheCreation: row.cache_creation as number | null,
+            cacheRead: row.cache_read as number | null,
+            ...(largest !== null ? { largestContext: largest } : {}),
+        };
     }
 
     /** A session's compactions of its main conversation before `untilMs`, newest first. */
@@ -821,6 +876,10 @@ export class UsageStore {
                 for (const table of DATA_TABLES) {
                     this.db.exec(`DELETE FROM ${table}`);
                 }
+                // An import cut short leaves its lease, with this machine's name
+                // and a pid; one running elsewhere takes it again at its next
+                // file, and stops there, the history being cleared.
+                this.db.exec('DELETE FROM lease');
                 this.db.exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
                 this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('clear_pending', ?)").run(JSON.stringify(copiesBeside(this.file)));
             });

@@ -35,7 +35,7 @@ export function queryReport(store: UsageStore, query: ReportQuery): UsageReport 
     // could land between the sums and the sessions they belong to.
     const input = store.read(() => ({
         sums: store.bucketSums(since, until),
-        sessions: store.sessions(),
+        sessions: store.sessions(until),
         compactions: store.compactions(since, until),
         limitHits: store.limitHits(since, until),
         coverage: store.coverage(until),
