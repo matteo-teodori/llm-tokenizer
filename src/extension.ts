@@ -13,6 +13,7 @@ import {
     DEBOUNCE_DELAY_MS,
     PROJECT_UPDATE_DELAY_MS,
     PROJECT_SCAN_MAX_DELAY_MS,
+    MAX_TOKENIZED_FILE_BYTES,
 } from './constants';
 import {
     FolderContext,
@@ -305,6 +306,18 @@ function buildModelPickerItems(): ModelQuickPickItem[] {
 }
 
 /**
+ * Whether a tokenizer may be downloaded. The one network access the README
+ * promises can be turned off: a workspace may turn it off for itself, never
+ * on, so a repository's own .vscode/settings.json cannot make the extension
+ * contact huggingface.co for a person who said no, Restricted Mode or not.
+ */
+export function downloadsAllowed(configuration: Pick<vscode.WorkspaceConfiguration, 'inspect'>): boolean {
+    const value = configuration.inspect<boolean>('downloadTokenizers');
+    const own = value?.globalValue ?? value?.defaultValue ?? true;
+    return own && value?.workspaceValue !== false && value?.workspaceFolderValue !== false;
+}
+
+/**
  * Download the model's real tokenizer so counts become exact.
  *
  * @param interactive whether to prompt and show progress, or fail silently.
@@ -332,7 +345,7 @@ async function ensureExactTokenizer(model: ModelInfo, interactive: boolean): Pro
         return;
     }
 
-    if (!vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('downloadTokenizers', true)) {
+    if (!downloadsAllowed(vscode.workspace.getConfiguration(CONFIG_SECTION))) {
         if (interactive) {
             void vscode.window.showWarningMessage(
                 'Tokenizer downloads are turned off. Enable llm-tokenizer.downloadTokenizers to get exact counts.',
@@ -708,6 +721,14 @@ async function countFile(
 ): Promise<FileOutcome> {
     try {
         const stat = await vscode.workspace.fs.stat(uri);
+        // A regular file, or a link to one: a device or a FIFO reports size 0
+        // and would be read without end.
+        if (!(stat.type & vscode.FileType.File)) {
+            return { skip: 'unreadable' };
+        }
+        if (stat.size > MAX_TOKENIZED_FILE_BYTES) {
+            return { skip: 'too-large' };
+        }
         const cached = countCache.get(model.id, uri, stat.mtime);
         if (cached) {
             return isBinaryOutcome(cached) ? { skip: 'binary' } : cached;

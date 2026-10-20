@@ -467,7 +467,7 @@
         "llm-tokenizer.downloadTokenizers": {
           "type": "boolean",
           "default": true,
-          "description": "Download a model's real tokenizer the first time it is needed, so counts are exact instead of estimated. Only applies to models whose tokenizer is published; Claude and Grok have none, and stay estimated either way. Downloads come from huggingface.co, are cached on disk, and never include your code."
+          "description": "Download a model's real tokenizer the first time it is needed, so counts are exact instead of estimated. Only applies to models whose tokenizer is published; Claude and Grok have none, and stay estimated either way. Downloads come from huggingface.co, are cached on disk, and never include your code. A workspace's own settings can turn downloads off for it, never on."
         },
         "llm-tokenizer.enableClaudeCodeUsage": {
           "type": "boolean",

@@ -51,7 +51,8 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 **Your code never leaves your machine.** There is no telemetry and no network
 request that contains file contents. The only network access is a one-time
 download of a model's *vocabulary file* from huggingface.co, which you can turn
-off with `llm-tokenizer.downloadTokenizers`. Claude Code usage, if you turn it
+off with `llm-tokenizer.downloadTokenizers`; a repository's own settings can
+turn it off for that repository, never back on. Claude Code usage, if you turn it
 on, reads Claude Code's own session records on this machine and sends nothing
 anywhere.
 

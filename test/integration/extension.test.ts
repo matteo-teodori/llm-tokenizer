@@ -1,11 +1,13 @@
 import * as assert from 'assert';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { logoIcon } from '../../src/logo';
 import { showMultiFileSummary, type MultiFileSummaryConfig } from '../../src/webview';
-import { resolveInitialModel, settingsChangeEffects } from '../../src/extension';
+import { downloadsAllowed, resolveInitialModel, settingsChangeEffects } from '../../src/extension';
 import { STORAGE_KEY } from '../../src/constants';
 import { MODEL_ALIASES } from '../../src/tokenizer/registry';
 
@@ -169,6 +171,21 @@ suite('extension', () => {
             const effects = settingsChangeEffects(changed(key));
             assert.ok(effects.rescan || effects.download || effects.usage, `changing ${key} has no effect`);
         }
+    });
+
+    test("a workspace can turn tokenizer downloads off for itself, never on against the person's own setting", () => {
+        // A repository's .vscode/settings.json set to true made the extension
+        // contact huggingface.co for someone who had turned downloads off,
+        // in Restricted Mode too.
+        const at = (value: { globalValue?: boolean; workspaceValue?: boolean; workspaceFolderValue?: boolean }) =>
+            downloadsAllowed({ inspect: <T>() => ({ key: 'downloadTokenizers', defaultValue: true as T, ...value }) as never });
+        assert.strictEqual(at({}), true);
+        assert.strictEqual(at({ globalValue: false }), false);
+        assert.strictEqual(at({ globalValue: false, workspaceValue: true }), false);
+        assert.strictEqual(at({ globalValue: false, workspaceFolderValue: true }), false);
+        assert.strictEqual(at({ workspaceValue: false }), false);
+        assert.strictEqual(at({ globalValue: true, workspaceFolderValue: false }), false);
+        assert.strictEqual(at({ globalValue: true, workspaceValue: true }), true);
     });
 
     test('repeated summaries reuse one panel instead of stacking up', () => {
@@ -437,6 +454,29 @@ suite('extension', () => {
         // is asserted in the walk test below.
         await vscode.commands.executeCommand('llm-tokenizer.countTokens', file);
         await vscode.commands.executeCommand('llm-tokenizer.countTokens', folder.uri);
+    });
+
+    test('a FIFO handed to Count Tokens is refused at once, never read', async function () {
+        if (process.platform === 'win32') {
+            this.skip();
+        }
+        // Its size is 0, so it passed the size check, and the read never ended.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-fifo-'));
+        const fifo = path.join(dir, 'pipe.ts');
+        execFileSync('mkfifo', [fifo]);
+        const window = vscode.window as unknown as { showWarningMessage: unknown };
+        const original = window.showWarningMessage;
+        const warnings: string[] = [];
+        window.showWarningMessage = (message: string) => (warnings.push(message), Promise.resolve(undefined));
+        try {
+            const count = vscode.commands.executeCommand('llm-tokenizer.countTokens', vscode.Uri.file(fifo));
+            const outcome = await Promise.race([count.then(() => 'done'), new Promise(resolve => setTimeout(() => resolve('still reading'), 5_000))]);
+            assert.strictEqual(outcome, 'done');
+            assert.ok(warnings.some(w => w.includes('pipe.ts was not counted')), warnings.join(' | '));
+        } finally {
+            window.showWarningMessage = original;
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     test('discovery over the fixture workspace finds exactly the right files', async () => {
