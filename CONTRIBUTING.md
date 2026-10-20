@@ -30,6 +30,7 @@ src/              extension source, bundled by esbuild into out/
   summary/        the summary page: aggregation, languages, rendering
   html.ts         escaping, the webview CSP, and the text helpers a page script runs
   charts.ts       the theme tokens, meter and ranked bars the pages share
+  logo.ts         the logo's T, as the pages' tab icon
   usage/          Claude Code usage: finding and reading its records, the history
                   store, the rollups and reports, the panel and the status item.
                   onDemand.ts and settings.ts are in out/extension.js; the
@@ -46,6 +47,9 @@ test/
                   crashing workers, and a stand-in for ~/.claude whose totals are
                   worked out by hand in its README
 scripts/          build-time tooling; bundles.mjs lists the bundles that ship
+  logo-icons.mjs  makes media/logo-*.png from icon.png; run it whenever icon.png changes
+  pin-tokenizers.mjs  checks the commit and hash every downloaded vocabulary is pinned to
+media/            the logo's T at 64 px, for dark themes and for light ones
 build.mjs         the bundler
 ```
 
@@ -65,6 +69,8 @@ packaged.
 | `npm run sync-manifest` | Regenerate the settings dropdown from the registry |
 | `npm run notices` | Regenerate `THIRD-PARTY-NOTICES.md` from the packages the bundles inline |
 | `npm run audit-bundled` | Audit only the packages the bundles inline, which is what ships |
+| `node scripts/logo-icons.mjs` | Make the T icons in `media/` again from `icon.png` |
+| `node scripts/pin-tokenizers.mjs` | After `npm run compile`: check every vocabulary's pin against Hugging Face, and say where each repo's main has moved |
 | `npm run package` | Type-check, production build, and the manifest and notices checks |
 | `npm run release` | `package`, then the VSIX itself; nothing is published |
 
@@ -96,7 +102,10 @@ For the encoder:
   Meta's Llama repositories (`meta-llama/`) and Google's Gemma 3 ones return
   401 without an account, so the registry points at ungated mirrors for those.
   Models may share a repo only when their `tokenizer.json` files are
-  byte-identical: compare sha256 hashes, never sizes. An API model that
+  byte-identical: compare sha256 hashes, never sizes. Pin the repo to the
+  commit you checked, with its `revision` and `keptSha256`:
+  `node scripts/pin-tokenizers.mjs` prints both for wherever main is now. An
+  API model that
   publishes no tokenizer of its own may use an open checkpoint's repo only when
   the provider says first-hand that it is, or is based on, that checkpoint:
   Qwen's "official version based on", Zhipu documenting FlashX under Flash's

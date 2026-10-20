@@ -170,17 +170,27 @@ the conversation again with every turn and the cache serves it. A total marked
 `≥` is a lower bound: some request did not report every counter.
 
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
-the context of the Claude Code session running in this workspace is, with the
-80% and 100% colours where the model's window is known. The window follows
-Claude Code's own rules, `CLAUDE_CODE_DISABLE_1M_CONTEXT` included when it is
-set in the editor's environment, in Claude Code's **Environment Variables**
-setting, or in the `env` of the `settings.json` in Claude Code's folder; a
-project's own `.claude/settings.json` is not read. It reads Claude Code's
-running-session files too.
+the context of the Claude Code session running in this workspace is, as a
+share of the model's window where that window is known, amber from 80%. The
+window follows Claude Code's own rules: Opus 4.6 and Sonnet 4.6 run in 1M
+when a record names `[1m]`, or when the session has held more than 200K;
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` holds every model to 200K when it is set in
+the editor's environment, in Claude Code's **Environment Variables** setting,
+or in the `env` of the organization's managed settings files, and holds a
+data folder's own sessions when it is set in that folder's `settings.json`.
+A project's own `.claude/settings.json` is not read, nor are policies
+delivered by MDM, the Windows registry or as server-managed settings. A context larger
+than the window a model was thought to have is shown with a `?`, and no
+colour. It reads Claude Code's running-session files too.
 
-**Export CSV** gives, per day and model, every input a hand-made cost
-calculation needs: requests, input, cache writes (5-minute and 1-hour), cache
-reads, output, thinking, web searches and fetches. It gives no prices.
+**Export CSV** copies to the clipboard, per day and model, every count a
+hand-made cost calculation needs: requests, input, cache writes (5-minute and
+1-hour), cache reads, output, thinking, web searches and fetches. Rows are apart
+by what a request's price depends on besides its model: its speed (`fast` is
+billed higher), where it ran (`us` is billed higher), and its prompt size (up to
+100,000 tokens, up to 200,000, or more: Claude Haiku 5.5 prices a request over
+100,000 higher). Its notes say how to read each of those. It gives no prices.
+**Copy** copies the sessions, for a spreadsheet.
 
 **What is kept, and where.** A database in this extension's own storage
 (the `claude-code-usage` folder in VS Code's global storage for LLM

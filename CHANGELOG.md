@@ -16,9 +16,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
     models, delegated work, effort, projects, sessions, the usage limits
     reached, and diagnostics.
   - **Show Claude Code Usage in Status Bar** shows how full the context of
-    the session running in this workspace is.
-  - **Export CSV** gives every input a hand-made cost calculation needs, per
-    day and model, and no prices.
+    the session running in this workspace is, in the window Claude Code's
+    own rules give the model, the organization's managed settings included.
+  - **Export CSV** gives every count a hand-made cost calculation needs, per
+    day and model, apart by speed, where each request ran and its prompt
+    size, which the price depends on too, and no prices.
   - Each request is counted once, from its most complete record: Claude Code
     writes a line per streaming update, and summing them would count about
     twice the tokens.
@@ -64,6 +66,14 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   again, where downloads are allowed.
 
 ### Fixed
+- **The token summary's Copy and Export CSV guard spreadsheet formulas
+  alike.** Copy had no guard, so a file named `+x.ts` pasted into a
+  spreadsheet as a formula, and Export CSV looked only at a name's first
+  character, so one with a space, an invisible character or a full-width
+  sign before its `=` was exported as one. Both now look past those, read
+  compatibility forms as the plain signs, and guard a leading `"` as well.
+  The page's content security policy also forbids form posts and a base
+  URL.
 - **Clear Downloaded Tokenizers deletes only the tokenizers.** It deleted
   the extension's whole storage directory, not just the tokenizers in it.
 - **Changing an unrelated setting rescanned the whole workspace.** Turning
