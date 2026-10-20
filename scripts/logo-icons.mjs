@@ -9,7 +9,9 @@
  * split into the colour that, over the ground, gives it, and how much of it),
  * then averaged down. The dark-theme icon keeps the neon glow; on a light theme
  * the faint glow, made for a dark ground, only blurs the strokes, so it is
- * dropped there and the strokes kept.
+ * dropped there and the strokes kept, each pixel darkened to its own hue: the
+ * logo's light blue and violet were made to shine on its dark ground, and on a
+ * light tab bar measured 2.2:1 at the median, under the 3:1 an icon needs.
  *
  * Node built-ins only: it reads and writes 8-bit PNGs itself.
  */
@@ -24,13 +26,15 @@ const SIZE = 64;
 const CROP = { x: 31, y: 31, size: 192 };
 /** Light themes: opacity below `low` is glow and goes, above `high` is stroke and stays. */
 const LIGHT = { low: 0.22, high: 0.62 };
+/** Light themes: no colour lighter than this relative luminance, 4.5:1 on a #F3F3F3 tab bar. */
+const LIGHT_MAX_LUMINANCE = 0.16;
 
 const logo = readPng('icon.png');
 const ground = groundColour(logo);
 assertCropHoldsTheT(logo, ground);
 const icon = averageDown(logo, ground);
 writePng('media/logo-dark.png', icon);
-writePng('media/logo-light.png', icon.map(([r, g, b, a]) => [r, g, b, crisp(a)]));
+writePng('media/logo-light.png', icon.map(([r, g, b, a]) => [...darkened([r, g, b]), crisp(a)]));
 console.log(`media/logo-dark.png and media/logo-light.png: ${SIZE} x ${SIZE}, from icon.png on ${ground.map(c => c.toFixed(1)).join(', ')}`);
 
 /** The colour of the logo's ground: its outer border, averaged. */
@@ -98,6 +102,20 @@ function averageDown({ pixel }, bg) {
         }
     }
     return out;
+}
+
+/** The same hue, no lighter than LIGHT_MAX_LUMINANCE: every channel scaled alike, in linear light. */
+function darkened(rgb) {
+    const linear = rgb.map(v => {
+        const s = v / 255;
+        return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    const luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+    const k = luminance > LIGHT_MAX_LUMINANCE ? LIGHT_MAX_LUMINANCE / luminance : 1;
+    return linear.map(v => {
+        const s = v * k;
+        return Math.round(255 * (s <= 0.0031308 ? s * 12.92 : 1.055 * s ** (1 / 2.4) - 0.055));
+    });
 }
 
 function crisp(a) {
