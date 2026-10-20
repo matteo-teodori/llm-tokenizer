@@ -347,6 +347,10 @@ suite('usage transcripts', () => {
             if (locked) {
                 fs.chmodSync(locked, 0o755);
             }
+            // The loop goes first: on Windows a recursive delete follows the
+            // junction round it and fails, "the name of the file cannot be
+            // resolved".
+            fs.unlinkSync(path.join(inside, 'loop'));
         }
     });
 
@@ -1128,7 +1132,9 @@ suite('usage roots', () => {
         // test/index.ts points CLAUDE_CONFIG_DIR at the fixtures before any test runs.
         const fixtures = path.join(__dirname, '..', '..', '..', 'test', 'fixtures');
         const resolved = resolveRoots({ ...machineRootInputs({ fixtures }), setting: '', editorEnvironment: undefined });
-        assert.deepStrictEqual(resolved.roots.map(r => fs.realpathSync(r.path)), [fs.realpathSync(FIXTURE_ROOT)]);
+        // The native resolution, which spells a drive letter one way: the
+        // runner's D: and the extension host's d: are one folder.
+        assert.deepStrictEqual(resolved.roots.map(r => fs.realpathSync.native(r.path)), [fs.realpathSync.native(FIXTURE_ROOT)]);
         const realDefault = path.join(os.homedir(), '.claude');
         assert.ok(!resolved.candidates.some(c => c.path === realDefault), 'the real ~/.claude was considered');
     });

@@ -113,6 +113,13 @@ suite('usage history files', () => {
 
     test('a pointer this version cannot read as a name is never followed and never replaced', () => {
         const older = start();
+        // Started a millisecond later at least: within one millisecond the
+        // random part of the name decides which is the newest, the same way
+        // in every window, so the order they were started in cannot.
+        const tick = Date.now();
+        while (Date.now() <= tick) {
+            // Until the clock moves.
+        }
         const newest = createHistory(folder);
         const outside = path.join(path.dirname(folder), 'outside.sqlite');
         fs.writeFileSync(outside, 'not a history of this folder');

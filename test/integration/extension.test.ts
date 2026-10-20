@@ -44,8 +44,11 @@ suite('extension', () => {
         // override it. Without both, a test could read ~/.claude.
         const fixtures = path.resolve(__dirname, '..', '..', '..', 'test', 'fixtures');
         const configDir = process.env.CLAUDE_CONFIG_DIR;
+        // Windows names one folder in either case, its drive letter included:
+        // the runner writes D:, and the extension host's own paths say d:.
+        const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
         assert.ok(
-            configDir && path.resolve(configDir).startsWith(fixtures + path.sep),
+            configDir && fold(path.resolve(configDir)).startsWith(fold(fixtures + path.sep)),
             `CLAUDE_CONFIG_DIR is ${configDir ?? 'unset'}, not inside ${fixtures}`,
         );
     });
@@ -264,7 +267,8 @@ suite('extension', () => {
             }
         }
         // A missing file is an empty button. .vscodeignore lets media/*.png into the VSIX.
-        const shipped = fs.readFileSync(path.join(extension.extensionPath, '.vscodeignore'), 'utf8').split('\n').includes('!media/*.png');
+        // A Windows checkout ends its lines with CRLF.
+        const shipped = fs.readFileSync(path.join(extension.extensionPath, '.vscodeignore'), 'utf8').split(/\r?\n/).includes('!media/*.png');
         const files = (icon: string | { light: string; dark: string } | undefined) => (icon === undefined ? [] : typeof icon === 'string' ? [icon] : [icon.light, icon.dark]);
         for (const { command, icon } of manifest.contributes.commands) {
             for (const file of files(icon)) {
