@@ -67,7 +67,9 @@ function fakePanel() {
 
 /** The tokens a CSV export would add up to: input, cache writes, cache reads and output of every row. */
 function processedInCsv(fragments: PanelFragments | undefined): number {
-    return (fragments?.csv.rows ?? []).reduce((sum, r) => sum + Number(r[4]) + Number(r[5]) + Number(r[8]) + Number(r[9]), 0);
+    const header = fragments?.csv.header ?? [];
+    const columns = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'].map(name => header.indexOf(name));
+    return (fragments?.csv.rows ?? []).reduce((sum, r) => columns.reduce((s, i) => s + Number(r[i]), sum), 0);
 }
 
 type Shown = { kind: 'info' | 'warning'; message: string; items: unknown[] };

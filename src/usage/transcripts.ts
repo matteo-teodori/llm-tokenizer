@@ -30,8 +30,11 @@ import * as path from 'path';
 import { isSyntheticModel, variantOf } from './modelIds';
 import type { Compaction, LimitHit, TranscriptKind, UsageRequest } from './types';
 
-/** Bumped whenever what a line becomes changes; a bump re-reads every file. */
-export const PARSER_VERSION = 1;
+/**
+ * Bumped whenever what a line becomes changes; a bump re-reads every file.
+ * 2: each request's `usage.speed` and `usage.inference_geo`.
+ */
+export const PARSER_VERSION = 2;
 
 /** Bytes read at a time. */
 const CHUNK_BYTES = 1 << 20;
@@ -657,6 +660,17 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         count(result.malformed, `bad-field:${field}`);
         return null;
     };
+    // A word as the API writes them; an empty one is a record that names none.
+    const word = (value: unknown, field: string): string | null => {
+        if (value === undefined || value === null || value === '') {
+            return null;
+        }
+        if (typeof value === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(value)) {
+            return value;
+        }
+        count(result.malformed, `bad-field:${field}`);
+        return null;
+    };
 
     result.requests.push({
         provider: 'claude-code',
@@ -668,6 +682,8 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         timestamp,
         model,
         variant: variantOf(boundedString(r.requestedModel, MAX_MODEL) ?? undefined),
+        speed: word(usage.speed, 'speed'),
+        inferenceGeo: word(usage.inference_geo, 'inference_geo'),
         input: counter(usage.input_tokens, 'input_tokens'),
         cacheCreation: counter(usage.cache_creation_input_tokens, 'cache_creation_input_tokens'),
         cacheRead: counter(usage.cache_read_input_tokens, 'cache_read_input_tokens'),

@@ -55,6 +55,16 @@ export interface UsageRequest extends TokenCounts {
     model: string;
     /** A routing suffix such as `1m`, from `requestedModel`'s brackets. */
     variant: string | null;
+    /**
+     * `usage.speed`: `standard`, or `fast`, which is billed higher; null where
+     * the record names none, as older ones do not.
+     */
+    speed: string | null;
+    /**
+     * `usage.inference_geo`: where the request ran, `global`, `us`, which is
+     * billed higher, or `not_available`; null where the record names none.
+     */
+    inferenceGeo: string | null;
     /** Cache writes split by time to live; together they are `cacheCreation`. */
     cacheWrite5m: number | null;
     cacheWrite1h: number | null;
@@ -115,6 +125,13 @@ export interface SessionSighting {
 }
 
 /** One group of the store's bucket sums: counters summed, a missing one adding nothing. */
+/**
+ * A request's prompt, its input, cache writes and cache reads together, by
+ * the sizes at which prices that depend on it change: Claude Haiku 5.5's are
+ * higher for a request over 100,000 tokens, request by request.
+ */
+export type PromptSize = 'up-to-100k' | '100k-to-200k' | 'over-200k';
+
 export interface BucketSums {
     /** `floor(ts / BUCKET_MS)`. */
     bucket: number;
@@ -123,6 +140,10 @@ export interface BucketSums {
     variant: string | null;
     kind: TranscriptKind;
     effort: string | null;
+    speed: string | null;
+    inferenceGeo: string | null;
+    /** Null where a request missed one of the three counters. */
+    promptSize: PromptSize | null;
     requests: number;
     /** Requests that reported all four counters. */
     completeRequests: number;

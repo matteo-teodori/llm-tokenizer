@@ -29,6 +29,7 @@ import type {
     BucketSums,
     Compaction,
     LimitHit,
+    PromptSize,
     SessionSighting,
     StoreCoverage,
     TranscriptKind,
@@ -37,7 +38,7 @@ import type {
 } from './types';
 
 /** `PRAGMA user_version` of the schema this code writes. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** How old a lease's heartbeat must be before another window may take it. */
 export const LEASE_TAKEOVER_MS = 20_000;
@@ -291,10 +292,13 @@ const DATA_TABLES = ['files', 'read_guards', 'requests', 'sessions', 'compaction
 
 /**
  * Migrations by the version they produce. Forward-only and additive, each in
- * one transaction after a backup. Version 1 creates the schema.
+ * one transaction after a backup. Version 1 creates the schema; version 2
+ * keeps each request's speed and where it ran, which its price depends on.
+ * A row read before has neither, until its file is read again.
  */
 const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
     1: db => db.exec(SCHEMA),
+    2: db => db.exec('ALTER TABLE requests ADD COLUMN speed TEXT; ALTER TABLE requests ADD COLUMN inference_geo TEXT;'),
 };
 
 /**
@@ -308,23 +312,25 @@ INSERT INTO requests (
     provider, message_id, parser_version, file, byte_offset, is_main, complete, ts,
     session_id, kind, model, variant, input, cache_creation, cache_read, output,
     cache_5m, cache_1h, thinking, effort, web_search, web_fetch, request_id,
-    claude_code_version, agent_id, run_id
+    claude_code_version, agent_id, run_id, speed, inference_geo
 ) VALUES (
     :provider, :messageId, :parserVersion, :file, :byteOffset, :isMain, :complete, :ts,
     :sessionId, :kind, :model, :variant, :input, :cacheCreation, :cacheRead, :output,
     :cache5m, :cache1h, :thinking, :effort, :webSearch, :webFetch, :requestId,
-    :claudeCodeVersion, :agentId, :runId
+    :claudeCodeVersion, :agentId, :runId, :speed, :inferenceGeo
 )
 ON CONFLICT (provider, message_id) DO UPDATE SET
     (parser_version, file, byte_offset, is_main, complete, ts, session_id, kind, model,
      variant, input, cache_creation, cache_read, output, cache_5m, cache_1h, thinking,
-     effort, web_search, web_fetch, request_id, claude_code_version, agent_id, run_id)
+     effort, web_search, web_fetch, request_id, claude_code_version, agent_id, run_id,
+     speed, inference_geo)
   = (excluded.parser_version, excluded.file, excluded.byte_offset, excluded.is_main,
      excluded.complete, excluded.ts, excluded.session_id, excluded.kind, excluded.model,
      excluded.variant, excluded.input, excluded.cache_creation, excluded.cache_read,
      excluded.output, excluded.cache_5m, excluded.cache_1h, excluded.thinking,
      excluded.effort, excluded.web_search, excluded.web_fetch, excluded.request_id,
-     excluded.claude_code_version, excluded.agent_id, excluded.run_id)
+     excluded.claude_code_version, excluded.agent_id, excluded.run_id,
+     excluded.speed, excluded.inference_geo)
 WHERE excluded.parser_version > requests.parser_version
    OR (excluded.parser_version = requests.parser_version AND (
         (excluded.is_main, excluded.complete, coalesce(excluded.output, -1))
@@ -517,6 +523,8 @@ export class UsageStore {
                 claudeCodeVersion: r.claudeCodeVersion,
                 agentId: r.agentId,
                 runId: r.runId,
+                speed: r.speed,
+                inferenceGeo: r.inferenceGeo,
             });
         }
     }
@@ -606,7 +614,11 @@ export class UsageStore {
     bucketSums(sinceMs: number, untilMs = Number.MAX_SAFE_INTEGER): BucketSums[] {
         return this.db
             .prepare(
-                `SELECT ts / ${BUCKET_MS} AS bucket, session_id, model, variant, kind, effort,
+                `SELECT ts / ${BUCKET_MS} AS bucket, session_id, model, variant, kind, effort, speed, inference_geo,
+                        CASE WHEN input IS NULL OR cache_creation IS NULL OR cache_read IS NULL THEN NULL
+                             WHEN input + cache_creation + cache_read > 200000 THEN 'over-200k'
+                             WHEN input + cache_creation + cache_read > 100000 THEN '100k-to-200k'
+                             ELSE 'up-to-100k' END AS prompt_size,
                         count(*) AS requests, sum(complete) AS complete, min(ts) AS first_ts, max(ts) AS last_ts,
                         coalesce(sum(input), 0) AS input, coalesce(sum(cache_creation), 0) AS cache_creation,
                         coalesce(sum(cache_read), 0) AS cache_read, coalesce(sum(output), 0) AS output,
@@ -615,7 +627,7 @@ export class UsageStore {
                         coalesce(sum(web_fetch), 0) AS web_fetch
                  FROM requests
                  WHERE ts >= ? AND ts < ?
-                 GROUP BY bucket, session_id, model, variant, kind, effort`,
+                 GROUP BY bucket, session_id, model, variant, kind, effort, speed, inference_geo, prompt_size`,
             )
             .all(sinceMs, untilMs)
             .map(row => ({
@@ -625,6 +637,9 @@ export class UsageStore {
                 variant: row.variant as string | null,
                 kind: row.kind as TranscriptKind,
                 effort: row.effort as string | null,
+                speed: row.speed as string | null,
+                inferenceGeo: row.inference_geo as string | null,
+                promptSize: row.prompt_size as PromptSize | null,
                 requests: row.requests as number,
                 completeRequests: row.complete as number,
                 firstTs: row.first_ts as number,
@@ -1082,6 +1097,8 @@ function toRequest(row: Record<string, unknown>): UsageRequest {
         timestamp: row.ts as number,
         model: row.model as string,
         variant: row.variant as string | null,
+        speed: row.speed as string | null,
+        inferenceGeo: row.inference_geo as string | null,
         input: row.input as number | null,
         cacheCreation: row.cache_creation as number | null,
         cacheRead: row.cache_read as number | null,

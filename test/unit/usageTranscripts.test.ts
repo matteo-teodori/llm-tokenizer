@@ -245,6 +245,33 @@ suite('usage transcripts', () => {
         assert.strictEqual(result.checkpoint.offset, fs.statSync(file).size);
     });
 
+    test("a request's speed and where it ran are kept as the words the API writes; anything else is unknown", async () => {
+        const file = path.join(tmp, 'projects', 'p', 's1.jsonl');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const sent = (id: string, extra: Record<string, unknown>) =>
+            line({
+                ...assistant(id, 1),
+                message: { model: 'claude-opus-5-5', id, type: 'message', role: 'assistant', content: [], usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1, ...extra } },
+            });
+        fs.writeFileSync(
+            file,
+            sent('fast', { speed: 'fast', inference_geo: 'us' }) +
+                sent('standard', { speed: 'standard', inference_geo: 'global' }) +
+                sent('older', {}) +
+                // Measured: some records name an empty geo, and others not_available.
+                sent('empty', { speed: null, inference_geo: '' }) +
+                sent('elsewhere', { inference_geo: 'not_available' }) +
+                sent('odd', { speed: 'Fast mode', inference_geo: 7 }),
+        );
+        const store = freshStore();
+        const summary = await importRoots(store, [tmp]);
+        assert.deepStrictEqual(
+            [...store.requests()].map(r => [r.messageId, r.speed, r.inferenceGeo]).sort(),
+            [['elsewhere', null, 'not_available'], ['empty', null, null], ['fast', 'fast', 'us'], ['odd', null, null], ['older', null, null], ['standard', 'standard', 'global']],
+        );
+        assert.deepStrictEqual(summary.malformed, { 'bad-field:speed': 1, 'bad-field:inference_geo': 1 });
+    });
+
     test('bad counters are refused one by one, and a malformed line is never quoted', async () => {
         // F12. A counter that is not a safe, non-negative integer becomes
         // unknown; it never becomes 0 and never takes the record with it.

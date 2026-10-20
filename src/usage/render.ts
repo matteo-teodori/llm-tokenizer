@@ -94,7 +94,7 @@ function emptyState(view: PanelView): string | undefined {
                 <p>Turned on, LLM Tokenizer reads Claude Code's own session records ${view.where ? escapeHtml(view.where) : 'on this machine'},
                 and shows how many tokens Claude Code processed: by day, project, session and model.</p>
                 <ul>
-                    <li>Kept, in a database in this extension's own storage: each request's token counts, model, effort, time, ids and Claude Code version; the folder each session started in; compactions' sizes and the usage limits reached; which transcripts were read, and how far; and this machine's name, which each import writes.</li>
+                    <li>Kept, in a database in this extension's own storage: each request's token counts, model, effort, speed, where it ran, time, ids and Claude Code version; the folder each session started in; compactions' sizes and the usage limits reached; which transcripts were read, and how far; and this machine's name, which each import writes.</li>
                     <li>Never kept: prompts, responses, thinking, tool inputs or results.</li>
                     <li>Nothing is sent anywhere.</li>
                     <li>The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Claude Code Usage History removes it.</li>
@@ -535,6 +535,9 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
         'date',
         'model',
         'variant',
+        'speed',
+        'inference_geo',
+        'prompt_size',
         'requests',
         'input_tokens',
         'cache_creation_input_tokens',
@@ -551,6 +554,9 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
         r.date,
         r.model,
         r.variant ?? '',
+        r.speed ?? '',
+        r.inferenceGeo ?? '',
+        r.promptSize ?? '',
         String(r.totals.coverage.requests),
         String(r.totals.input),
         String(r.totals.cacheCreation),
@@ -563,7 +569,13 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
         String(r.totals.webFetchRequests),
         r.totals.provenance === 'partial' ? 'no' : 'yes',
     ]);
-    const notes = exportNotes(view);
+    const notes = [
+        ...exportNotes(view),
+        // What a hand-made cost calculation needs to know of the columns.
+        'speed and inference_geo are as each request recorded them, empty where it named none: fast, and us, are billed higher',
+        "prompt_size is each request's input, cache writes and cache reads together, over 100,000 or 200,000 tokens or not: Claude Haiku 5.5 prices a request over 100,000 higher",
+        'thinking_tokens are part of output_tokens; cache_creation_5m and cache_creation_1h split cache_creation_input_tokens where the requests recorded the split',
+    ];
     if (report && report.omitted.dayModels > 0) {
         notes.push(`${report.omitted.dayModels} older day-and-model rows are counted in the totals but not listed`);
     }

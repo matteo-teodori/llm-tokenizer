@@ -66,6 +66,8 @@ function request(overrides: Partial<UsageRequest>): UsageRequest {
         timestamp: Date.UTC(2026, 9, 9, 12),
         model: 'claude-opus-5-5',
         variant: null,
+        speed: null,
+        inferenceGeo: null,
         input: 1,
         cacheCreation: 2,
         cacheRead: 3,
@@ -463,6 +465,26 @@ suite('usage report', () => {
             { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
         );
         assert.deepStrictEqual(report.dayModels.map(r => r.model), ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
+    });
+
+    test("a day's rows of one model are apart by what their price depends on; the model's own row is not", () => {
+        const store = freshStore();
+        store.transaction(() =>
+            store.upsertRequests([
+                request({ messageId: 'a', model: 'claude-opus-5-5', speed: 'fast', inferenceGeo: 'us', output: 10 }),
+                request({ messageId: 'b', model: 'claude-opus-5-5', speed: 'standard', inferenceGeo: 'us', output: 10 }),
+                request({ messageId: 'c', model: 'claude-opus-5-5', speed: 'standard', inferenceGeo: 'us', output: 10, input: 150_000 }),
+            ]),
+        );
+        const report = buildReport(
+            { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual(
+            report.dayModels.map(r => [r.speed, r.inferenceGeo, r.promptSize, r.totals.coverage.requests]).sort(),
+            [['fast', 'us', 'up-to-100k', 1], ['standard', 'us', '100k-to-200k', 1], ['standard', 'us', 'up-to-100k', 1]],
+        );
+        assert.deepStrictEqual(report.models.map(m => [m.model, m.totals.coverage.requests]), [['claude-opus-5-5', 3]]);
     });
 
     test('day-and-model rows are capped at the newest, the rest counted', () => {

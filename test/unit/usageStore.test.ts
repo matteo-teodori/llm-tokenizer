@@ -22,6 +22,8 @@ function req(overrides: Partial<UsageRequest> = {}): UsageRequest {
         timestamp: Date.UTC(2026, 9, 9, 10, 0),
         model: 'claude-opus-5-5',
         variant: null,
+        speed: null,
+        inferenceGeo: null,
         input: 0,
         cacheCreation: 0,
         cacheRead: 0,
@@ -95,7 +97,7 @@ suite('usage history store', () => {
         assert.strictEqual(store.generation(), 0);
         assert.match(store.storeId(), /^[0-9a-z]+-[0-9a-z]+$/);
         assert.ok(fs.existsSync(file));
-        assert.strictEqual(SCHEMA_VERSION, 1);
+        assert.strictEqual(SCHEMA_VERSION, 2);
     });
 
     test('the upsert keeps the record the comparator prefers, in any order', () => {
@@ -348,6 +350,70 @@ suite('usage history store', () => {
         store.transaction(() => store.insertCompactions('claude-code', [compaction('on-opus', 1.5, 500_000), compaction('since', 5, 230_000)]));
         assert.deepStrictEqual(latest(), ['claude-sonnet-4-6', null, 50_000, 230_000]);
     });
+
+    test('a version 1 history gains the speed and where each request ran, after a backup, and keeps every row', () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ messageId: 'kept', input: 5 })]));
+        store.close();
+        opened.length = 0;
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        // As a build before these columns left it.
+        const db = new sqlite.DatabaseSync(file);
+        db.exec('ALTER TABLE requests DROP COLUMN speed; ALTER TABLE requests DROP COLUMN inference_geo; PRAGMA user_version = 1');
+        db.close();
+
+        const migrated = ready(open());
+        assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.input, r.speed, r.inferenceGeo]), [['kept', 5, null, null]]);
+        migrated.transaction(() => migrated.upsertRequests([req({ messageId: 'new', requestId: 'req_2', speed: 'fast', inferenceGeo: 'us' })]));
+        assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.speed, r.inferenceGeo]).sort(), [['kept', null, null], ['new', 'fast', 'us']]);
+        // The backup is the history as it was.
+        const backup = new sqlite.DatabaseSync(`${file}.bak-v1`, { readOnly: true });
+        try {
+            assert.deepStrictEqual(
+                [{ ...backup.prepare('PRAGMA user_version').get() }, backup.prepare('SELECT message_id FROM requests').all().map(r => ({ ...r }))],
+                [{ user_version: 1 }, [{ message_id: 'kept' }]],
+            );
+        } finally {
+            backup.close();
+        }
+    });
+
+    test("a request's more complete record replaces its speed and where it ran with the rest of it", () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ messageId: 'm', output: 1 })]));
+        store.transaction(() => store.upsertRequests([req({ messageId: 'm', output: 50, byteOffset: 10, speed: 'fast', inferenceGeo: 'us' })]));
+        assert.deepStrictEqual([...store.requests()].map(r => [r.output, r.speed, r.inferenceGeo]), [[50, 'fast', 'us']]);
+    });
+
+    test('request sums are apart by speed, where the requests ran, and their prompt size past 100,000 and 200,000', () => {
+        const store = ready(open());
+        let n = 0;
+        const sent = (input: number, extra: Partial<UsageRequest> = {}) =>
+            req({ messageId: `m${++n}`, requestId: `r${n}`, input, cacheCreation: 0, cacheRead: 0, output: 1, ...extra });
+        store.transaction(() =>
+            store.upsertRequests([
+                // Input, cache writes and cache reads together: 100,000, 100,001, 200,000 and 200,001.
+                sent(100_000),
+                sent(60_000, { cacheRead: 40_001 }),
+                sent(200_000),
+                sent(100_000, { cacheCreation: 100_001 }),
+                sent(10, { speed: 'fast' }),
+                sent(10, { inferenceGeo: 'us' }),
+                // A counter missing: its size is unknown.
+                sent(10, { cacheRead: null }),
+            ]),
+        );
+        const sums = store.bucketSums(0).map(s => [s.promptSize, s.speed, s.inferenceGeo, s.requests]);
+        assert.deepStrictEqual(sums.sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1)), [
+            ['100k-to-200k', null, null, 2],
+            ['over-200k', null, null, 1],
+            ['up-to-100k', 'fast', null, 1],
+            ['up-to-100k', null, 'us', 1],
+            ['up-to-100k', null, null, 1],
+            [null, null, null, 1],
+        ]);
+    });
+
     test('a read sees one snapshot, whatever another window commits during it', () => {
         const store = ready(open());
         const other = ready(open());

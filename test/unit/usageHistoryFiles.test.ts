@@ -22,7 +22,7 @@ const sqlite = loadSqlite();
 function request(messageId: string): UsageRequest {
     return {
         provider: 'claude-code', messageId, requestId: null, sessionId: 's', kind: 'main', isMain: true, timestamp: Date.UTC(2026, 9, 9, 12),
-        model: 'claude-opus-5-5', variant: null, input: 1, cacheCreation: 0, cacheRead: 0, output: 1, cacheWrite5m: null, cacheWrite1h: null,
+        model: 'claude-opus-5-5', variant: null, speed: null, inferenceGeo: null, input: 1, cacheCreation: 0, cacheRead: 0, output: 1, cacheWrite5m: null, cacheWrite1h: null,
         thinking: null, effort: null, webSearchRequests: null, webFetchRequests: null, claudeCodeVersion: null, agentId: null, runId: null,
         file: '/f.jsonl', byteOffset: 0, parserVersion: 1,
     };

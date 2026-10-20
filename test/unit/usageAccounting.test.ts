@@ -19,6 +19,8 @@ function req(overrides: Partial<UsageRequest> = {}): UsageRequest {
         timestamp: Date.UTC(2026, 9, 9, 10, 0),
         model: 'claude-opus-5-5',
         variant: null,
+        speed: null,
+        inferenceGeo: null,
         input: 0,
         cacheCreation: 0,
         cacheRead: 0,

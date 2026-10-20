@@ -44,7 +44,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
                 compactions: [{ uuid: 'c', sessionId: HOSTILE, kind: 'main', timestamp: 0, trigger: HOSTILE, preTokens: 160_000, postTokens: 12_000 }],
             },
         ],
-        dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, totals: t }],
+        dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: t }],
         limitWindows: [{ limitType: HOSTILE, resetsAt: 1791561600, hits: 2, firstTs: Date.UTC(2026, 9, 9, 10, 6), date: '2026-10-09' }],
         omitted: { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 },
         coverage: { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 3, ahead: 0, files: 4, oversizeLines: 0, malformedLines: 0 },
@@ -335,6 +335,24 @@ suite('usage page', () => {
         assert.ok(csv.notes.some(n => n.includes('largest output per message.id')));
     });
 
+    test('the CSV is apart by what a price depends on, and its notes say how to read those columns', () => {
+        const t = totals(1);
+        const row = (model: string, speed: string | null, inferenceGeo: string | null, promptSize: 'up-to-100k' | 'over-200k' | null) =>
+            ({ date: '2026-10-09', model, variant: null, speed, inferenceGeo, promptSize, totals: t });
+        const { csv } = renderFragments(
+            view({ report: report({ dayModels: [row('claude-haiku-5-5', 'standard', 'global', 'over-200k'), row('claude-opus-5-5', 'fast', 'us', 'up-to-100k'), row('claude-opus-5-5', null, null, null)] }) }),
+        );
+        const at = (name: string) => csv.header.indexOf(name);
+        assert.deepStrictEqual(csv.rows.map(r => [r[at('speed')], r[at('inference_geo')], r[at('prompt_size')]]), [
+            ['standard', 'global', 'over-200k'],
+            ['fast', 'us', 'up-to-100k'],
+            ['', '', ''],
+        ]);
+        for (const said of ['fast, and us, are billed higher', 'Claude Haiku 5.5 prices a request over 100,000 higher', 'thinking_tokens are part of output_tokens']) {
+            assert.ok(csv.notes.some(n => n.includes(said)), said);
+        }
+    });
+
     test("the page's own exports quote, guard formulas, and open with their notes", () => {
         const page = runPage(renderFragments(view()));
         assert.deepStrictEqual(page.posted[0]?.type, 'ready');
@@ -342,7 +360,7 @@ suite('usage page', () => {
         const csv = page.click('export');
         const lines = csv.split('\n');
         assert.ok(lines[0].startsWith('# extension: LLM Tokenizer 2.2.0'));
-        assert.ok(lines.includes('"date","model","variant","requests","input_tokens","cache_creation_input_tokens","cache_creation_5m","cache_creation_1h","cache_read_input_tokens","output_tokens","thinking_tokens","web_search_requests","web_fetch_requests","complete"'));
+        assert.ok(lines.includes('"date","model","variant","speed","inference_geo","prompt_size","requests","input_tokens","cache_creation_input_tokens","cache_creation_5m","cache_creation_1h","cache_read_input_tokens","output_tokens","thinking_tokens","web_search_requests","web_fetch_requests","complete"'));
         assert.ok(csv.includes(`"'=cmd|""/c calc""!A1"`), 'a model id was left able to run as a formula');
 
         const copied = page.click('copy');
@@ -387,7 +405,7 @@ suite('usage page', () => {
     });
 
     test('the page carries the nonce and a strict policy, and its data cannot close the script', () => {
-        const html = renderUsagePage('abc', "default-src 'none'; script-src 'nonce-abc'", renderFragments(view({ report: report({ dayModels: [{ date: '2026-10-09', model: '</script><script>alert(1)</script>', variant: null, totals: totals(1) }] }) })));
+        const html = renderUsagePage('abc', "default-src 'none'; script-src 'nonce-abc'", renderFragments(view({ report: report({ dayModels: [{ date: '2026-10-09', model: '</script><script>alert(1)</script>', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: totals(1) }] }) })));
         assert.ok(html.includes(`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-abc'">`));
         assert.strictEqual((html.match(/<\/script>/g) ?? []).length, 1);
     });

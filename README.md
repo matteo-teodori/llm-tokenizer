@@ -183,9 +183,9 @@ reads, output, thinking, web searches and fetches. It gives no prices.
 **What is kept, and where.** A database in this extension's own storage
 (the `claude-code-usage` folder in VS Code's global storage for LLM
 Tokenizer) keeps:
-- each request's token counts, model, effort, time and Claude Code version,
-  and its ids: message, request, session, and the subagent or workflow run it
-  came from;
+- each request's token counts, model, effort, speed, where it ran, time and
+  Claude Code version, and its ids: message, request, session, and the
+  subagent or workflow run it came from;
 - the folder each session started in;
 - each transcript's path, size, file id and how far it was read, with a hash
   of the last 64 bytes read, to tell what changed;

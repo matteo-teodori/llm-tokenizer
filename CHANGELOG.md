@@ -23,7 +23,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
     writes a line per streaming update, and summing them would count about
     twice the tokens.
   - Kept, in a database in this extension's storage: each request's token
-    counts, model, effort, time, ids and Claude Code version; the folder
+    counts, model, effort, speed, where it ran, time, ids and Claude Code
+    version; the folder
     each session started in; compactions' sizes and the usage limits
     reached; which transcripts were read and how far; and this machine's
     name, which each import writes. Prompts, responses, thinking and tool

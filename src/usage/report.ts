@@ -9,7 +9,7 @@
 
 import { BUCKET_MS, emptyTotals, localDate, mergeTotals, type UsageTotals } from './aggregate';
 import { projectLabel, type ProjectRef } from './projects';
-import type { BucketSums, Compaction, LimitHit, StoreCoverage, TranscriptKind } from './types';
+import type { BucketSums, Compaction, LimitHit, PromptSize, StoreCoverage, TranscriptKind } from './types';
 
 /** Today, the last 7 or 30 local days, or everything held. Never "all time". */
 export type RangeKey = 'today' | '7d' | '30d' | 'coverage';
@@ -83,6 +83,17 @@ export interface LimitWindow {
     date: string;
 }
 
+/** A day's requests on one model, at one speed, where they ran and of one prompt size: a CSV row. */
+export interface DayModelRow {
+    date: string;
+    model: string;
+    variant: string | null;
+    speed: string | null;
+    inferenceGeo: string | null;
+    promptSize: PromptSize | null;
+    totals: UsageTotals;
+}
+
 export interface UsageReport {
     range: RangeKey;
     /** The first local day covered, as YYYY-MM-DD; null for an empty history. */
@@ -99,7 +110,7 @@ export interface UsageReport {
     projects: ProjectRow[];
     sessions: SessionRow[];
     /** Every input of a hand-made cost calculation, by day and model. */
-    dayModels: { date: string; model: string; variant: string | null; totals: UsageTotals }[];
+    dayModels: DayModelRow[];
     /** Account-wide, so never narrowed to the workspace. */
     limitWindows: LimitWindow[];
     /** Rows each list left out past its cap: counted in the totals, not listed. */
@@ -185,7 +196,7 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     const models = new Map<string, ModelRow>();
     const kinds = new Map<TranscriptKind, UsageTotals>();
     const efforts = new Map<string | null, UsageTotals>();
-    const dayModels = new Map<string, { date: string; model: string; variant: string | null; totals: UsageTotals }>();
+    const dayModels = new Map<string, DayModelRow>();
     const projects = new Map<string, { row: ProjectRow; sessionIds: Set<string>; models: Map<string, ModelRow> }>();
     const sessions = new Map<string, { row: SessionRow; models: Map<string, ModelRow> }>();
 
@@ -203,12 +214,16 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         addModel(models, modelKey, sums, t);
         add(kinds, sums.kind, t);
         add(efforts, sums.effort, t);
-        const dayModelKey = `${date}\u0000${modelKey}`;
+        // Apart by all that a request's price depends on, beside its model.
+        const dayModelKey = [date, modelKey, sums.speed ?? '', sums.inferenceGeo ?? '', sums.promptSize ?? ''].join('\u0000');
         const dayModel = dayModels.get(dayModelKey);
         dayModels.set(dayModelKey, {
             date,
             model: sums.model,
             variant: sums.variant,
+            speed: sums.speed,
+            inferenceGeo: sums.inferenceGeo,
+            promptSize: sums.promptSize,
             totals: mergeTotals(dayModel?.totals ?? emptyTotals(), t),
         });
 
