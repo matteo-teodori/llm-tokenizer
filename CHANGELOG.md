@@ -60,8 +60,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   hour.** A read that finds the history busy, a file refused for a moment
   or its worker stopped is tried again after 5 and 30 seconds, then 2 and 10
   minutes, and shows as failing only once a retry has failed too.
-- **The status item no longer waits for a whole first import** before it
-  shows the running session's context.
+- **The status item no longer waits for a whole first import**, nor a minute
+  after it, before it shows the running session's context.
 - **Moving the cursor or switching back to a tab no longer recounts an
   unchanged document**, which held up every count queued behind it.
 - **Forgetting changed files no longer stalls the window.** After a checkout
