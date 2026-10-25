@@ -27,10 +27,15 @@ export type EncoderKind = 'tiktoken' | 'hf' | 'tiktokenModel' | 'heuristic';
 /**
  * tiktoken encodings we ship. Must stay in sync with `ENCODINGS` in scripts/bundles.mjs.
  *
- * `p50k_base` and `r50k_base` are deliberately absent: no model in the registry
- * uses them and they cost ~400 KB gzipped in the VSIX.
+ * Only those a model in the registry uses, since each ships its own rank
+ * tables: `cl100k_base` went with GPT-4 Turbo and GPT-3.5 Turbo, the last
+ * models on it, and `p50k_base` and `r50k_base` are absent for the same
+ * reason. gpt-oss counts with `o200k_base`: tiktoken's `o200k_harmony` is the
+ * same tables with Harmony's special tokens added, and special tokens are
+ * counted as text here (see ENCODE_LITERALLY), so it would ship them twice for
+ * identical counts.
  */
-export type TiktokenEncoding = 'o200k_harmony' | 'o200k_base' | 'cl100k_base';
+export type TiktokenEncoding = 'o200k_base';
 
 export interface TiktokenSpec {
     kind: 'tiktoken';
@@ -138,11 +143,12 @@ export interface Encoder {
 
 /**
  * Each encoding is built into its own file under `out/encodings/` (see
- * `build.mjs`) and required by path at runtime.
+ * `build.mjs`) and required by path at runtime, on the first count for a
+ * model that uses it.
  *
- * This matters: the rank tables are constructed at module load, so importing
- * all three costs about 120 ms and 34 MB of heap, measured, against 25-60 ms
- * and 9-16 MB for the active model's encoding alone.
+ * This matters: the rank tables are constructed at module load, which costs
+ * o200k_base about 65 ms and 16 MB of heap, measured, and a worker counting
+ * only downloaded vocabularies or estimates never needs them.
  */
 type GptTokenizerModule = {
     countTokens(text: string, options?: { disallowedSpecial?: ReadonlySet<string> }): number;

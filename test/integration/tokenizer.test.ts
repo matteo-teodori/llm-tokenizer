@@ -111,18 +111,20 @@ suite('tokenizer service', () => {
         }
     });
 
-    test('every tiktoken encoding the registry names is actually shipped', async () => {
+    test('the encodings built are exactly the ones the registry names', async () => {
         // build.mjs writes one file per encoding into out/encodings/ and
         // encoders.ts requires them by path at runtime. The two lists are
         // maintained by hand in different files — the TiktokenEncoding union
         // says it "must stay in sync with ENCODINGS" and nothing checked it. A registry entry naming an encoding that was not built
         // throws MODULE_NOT_FOUND inside the worker, which the service catches
-        // and turns into a silent estimate for every OpenAI model.
+        // and turns into a silent estimate for every OpenAI model. One built
+        // that no model names ships its rank tables for nothing, as
+        // cl100k_base did once GPT-4 Turbo was gone.
         const { MODELS } = await import('../../src/tokenizer/registry');
-        const encodings = new Set(
+        const named = new Set<string>(
             MODELS.map(m => m.encoder).flatMap(e => (e.kind === 'tiktoken' ? [e.encoding] : [])),
         );
-        assert.ok(encodings.size > 0, 'no model uses a bundled encoding');
+        assert.ok(named.size > 0, 'no model uses a bundled encoding');
 
         const dir = vscode.Uri.file(path.join(__dirname, '..', '..', '..', 'out', 'encodings'));
         const built = new Set(
@@ -131,8 +133,13 @@ suite('tokenizer service', () => {
                 .map(([name]) => name.replace(/\.js$/, '')),
         );
 
-        for (const encoding of encodings) {
+        for (const encoding of named) {
             assert.ok(built.has(encoding), `${encoding} is in the registry but was not built`);
+        }
+        for (const encoding of built) {
+            // A development build never empties out/, so a file an earlier
+            // build left there fails this too; deleting out/ clears it.
+            assert.ok(named.has(encoding), `${encoding} is built, but no model in the registry names it`);
         }
     });
 
@@ -146,12 +153,12 @@ suite('tokenizer service', () => {
         // workspace as estimated.
         //
         // Entered through TokenizerService rather than the encoding module, so
-        // the whole chain — worker, protocol, error path — is under test. Both
-        // shipped OpenAI encodings are covered because their special-token sets
-        // differ (Harmony adds <|start|>, <|message|>, <|channel|> and friends).
+        // the whole chain — worker, protocol, error path — is under test.
+        // gpt-oss is covered with Harmony's own literals (<|start|>,
+        // <|message|> and friends), which o200k_harmony, the encoding
+        // tiktoken gives it, reads as special tokens.
         const cases: [string, string][] = [
             ['gpt-5.6-sol', '<|endoftext|>'],
-            ['gpt-4-turbo', '<|endoftext|>'],
             ['gpt-oss-120b', '<|start|>system<|message|>hi<|end|>'],
         ];
 
@@ -177,7 +184,6 @@ suite('tokenizer service', () => {
         // tables shifted, which would silently move every OpenAI count.
         const cases: [string, string, number][] = [
             ['gpt-5.6-sol', 'Hello world!', 3],
-            ['gpt-4-turbo', 'Hello world!', 3],
             ['gpt-5.6-sol', 'const x = 42;', 6],
         ];
 
@@ -188,13 +194,23 @@ suite('tokenizer service', () => {
         }
     });
 
-    test('the three bundled encodings all load', async () => {
+    test('every bundled encoding loads', async () => {
         // Each encoding is a separate lazily-required bundle; a packaging
-        // mistake shows up as one of these failing to load.
-        for (const id of ['gpt-5.6-sol', 'gpt-oss-120b', 'gpt-4-turbo']) {
-            const result = await tokenizer.count('token counting', model(id));
-            assert.ok(result.count > 0, `${id} produced no tokens`);
-            assert.strictEqual(result.exact, true, `${id} should be exact`);
+        // mistake shows up as one of these failing to load. One model for each
+        // encoding the registry names, so the list cannot fall behind it.
+        const { MODELS } = await import('../../src/tokenizer/registry');
+        const byEncoding = new Map<string, ModelInfo>();
+        for (const m of MODELS) {
+            if (m.encoder.kind === 'tiktoken' && !byEncoding.has(m.encoder.encoding)) {
+                byEncoding.set(m.encoder.encoding, m);
+            }
+        }
+        assert.ok(byEncoding.size > 0, 'no model uses a bundled encoding');
+
+        for (const [encoding, m] of byEncoding) {
+            const result = await tokenizer.count('token counting', m);
+            assert.ok(result.count > 0, `${encoding} (${m.id}) produced no tokens`);
+            assert.strictEqual(result.exact, true, `${encoding} (${m.id}) should be exact`);
         }
     });
 
@@ -619,8 +635,8 @@ suite('tokenizer service', () => {
 
     test('every Kimi model shares one downloaded rank table', async () => {
         // The rank file is byte-identical across the family, so the registry
-        // points them all at one repo: downloading once must serve all three.
-        const repos = ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'].map(id => {
+        // points them all at one repo: downloading once must serve all four.
+        const repos = ['kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'].map(id => {
             const m = model(id);
             assert.strictEqual(m.encoder.kind, 'tiktokenModel');
             return m.encoder.kind === 'tiktokenModel' ? m.encoder.repo : '';
@@ -628,7 +644,7 @@ suite('tokenizer service', () => {
         assert.strictEqual(new Set(repos).size, 1, `expected one repo, got ${repos.join(', ')}`);
 
         await seedRankTable(storageUri, repos[0]);
-        for (const id of ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']) {
+        for (const id of ['kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']) {
             const result = await tokenizer.count('Hello', seeded(id));
             assert.strictEqual(result.exact, true, `${id} should be exact`);
             assert.strictEqual(result.count, 3, id);

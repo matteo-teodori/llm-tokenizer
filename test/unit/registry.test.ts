@@ -1,6 +1,12 @@
 import * as assert from 'assert';
+import { readFileSync } from 'fs';
+import * as path from 'path';
 
+import { accuracyOf, isDownloadable } from '../../src/tokenizer/encoders';
 import { MODELS, MODEL_ALIASES, findModel, defaultModel, providers } from '../../src/tokenizer/registry';
+
+/** The repository root, from .test-out/test/unit. */
+const ROOT = path.join(__dirname, '..', '..', '..');
 
 /**
  * Invariants over the model registry.
@@ -172,10 +178,100 @@ suite('model registry', () => {
         }
     });
 
-    test('gpt-oss uses the Harmony encoding', () => {
-        for (const model of MODELS.filter(m => m.id.startsWith('gpt-oss'))) {
-            assert.deepStrictEqual(model.encoder, { kind: 'tiktoken', encoding: 'o200k_harmony' });
+    test('gpt-oss counts with o200k_base, which counts its text as o200k_harmony does', () => {
+        // tiktoken gives gpt-oss o200k_harmony: o200k_base's split pattern and
+        // ranks with Harmony's special tokens added. The worker counts special
+        // tokens as text, so the two agree on every text, and only o200k_base
+        // ships. This holds that premise against gpt-tokenizer itself: if a
+        // release ever splits Harmony text differently, gpt-oss needs its own
+        // encoding back.
+        const gptOss = MODELS.filter(m => m.id.startsWith('gpt-oss'));
+        assert.ok(gptOss.length > 0, 'the registry lists no gpt-oss model');
+        for (const model of gptOss) {
+            assert.deepStrictEqual(model.encoder, { kind: 'tiktoken', encoding: 'o200k_base' });
         }
+
+        type Counter = { countTokens(text: string, options: { disallowedSpecial: ReadonlySet<string> }): number };
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const base = require('gpt-tokenizer/encoding/o200k_base') as Counter;
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const harmony = require('gpt-tokenizer/encoding/o200k_harmony') as Counter;
+        // As the worker counts: no special token allowed, and none refused.
+        const literally = { disallowedSpecial: new Set<string>() };
+
+        // Every special token either encoding defines, and two real files.
+        const reserved = Array.from({ length: 1088 }, (_, i) => `<|reserved_${200_000 + i}|>`);
+        const texts = [
+            '<|start|>system<|message|>Reasoning: high<|end|><|start|>user<|message|>hi<|end|>',
+            '<|start|>assistant<|channel|>final<|message|>Done.<|return|><|call|><|constrain|>',
+            '<|startoftext|><|endoftext|><|endofprompt|><|im_start|><|im_end|><|im_sep|>',
+            '<|fim_prefix|>a<|fim_middle|>b<|fim_suffix|>',
+            reserved.join(''),
+            readFileSync(path.join(ROOT, 'README.md'), 'utf8'),
+            readFileSync(path.join(ROOT, 'src', 'tokenizer', 'models.ts'), 'utf8'),
+        ];
+        for (const text of texts) {
+            assert.strictEqual(
+                harmony.countTokens(text, literally),
+                base.countTokens(text, literally),
+                `the two encodings disagree on ${JSON.stringify(text.slice(0, 60))}`,
+            );
+        }
+    });
+
+    test('a retired id migrates to the replacement its provider names', () => {
+        // Each provider's own deprecation page, read 2026-10-25. Following the
+        // provider puts a saved choice on the model its user calls next, where
+        // a model of the registry's choosing need not be.
+        const replacements: [retired: string, replacement: string][] = [
+            // OpenAI shut these down on 2026-10-23 (api/docs/deprecations).
+            ['o4-mini', 'gpt-5.6-terra'],
+            ['o3-mini', 'gpt-5.6-sol'],
+            ['o1', 'gpt-5.6-sol'],
+            ['gpt-4-turbo', 'gpt-5.6-sol'],
+            ['gpt-4', 'gpt-5.6-sol'],
+            ['gpt-3.5-turbo', 'gpt-5.6-terra'],
+            // Anthropic, the newest of each line (the Claude API models reference).
+            ['claude-3-opus', 'claude-opus-5-5'],
+            ['claude-3.7-sonnet', 'claude-sonnet-5-5'],
+            ['claude-3.5-sonnet', 'claude-sonnet-5-5'],
+            ['claude-3-haiku', 'claude-haiku-5-5'],
+            // Google shut 2.0 Flash down on 2026-06-01 (gemini-api/docs/deprecations).
+            ['gemini-2.0-flash', 'gemini-3.6-flash'],
+            // MiniMax serves the preview's name with M3.1 Flash. It names no
+            // replacement for M2.1 and M2, which go where it routes its plans'
+            // requests for M2.7 and M2.5, and the lowercase ids follow.
+            ['MiniMax-M3.1-Flash-Preview', 'MiniMax-M3.1-Flash'],
+            ['MiniMax-M2.1', 'MiniMax-M3.1-Flash'],
+            ['MiniMax-M2', 'MiniMax-M3.1-Flash'],
+            ['minimax-m2.1', 'MiniMax-M3.1-Flash'],
+            ['minimax-m2', 'MiniMax-M3.1-Flash'],
+        ];
+
+        const ids = new Set(MODELS.map(m => m.id));
+        for (const [retired, replacement] of replacements) {
+            assert.ok(!ids.has(retired), `${retired} is retired and must not be offered`);
+            assert.strictEqual(findModel(retired)?.id, replacement, `${retired} should migrate to ${replacement}`);
+        }
+    });
+
+    test('a model shares another vocabulary only on the evidence its note gives', () => {
+        // MiniMax M3.1 Flash publishes M3's tokenizer.json byte for byte, and
+        // Moonshot calls K3.1 Pro "a post-trained version of Kimi K3". Muse
+        // Spark Open has Muse Glimmer's vocabulary but not its added tokens,
+        // so it keeps a file of its own.
+        const repoOf = (id: string): string | undefined => {
+            const encoder = MODELS.find(m => m.id === id)?.encoder;
+            return encoder && isDownloadable(encoder) ? encoder.repo : undefined;
+        };
+
+        for (const [model, owner] of [['MiniMax-M3.1-Flash', 'MiniMax-M3'], ['kimi-k3.1-pro', 'kimi-k3']]) {
+            assert.ok(repoOf(model), `${model} downloads no vocabulary`);
+            assert.strictEqual(repoOf(model), repoOf(owner), `${model} should share ${owner}'s vocabulary`);
+        }
+
+        assert.ok(repoOf('muse-spark-open-816b-a42b'), 'Muse Spark Open downloads no vocabulary');
+        assert.notStrictEqual(repoOf('muse-spark-open-816b-a42b'), repoOf('muse-glimmer-30b'));
     });
 
     test('providers() lists each provider once, in registry order', () => {
@@ -300,6 +396,25 @@ suite('registry data that the manifest depends on', () => {
             'exact',
             `the default model ${model.id} must be exact offline`,
         );
+    });
+
+    test("the README and the manifest's description quote the registry's own counts", () => {
+        // sync-manifest regenerates the dropdown, not these, so a refresh that
+        // adds or removes a model has to change them by hand, and nothing
+        // noticed when one did not.
+        const readme = readFileSync(path.join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+        const { description } = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as { description: string };
+
+        const total = MODELS.length;
+        const exact = MODELS.filter(m => accuracyOf(m.encoder) !== 'estimated').length;
+        for (const phrase of [
+            `Token counting for ${total} models`,
+            `${exact} of the ${total} supported models`,
+            `${total} models across ${providers().length} providers`,
+        ]) {
+            assert.ok(readme.includes(phrase), `README.md should say "${phrase}"`);
+        }
+        assert.ok(description.includes(`for ${total} AI models`), `package.json's description should count ${total} models`);
     });
 
     test('every downloaded vocabulary is read at one commit and checked by hash, one pin per repo', () => {

@@ -12,6 +12,20 @@ function model(id: string): ModelInfo {
 }
 
 /**
+ * A model with a 128,000-token limit, which keeps the thresholds easy to
+ * reason about. Not a registry entry: these tests used GPT-4 Turbo until it
+ * was retired, and `findModel` would then have handed them its replacement,
+ * with a limit seven times larger.
+ */
+const limited: ModelInfo = {
+    id: 'test-128k',
+    label: 'Test 128K',
+    provider: 'Test',
+    contextLimit: 128_000,
+    encoder: { kind: 'tiktoken', encoding: 'o200k_base' },
+};
+
+/**
  * A minimal stand-in for ExtensionContext.
  *
  * StatusBarManager only ever pushes its two items onto `subscriptions`.
@@ -48,7 +62,7 @@ suite('status bar colouring', () => {
     /** The file item is the first one the manager creates. */
     const fileItem = (): vscode.StatusBarItem => items[0];
 
-    // gpt-4-turbo has a 128,000 token limit, so these are easy to reason about.
+    // Against the 128,000-token limit of `limited`.
     const under = 1_000;
     const warning = 110_000; // ~86%
     const over = 200_000; // ~156%
@@ -57,7 +71,7 @@ suite('status bar colouring', () => {
         manager.showFileCount({
             count,
             exact: true,
-            model: model('gpt-4-turbo'),
+            model: limited,
             projectScanEnabled: false,
         });
     }
@@ -104,7 +118,7 @@ suite('status bar colouring', () => {
     });
 
     test('a model with no published limit never shows a badge', () => {
-        const unlimited = { ...model('gpt-4-turbo'), contextLimit: undefined };
+        const unlimited = { ...limited, contextLimit: undefined };
         manager.showFileCount({
             count: 10_000_000,
             exact: true,
@@ -258,12 +272,11 @@ suite('context colouring, as exported', () => {
     // so its thresholds and its colours are pinned here as well as through
     // the manager.
     test('the thresholds sit at 80% and 100% of the limit', () => {
-        const turbo = model('gpt-4-turbo'); // 128,000 tokens
-        assert.strictEqual(contextStatus(102_399, turbo), 'ok');
-        assert.strictEqual(contextStatus(102_400, turbo), 'warning');
-        assert.strictEqual(contextStatus(127_999, turbo), 'warning');
-        assert.strictEqual(contextStatus(128_000, turbo), 'error');
-        assert.strictEqual(contextStatus(10_000_000, { ...turbo, contextLimit: undefined }), 'ok');
+        assert.strictEqual(contextStatus(102_399, limited), 'ok');
+        assert.strictEqual(contextStatus(102_400, limited), 'warning');
+        assert.strictEqual(contextStatus(127_999, limited), 'warning');
+        assert.strictEqual(contextStatus(128_000, limited), 'error');
+        assert.strictEqual(contextStatus(10_000_000, { ...limited, contextLimit: undefined }), 'ok');
     });
 
     test('a status sets the background, and clearing it leaves nothing behind', () => {
