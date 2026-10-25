@@ -232,9 +232,10 @@ Prompts, responses, thinking and tool inputs or results are never kept, and
 nothing is sent anywhere. The history outlives Claude Code's own records,
 which Claude Code deletes after 30 days by default. A history that can no
 longer be read is set aside, left as it is, and a new one started, and the
-panel says so until it is cleared. **Clear Claude Code Usage History**
-removes the history and any copy set aside, and leaves nothing of either
-readable on disk. What another window still holds, a copy it has open or a
+panel says so until it is cleared; a version that converts the history to a
+newer format keeps a copy of it as it was. **Clear Claude Code Usage
+History** removes the history and every such copy, and leaves nothing of
+them readable on disk. What another window still holds, a copy it has open or a
 read it has not finished, goes once that window lets go of it, the next
 time any window uses the history; Clear says when a copy has to wait.
 Anything still on disk is read again at the next refresh. The panel also
