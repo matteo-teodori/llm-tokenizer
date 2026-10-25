@@ -165,6 +165,28 @@ suite('summary page', () => {
         );
     });
 
+    test('the exports write the truncation note as the page does, whatever the locale', () => {
+        // The note copied and exported used the runtime's locale where every
+        // number on the page uses en-US: with LANG=it_IT it read "12.345".
+        // Simulated here, since a test cannot choose the host's locale.
+        const original = Object.getOwnPropertyDescriptor(Number.prototype, 'toLocaleString');
+        assert.ok(original);
+        const format = original.value as (this: number, locales?: Intl.LocalesArgument, options?: Intl.NumberFormatOptions) => string;
+        Object.defineProperty(Number.prototype, 'toLocaleString', {
+            ...original,
+            value(this: number, locales?: Intl.LocalesArgument, options?: Intl.NumberFormatOptions): string {
+                return format.call(this, locales ?? 'de-DE', options);
+            },
+        });
+        try {
+            const html = render({ filesNotListed: 12_345 });
+            assert.ok(/TRUNCATION_NOTE = "12,345 smaller files/.test(html), /TRUNCATION_NOTE = "[^"]*"/.exec(html)?.[0]);
+            assert.ok(html.includes('12,345 smaller files are counted in the total but not listed.</p>'));
+        } finally {
+            Object.defineProperty(Number.prototype, 'toLocaleString', original);
+        }
+    });
+
     test("Copy cannot paste a file's name into a spreadsheet as a formula", () => {
         // The page's own script, run with only the DOM it touches.
         const name = '=HYPERLINK("https://example.com/?"&A1)';

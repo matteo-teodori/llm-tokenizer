@@ -8,6 +8,18 @@ import type { ModelInfo } from './tokenizer/registry';
 /** The manifest's default; the code used to disagree with it and fall back to 'file'. */
 const DEFAULT_DISPLAY_MODE = 'both';
 
+/**
+ * The `statusBarDisplay` setting: which of the two items to show.
+ *
+ * Read here for the display, and by the project scan, which has nothing to
+ * show its total in when this is "file".
+ */
+export function displayMode(): string {
+    return vscode.workspace
+        .getConfiguration('llm-tokenizer')
+        .get<string>('statusBarDisplay', DEFAULT_DISPLAY_MODE);
+}
+
 export interface CountDisplay {
     count: number;
     /** False when the number came from a heuristic rather than a real tokenizer. */
@@ -94,9 +106,7 @@ export class StatusBarManager {
     public applyDisplayMode(projectScanEnabled: boolean): void {
         this.projectScanEnabled = projectScanEnabled;
 
-        const configured = vscode.workspace
-            .getConfiguration('llm-tokenizer')
-            .get<string>('statusBarDisplay', DEFAULT_DISPLAY_MODE);
+        const configured = displayMode();
 
         const mode = configured === 'project' && !projectScanEnabled ? 'file' : configured;
         const showProject = projectScanEnabled && this.hasProjectCount && mode !== 'file';

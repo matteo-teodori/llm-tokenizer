@@ -6,7 +6,7 @@
  * counts, and it is the part most worth testing directly.
  */
 
-import { LANGUAGE_BY_EXTENSION } from './languages';
+import { LANGUAGE_BY_EXTENSION, LANGUAGE_BY_NAME } from './languages';
 
 export interface CountedFile {
     path: string;
@@ -126,8 +126,9 @@ export function languageOf(filePath: string): string {
     const extension = extensionOf(filePath);
     if (!extension) {
         const name = segments(filePath).pop() ?? '';
-        // Dotfiles and extensionless files read better by name than as "".
-        return name.startsWith('.') ? name : 'No extension';
+        // Some files say their language by name. Dotfiles and other
+        // extensionless files read better by name than as "".
+        return LANGUAGE_BY_NAME[name.toLowerCase()] ?? (name.startsWith('.') ? name : 'No extension');
     }
     return LANGUAGE_BY_EXTENSION[extension] ?? `.${extension}`;
 }

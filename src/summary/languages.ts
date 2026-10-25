@@ -4,9 +4,6 @@
  * Only needs to cover what actually turns up in a repository being counted for
  * an LLM context. Anything unlisted falls back to showing the extension, which
  * is honest and needs no maintenance.
- */
-/**
- * Extension → language name.
  *
  * Null-prototyped, not a plain object literal. A lookup on a plain literal walks
  * `Object.prototype`, so the two prototype keys that survive lower-casing —
@@ -61,5 +58,21 @@ export const LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = Object.fr
     // Notebooks & templates
     ipynb: 'Jupyter', j2: 'Jinja', jinja: 'Jinja', hbs: 'Handlebars',
     ejs: 'EJS', pug: 'Pug', liquid: 'Liquid', twig: 'Twig', erb: 'ERB',
+    }),
+);
+
+/**
+ * File name → language name, for files with no extension whose name says what
+ * they are: a Dockerfile or a Makefile was labelled "No extension", and the
+ * `dockerfile` and `make` entries above never applied to it. Keys are
+ * lower-case, as `languageOf` looks names up, and the map is null-prototyped
+ * for the same reason as the one above.
+ */
+export const LANGUAGE_BY_NAME: Readonly<Record<string, string>> = Object.freeze(
+    Object.assign(Object.create(null) as Record<string, string>, {
+    dockerfile: 'Dockerfile', containerfile: 'Dockerfile',
+    makefile: 'Makefile', gnumakefile: 'Makefile',
+    jenkinsfile: 'Groovy',
+    gemfile: 'Ruby', rakefile: 'Ruby', vagrantfile: 'Ruby', podfile: 'Ruby',
     }),
 );
