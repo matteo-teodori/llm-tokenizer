@@ -216,14 +216,20 @@ function controls(view: PanelView): string {
 }
 
 /**
- * A share as this page shows it, on its bars and on the total's line alike:
- * whole percent from 10%, one decimal below, cut, never rounded up. 99.6% is
- * not all of it, and the line once said 95% of the cache reads its bar beside
- * it called 96%. The nudge keeps a share a float puts a hair under its figure,
- * as 0.29 is, on that figure.
+ * `share` as a percent with `decimals` places, cut, never rounded up, as
+ * every share on this page is written: 99.6% is not all of it, and the
+ * total's line once said 95% of the cache reads its bar beside it called 96%.
+ * The nudge keeps a share a float puts a hair under its figure, as 0.29 is,
+ * on that figure.
  */
+function cut(share: number, decimals: number): string {
+    const scale = 10 ** decimals;
+    return `${(Math.floor(share * 100 * scale + 1e-9) / scale).toFixed(decimals)}%`;
+}
+
+/** A share on a bar, or in a line of text: whole percent from 10%, one decimal below. */
 export function cutPercent(share: number): string {
-    return share >= 0.1 ? `${Math.floor(share * 100 + 1e-9)}%` : `${(Math.floor(share * 1000 + 1e-9) / 10).toFixed(1)}%`;
+    return cut(share, share >= 0.1 ? 0 : 1);
 }
 
 function categoryBars(t: UsageTotals): string {
@@ -319,7 +325,7 @@ function overview(report: UsageReport, view: PanelView): string {
     // The cache reads' share is the total's line's: a second one here, of
     // input alone, read as the same figure, rounded otherwise.
     const notes = [
-        t.output > 0 && t.thinking > 0 ? `${((t.thinking / t.output) * 100).toFixed(0)}% of output was thinking` : '',
+        t.output > 0 && t.thinking > 0 ? `${cutPercent(t.thinking / t.output)} of output was thinking` : '',
         t.cacheWrite5m + t.cacheWrite1h > 0 ? `cache writes ${formatNumber(t.cacheWrite5m)} for 5 minutes, ${formatNumber(t.cacheWrite1h)} for 1 hour` : '',
     ].filter(Boolean);
     return `
@@ -429,7 +435,7 @@ function projects(report: UsageReport, view: PanelView): string {
                     `<span title="${escapeHtml(p.project.kind === 'root' ? p.project.path : p.project.projectDir)}">${escapeHtml(p.label)}</span>`,
                     p.sessions.toLocaleString('en-US'),
                     `${mark(view, p.totals.provenance)}${p.totals.processed.toLocaleString('en-US')}`,
-                    total > 0 ? `${((p.totals.processed / total) * 100).toFixed(1)}%` : '—',
+                    total > 0 ? cut(p.totals.processed / total, 1) : '—',
                 ],
             })),
             'processed',

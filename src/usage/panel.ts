@@ -316,16 +316,21 @@ export class UsagePanel implements vscode.Disposable {
     }
 
     private async view(): Promise<PanelView> {
+        // Read once, before the report is asked for: a range or scope chosen
+        // while it comes is the next update's. Read again after, the page
+        // showed the newly chosen range's button pressed over the figures of
+        // the range before.
+        const state = { ...this.state };
         const folders =
-            this.state.scope === 'workspace'
+            state.scope === 'workspace'
                 ? (vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file').map(f => f.uri.fsPath)
                 : null;
-        const report = await this.service.report(this.state.range, this.state.zone, folders);
-        return this.viewOf(report);
+        const report = await this.service.report(state.range, state.zone, folders);
+        return this.viewOf(report, state);
     }
 
-    private viewOf(report: PanelView['report']): PanelView {
-        const zone = this.state.zone;
+    private viewOf(report: PanelView['report'], state: PanelState = this.state): PanelView {
+        const zone = state.zone;
         const resolved = this.service.roots;
         const summary = this.service.lastImport;
         const version = (this.context.extension.packageJSON as { version?: unknown }).version;
@@ -333,8 +338,8 @@ export class UsagePanel implements vscode.Disposable {
         return {
             status: this.service.status,
             reading: this.service.reading,
-            range: this.state.range,
-            scope: this.state.scope,
+            range: state.range,
+            scope: state.scope,
             zone,
             where: remote ? `on ${os.hostname()} (${remote})` : '',
             remote: remote !== undefined,

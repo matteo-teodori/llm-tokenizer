@@ -323,6 +323,20 @@ suite('usage page', () => {
         assert.strictEqual(cutPercent(0), '0.0%');
     });
 
+    test("every share on the page is cut, the projects' and the thinking's too", () => {
+        // Found reviewing the README's GIF: the projects' 19.49% read 19.5%,
+        // rounded up, while every bar was cut.
+        const whole = totals(1_000_000);
+        whole.output = 1_000;
+        whole.thinking = 996;
+        const part = totals(194_903);
+        const body = renderFragments(
+            view({ report: report({ totals: whole, projects: [{ project: { kind: 'root', path: '/repo/a' }, label: 'a', sessions: 1, totals: part, models: [] }] }) }),
+        ).body;
+        assert.ok(body.includes('<td class="num">19.4%</td>'), 'the share rounded up');
+        assert.ok(body.includes('99% of output was thinking'), 'the thinking share rounded up');
+    });
+
     test('processed, never used, and cache reads explained', () => {
         const all = text(renderFragments(view({ report: report({ totals: { ...totals(1_278), input: 278, cacheRead: 1_000 } }) }))).toLowerCase();
         assert.ok(all.includes('tokens processed'));

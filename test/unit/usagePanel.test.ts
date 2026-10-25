@@ -8,7 +8,7 @@ import { emptyTotals } from '../../src/usage/aggregate';
 import type { ImportSummary } from '../../src/usage/importer';
 import { UsagePanel, openUsageSettings } from '../../src/usage/panel';
 import type { PanelFragments } from '../../src/usage/render';
-import { buildReport, type UsageReport } from '../../src/usage/report';
+import { buildReport, type RangeKey, type UsageReport } from '../../src/usage/report';
 import type { Reading, UsageService } from '../../src/usage/usageService';
 
 /** A history of three requests, none of them in the range shown. */
@@ -76,6 +76,8 @@ function fakeService() {
         /** What the next refresh returns: a summary when a pass ran. */
         passes: undefined as ImportSummary | undefined,
         report: quietReport(),
+        /** In place of `report`, a report per range, as it comes. */
+        reportFor: undefined as ((range: RangeKey) => Promise<UsageReport>) | undefined,
         reading: undefined as Reading | undefined,
         /** A hold that throws, as one did whose watchers could not start. */
         holdThrows: false,
@@ -111,7 +113,7 @@ function fakeService() {
             counts.refreshes++;
             return Promise.resolve(fake.passes);
         },
-        report: () => Promise.resolve(fake.report),
+        report: (range: RangeKey) => (fake.reportFor ? fake.reportFor(range) : Promise.resolve(fake.report)),
     };
     return { service: service as unknown as UsageService, counts, fake, changed: () => changed.fire() };
 }
@@ -299,6 +301,39 @@ suite('usage panel', () => {
             assert.strictEqual(logShown, 1);
         } finally {
             (vscode.commands as unknown as Record<string, unknown>).executeCommand = original;
+        }
+    });
+
+    test('a range chosen while a report is fetched is never shown pressed over that report', async () => {
+        // Found capturing the README's GIF: the page could say 30 days, pressed,
+        // over the 7 days' figures fetched just before the click, until the
+        // next post came.
+        const { service, fake } = fakeService();
+        const requestsIn: Record<RangeKey, number> = { today: 1, '7d': 7, '30d': 30, coverage: 99 };
+        let release!: () => void;
+        const held = new Promise<void>(resolve => (release = resolve));
+        let calls = 0;
+        fake.reportFor = async range => {
+            if (calls++ === 0) {
+                await held;
+            }
+            const totals = emptyTotals();
+            totals.input = totals.processed = requestsIn[range] * 1_000;
+            totals.coverage = { start: Date.UTC(2026, 9, 10, 9), newest: Date.UTC(2026, 9, 10, 10), requests: requestsIn[range], incompleteRequests: 0 };
+            return quietReport({ range, totals });
+        };
+        UsagePanel.show(context, service, log);
+        page.send({ type: 'ready', zone: 'UTC' });
+        await settle();
+        // The first update waits for its report, 7 days', when 30 days is chosen.
+        page.send({ type: 'setRange', range: '30d' });
+        await settle();
+        release();
+        await until(() => page.posted.some(p => p.controls.includes('data-range="30d" aria-pressed="true"')));
+        await settle();
+        for (const post of page.posted) {
+            const pressed = (/data-range="([^"]+)" aria-pressed="true"/.exec(post.controls)?.[1] ?? '') as RangeKey;
+            assert.ok(post.body.includes(`${requestsIn[pressed]} requests`), `${pressed} shown pressed over another range's report`);
         }
     });
 
