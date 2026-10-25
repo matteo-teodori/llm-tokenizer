@@ -21,6 +21,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - **The total's line says how much of it is cache reads.** Claude Code
   sends the whole conversation again with every request, so a single prompt
   that makes dozens of model calls processes tens of millions of tokens.
+  Every share on the page is written one way, cut rather than rounded up, so
+  the line and the bars below it always agree, and 99.6% is never all of it.
 - **The Claude Code usage history is about half the size**: each
   transcript's path is kept once, rather than in every request read from
   it. The first window of this version to open the history converts it, in
@@ -62,6 +64,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   minutes, and shows as failing only once a retry has failed too.
 - **The status item no longer waits for a whole first import**, nor a minute
   after it, before it shows the running session's context.
+- **A range picked while the panel was updating** could show its button
+  pressed over the figures of the range before, for a moment.
 - **Moving the cursor or switching back to a tab no longer recounts an
   unchanged document**, which held up every count queued behind it.
 - **Forgetting changed files no longer stalls the window.** After a checkout
