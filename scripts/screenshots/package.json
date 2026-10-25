@@ -1,0 +1,9 @@
+{
+  "name": "llm-tokenizer-screenshots",
+  "private": true,
+  "type": "module",
+  "description": "Captures the README's screenshots and GIF on invented data; not part of the extension.",
+  "dependencies": {
+    "playwright-core": "1.64.0"
+  }
+}

@@ -38,3 +38,5 @@ Thumbs.db
 
 # Working notes, not part of the extension
 .notes/
+# The README images pipeline's VS Code profiles
+scripts/screenshots/.p/

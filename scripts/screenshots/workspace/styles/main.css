@@ -1,0 +1,25 @@
+:root {
+    --accent: #2f6fed;
+    --surface: #ffffff;
+    --ink: #1d2433;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 24px;
+}
+
+.product-card button {
+    background: var(--accent);
+    color: var(--surface);
+    border-radius: 6px;
+}
+
+.cart-drawer {
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: 360px;
+    background: var(--surface);
+    color: var(--ink);
+}

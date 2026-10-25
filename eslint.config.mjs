@@ -16,6 +16,9 @@ export default tseslint.config(
             // Gitignored working notes. Flat config does not read .gitignore,
             // so a measurement script kept there failed `npm run lint`.
             '.notes/**',
+            // The README images' invented demo project, not this one's code.
+            'scripts/screenshots/workspace/**',
+            'scripts/screenshots/.p/**',
         ],
     },
 
@@ -71,5 +74,22 @@ export default tseslint.config(
             globals: { console: 'readonly', process: 'readonly', URL: 'readonly', fetch: 'readonly' },
         },
         rules: { 'no-console': 'off' },
+    },
+
+    {
+        // The README images' capture: Node, and the functions it runs in the
+        // editor's pages, which see the page's globals.
+        files: ['scripts/screenshots/**/*.mjs'],
+        languageOptions: {
+            globals: {
+                Buffer: 'readonly',
+                setTimeout: 'readonly',
+                document: 'readonly',
+                window: 'readonly',
+                innerHeight: 'readonly',
+                devicePixelRatio: 'readonly',
+                getComputedStyle: 'readonly',
+            },
+        },
     },
 );
