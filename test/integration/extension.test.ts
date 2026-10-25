@@ -132,6 +132,15 @@ function captureNotices() {
     };
 }
 
+/**
+ * Remove a folder `openFile` wrote to. Windows refuses to delete it while the
+ * editor still watches a file it had open, for a moment after the editors
+ * close.
+ */
+function removeOpened(dir: string): void {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+}
+
 /** A file written to `dir` and opened. */
 async function openFile(dir: string, name: string, text: string): Promise<vscode.TextDocument> {
     const file = path.join(dir, name);
@@ -746,7 +755,7 @@ suite('extension', () => {
         } finally {
             counts.restore();
             await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeOpened(dir);
         }
     });
 
@@ -785,7 +794,7 @@ suite('extension', () => {
             await until(() => scans > 0, 'the scan once the total is shown again');
         } finally {
             workspace.findFiles = findFiles;
-            fs.rmSync(written, { force: true });
+            fs.rmSync(written, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
             await config.update('ignoreGitignoredFiles', gitignore, vscode.ConfigurationTarget.Global);
             await config.update('statusBarDisplay', display, vscode.ConfigurationTarget.Global);
         }
@@ -833,7 +842,7 @@ suite('extension', () => {
             shown?.restore();
             await config.update('defaultModel', original, vscode.ConfigurationTarget.Global);
             await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeOpened(dir);
         }
     });
 
@@ -872,7 +881,7 @@ suite('extension', () => {
             items.restore();
             await config.update('defaultModel', original, vscode.ConfigurationTarget.Global);
             await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeOpened(dir);
         }
     });
 });
