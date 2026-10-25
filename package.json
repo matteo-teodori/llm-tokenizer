@@ -3,7 +3,7 @@
   "displayName": "LLM Tokenizer",
   "description": "Count tokens for 93 AI models directly in your editor — exact wherever a model's tokenizer is published (GPT-5.6 and earlier, Llama, Gemini, DeepSeek, Qwen, Mistral and more), clearly labelled estimates where it is not (Claude, Grok, GPT-6 and a few others).",
   "license": "MIT",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "publisher": "matteoteodori",
   "author": {
     "name": "Matteo Teodori",
