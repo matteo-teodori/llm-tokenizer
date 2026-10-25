@@ -174,6 +174,8 @@ export class UsageStatusItem implements vscode.Disposable {
     private hold: vscode.Disposable | undefined;
     private timer: NodeJS.Timeout | undefined;
     private refreshing: Promise<void> | undefined;
+    /** Asked again while a look was under way: one more look follows it. */
+    private again = false;
     private readonly listener: vscode.Disposable;
 
     constructor(
@@ -218,23 +220,37 @@ export class UsageStatusItem implements vscode.Disposable {
         this.timer = undefined;
         // A look that never ends must not hold the next item's looks.
         this.refreshing = undefined;
+        this.again = false;
         this.hold?.dispose();
         this.hold = undefined;
         this.item?.dispose();
         this.item = undefined;
     }
 
-    /** Look again; a call during a look waits for it rather than starting another. */
+    /**
+     * Look again. A call during a look waits for it rather than starting
+     * another, and one more look follows it: what the look under way read can
+     * be older than what the call was told. A first import's first look read
+     * the history still empty, then waited for today's report while the import
+     * went through, and the import's change, folded into that look, left the
+     * item at "—" until the next tick, a minute later.
+     */
     refresh(): Promise<void> {
-        if (!this.refreshing) {
-            const look: Promise<void> = this.look().finally(() => {
-                if (this.refreshing === look) {
-                    this.refreshing = undefined;
-                }
-            });
-            this.refreshing = look;
+        if (this.refreshing) {
+            this.again = true;
+            return this.refreshing;
         }
-        return this.refreshing;
+        const look: Promise<void> = this.look().finally(() => {
+            if (this.refreshing === look) {
+                this.refreshing = undefined;
+                if (this.again) {
+                    this.again = false;
+                    void this.refresh();
+                }
+            }
+        });
+        this.refreshing = look;
+        return look;
     }
 
     private async look(): Promise<void> {

@@ -233,6 +233,9 @@ suite('usage status item: the item', () => {
             /** Today's tokens in the workspace, as its report gives them. */
             today?: number;
             reading?: StatusItemService['reading'];
+            /** In place of `context` and `today`: the service's own answers, as they come. */
+            liveContext?: StatusItemService['liveContext'];
+            report?: StatusItemService['report'];
         } = {},
     ) {
         const calls = { readLive: 0, holds: 0, released: 0, liveContext: 0 };
@@ -252,12 +255,17 @@ suite('usage status item: the item', () => {
                 calls.holds++;
                 return new vscode.Disposable(() => calls.released++);
             },
-            liveContext: () => {
+            liveContext: sessionId => {
                 calls.liveContext++;
+                if (options.liveContext) {
+                    return options.liveContext(sessionId);
+                }
                 return Promise.resolve('context' in options ? options.context : { latest: latest(), compactions: [] });
             },
-            report: () =>
-                Promise.resolve(options.today === undefined ? undefined : ({ totals: { processed: options.today, provenance: 'reported' } } as UsageReport)),
+            report: (...args) =>
+                options.report
+                    ? options.report(...args)
+                    : Promise.resolve(options.today === undefined ? undefined : ({ totals: { processed: options.today, provenance: 'reported' } } as UsageReport)),
             whenStarted: () => options.started ?? Promise.resolve(),
             reading: options.reading,
         };
@@ -376,6 +384,37 @@ suite('usage status item: the item', () => {
         }
         const done = await look(undefined);
         assert.ok(done.includes('Context: not reported yet.') && !done.includes('Still reading') && done.includes('Today in this workspace: 1.2M processed'), done);
+    });
+
+    test('a change while a look is under way is looked at once that look ends, not at the next tick', async () => {
+        // Found capturing the README's images: a first import's first look
+        // read the history still empty, then waited for today's report while
+        // the import went through. The import's change came during that look
+        // and was folded into it, and the item said "—" for a minute.
+        let stored: LatestRequest | null = null;
+        let release!: () => void;
+        const held = new Promise<void>(resolve => (release = resolve));
+        let reports = 0;
+        const { statusItem, items, emitter, calls } = harness({
+            sessions: [session('/work/repo')],
+            liveContext: () => Promise.resolve({ latest: stored, compactions: [] }),
+            report: async () => {
+                if (reports++ === 0) {
+                    await held;
+                }
+                return undefined;
+            },
+        });
+        await settle();
+        assert.strictEqual(calls.liveContext, 1, 'the first look has not asked yet');
+        // The import goes through, and says so, while the look waits.
+        stored = latest({ cacheRead: 520_000 });
+        emitter.fire();
+        release();
+        await settle();
+        assert.strictEqual(items[0].text, '$(comment-discussion) 530.0K · 53%');
+        assert.strictEqual(calls.liveContext, 2, 'one look followed, and only one');
+        statusItem.dispose();
     });
 
     test('a failure shows a neutral dash; turned off, the item goes and the hold with it', async () => {
