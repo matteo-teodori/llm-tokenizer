@@ -1,0 +1,17 @@
+{
+    // The README images' demo workspace: never built, typed here only so that
+    // an editor opening its files reports nothing. Not part of the extension's
+    // build, whose tsconfig.json takes src/ and test/ alone.
+    "compilerOptions": {
+        "target": "es2022",
+        "lib": ["es2022", "dom"],
+        "module": "esnext",
+        "moduleResolution": "bundler",
+        "jsx": "react-jsx",
+        "strict": true,
+        "noEmit": true,
+        "skipLibCheck": true,
+        "types": []
+    },
+    "include": ["workspace/**/*", "demo-types.d.ts"]
+}
