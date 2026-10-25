@@ -135,16 +135,6 @@ export function byDay(requests: Iterable<UsageRequest>, timeZone: string): Map<s
     return rollup(requests, request => localDate(request.timestamp, timeZone));
 }
 
-/**
- * The share of input that was read from the cache: cacheRead ÷ (input +
- * cacheCreation + cacheRead). Null when nothing was input. It is a share of
- * input, never "tokens saved", which would need a price.
- */
-export function cacheReadShare(totals: UsageTotals): number | null {
-    const allInput = totals.input + totals.cacheCreation + totals.cacheRead;
-    return allInput > 0 ? totals.cacheRead / allInput : null;
-}
-
 const dayFormats = new Map<string, Intl.DateTimeFormat>();
 
 /**

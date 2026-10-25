@@ -49,6 +49,7 @@ test/
 scripts/          build-time tooling; bundles.mjs lists the bundles that ship
   logo-icons.mjs  makes media/logo-*.png from icon.png; run it whenever icon.png changes
   pin-tokenizers.mjs  checks the commit and hash every downloaded vocabulary is pinned to
+  screenshots/    makes the README's images in docs/images, on invented data; its README says how
 media/            the logo's T at 64 px, for dark themes and for light ones
 build.mjs         the bundler
 ```
@@ -71,6 +72,7 @@ packaged.
 | `npm run audit-bundled` | Audit only the packages the bundles inline, which is what ships |
 | `node scripts/logo-icons.mjs` | Make the T icons in `media/` again from `icon.png` |
 | `node scripts/pin-tokenizers.mjs` | After `npm run compile`: check every vocabulary's pin against Hugging Face, and say where each repo's main has moved |
+| `node scripts/screenshots/capture.mjs …` | Make the README's screenshots and GIF again, in a real VS Code on invented data, in the same change as anything that shows on them; `scripts/screenshots/README.md` has the steps |
 | `npm run package` | Type-check, production build, and the manifest and notices checks |
 | `npm run release` | `package`, then the VSIX itself; nothing is published |
 

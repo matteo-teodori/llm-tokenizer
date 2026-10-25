@@ -388,7 +388,7 @@ ${collapsibleList('Ignored', view.ignored, view.filesIgnored)}
     // never appears in a page that has nothing to disclose.
     const TRUNCATION_NOTE = ${embed(
         view.filesNotListed > 0
-            ? `${view.filesNotListed.toLocaleString()} smaller files are counted in the total but not listed`
+            ? `${view.filesNotListed.toLocaleString('en-US')} smaller files are counted in the total but not listed`
             : '',
     )};
 

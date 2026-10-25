@@ -12,20 +12,22 @@
  * figure; categories, models, kinds and effort are ranked bars on a common
  * baseline; days are a column per day; projects and sessions are tables.
  * "Processed", never "used", and a total that is only a lower bound carries
- * `≥`.
+ * `≥`: every total, while the history is still being read.
  */
 
 import { RANKED_BARS_CSS, THEME_TOKENS_CSS, rankedBars, type RankedValue } from '../charts';
 import { PAGE_TEXT_HELPERS, embed, escapeHtml } from '../html';
 import { formatNumber } from '../utils';
-import { cacheReadShare, type UsageTotals } from './aggregate';
+import type { UsageTotals } from './aggregate';
 import { totalPrefix } from './provenance';
 import type { RangeKey, UsageReport } from './report';
-import type { UsageStatus } from './usageService';
+import type { Reading, UsageStatus } from './usageService';
 
 /** What the panel shows besides the report: status, scope, and diagnostics. */
 export interface PanelView {
     status: UsageStatus;
+    /** The history being read, this window's pass or another's, while the page should say so. */
+    reading: Reading | undefined;
     range: RangeKey;
     scope: 'all' | 'workspace';
     zone: string;
@@ -88,19 +90,25 @@ const KIND_LABELS: Record<string, string> = {
 function emptyState(view: PanelView): string | undefined {
     switch (view.status) {
         case 'off':
+            // The page the editor title's T opens for anyone with Claude
+            // Code's extension: what turning it on reads and keeps, listed
+            // as the README lists it, and nothing read until Turn On.
             return `
             <section class="empty-state">
                 <h2>Claude Code usage is off</h2>
                 <p>Turned on, LLM Tokenizer reads Claude Code's own session records ${view.where ? escapeHtml(view.where) : 'on this machine'},
-                and shows how many tokens Claude Code processed: by day, project, session and model.</p>
+                in the projects folder of its configuration folder (<code>~/.claude</code> by default), and shows how many tokens Claude Code processed: by day, project, session and model.</p>
+                <p>Kept, in a database in this extension's own storage:</p>
                 <ul>
-                    <li>Kept, in a database in this extension's own storage: each request's token counts, model, effort, speed, where it ran, time, ids and Claude Code version; the folder each session started in; compactions' sizes and the usage limits reached; which transcripts were read, and how far; and this machine's name, which each import writes.</li>
-                    <li>Never kept: prompts, responses, thinking, tool inputs or results.</li>
-                    <li>Nothing is sent anywhere.</li>
-                    <li>The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Claude Code Usage History removes it.</li>
+                    <li>each request's token counts, model, effort, speed, where it ran, time and Claude Code version, and its ids: message, request, session, and the subagent or workflow run it came from;</li>
+                    <li>the folder each session started in;</li>
+                    <li>each transcript's path, size, file id and how far it was read, with a hash of the last 64 bytes read, to tell what changed;</li>
+                    <li>compactions' sizes, and the usage limits reached, with when they reset;</li>
+                    <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
                 </ul>
-                <p><button type="button" data-action="openSettings">Open Settings</button>${
-                    view.remote ? ' <span class="muted">The setting is in Remote settings, for this host.</span>' : ''
+                <p>Never kept: prompts, responses, thinking, tool inputs or results. Nothing is sent anywhere. The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Claude Code Usage History removes it.</p>
+                <p class="actions"><button type="button" class="primary" data-action="turnOn">Turn On</button><button type="button" data-action="openSettings">Open Settings</button>${
+                    view.remote ? '<span class="muted">The setting is in Remote settings, for this host, and Turn On sets it there.</span>' : ''
                 }</p>
             </section>`;
         case 'no-roots':
@@ -160,7 +168,29 @@ function banner(view: PanelView): string {
     if (view.historyDisabled) {
         lines.push('CLAUDE_CODE_SKIP_PROMPT_HISTORY is set, so Claude Code keeps no transcripts, and nothing new can be read.');
     }
-    return lines.map(line => `<p class="banner">${line}</p>`).join('');
+    // Not a warning: what is shown is right, only not complete yet.
+    const reading = view.reading ? `<p class="banner reading">${escapeHtml(readingLine(view.reading))}</p>` : '';
+    return reading + lines.map(line => `<p class="banner">${line}</p>`).join('');
+}
+
+/** What the page says while the history is read, with how far this window's pass has gone where the worker said. */
+function readingLine(reading: Reading): string {
+    if (reading.by === 'another window') {
+        return "Another window is reading Claude Code's records; these totals grow as it goes.";
+    }
+    const count = (n: number) => n.toLocaleString('en-US');
+    const sofar =
+        reading.files === undefined
+            ? ''
+            : reading.of === undefined
+              ? `: ${count(reading.files)} files so far`
+              : `: ${count(reading.files)} of ${count(reading.of)} files`;
+    return `Still reading Claude Code's records${sofar}. These totals grow until it is done.`;
+}
+
+/** A total's mark: `≥` while the history is still being read, or when some request did not report every counter. */
+function mark(view: PanelView, provenance: UsageTotals['provenance']): '' | '≥' {
+    return view.reading ? '≥' : totalPrefix(provenance);
 }
 
 /** The range and scope buttons, and the refresh line. */
@@ -173,11 +203,33 @@ function controls(view: PanelView): string {
         `<button type="button" data-scope="${key}" aria-pressed="${view.scope === key}">${label}</button>`;
     const newest = report?.coverage.newest != null ? `newest record ${escapeHtml(view.formatTime(report.coverage.newest))}` : '';
     const refreshed = view.refreshedAt !== undefined ? `refreshed ${escapeHtml(view.formatTime(view.refreshedAt))}` : '';
+    // Busy while a pass reads, rather than a click that seems to do nothing:
+    // Refresh would only wait for it. Still focusable, so focus stays put.
+    const refresh = view.reading
+        ? '<button type="button" data-action="refresh" aria-disabled="true">Reading…</button>'
+        : '<button type="button" data-action="refresh">Refresh</button>';
     return `
         <div class="segmented" role="group" aria-label="Range">${(['today', '7d', '30d', 'coverage'] as const).map(range).join('')}</div>
         <div class="segmented" role="group" aria-label="Scope">${scope('all', 'All projects')}${scope('workspace', 'This workspace')}</div>
-        <button type="button" data-action="refresh">Refresh</button>
+        ${refresh}
         <span class="muted">${[refreshed, newest].filter(Boolean).join(' · ')}${view.where ? ` · ${escapeHtml(view.where)}` : ''}</span>`;
+}
+
+/**
+ * `share` as a percent with `decimals` places, cut, never rounded up, as
+ * every share on this page is written: 99.6% is not all of it, and the
+ * total's line once said 95% of the cache reads its bar beside it called 96%.
+ * The nudge keeps a share a float puts a hair under its figure, as 0.29 is,
+ * on that figure.
+ */
+function cut(share: number, decimals: number): string {
+    const scale = 10 ** decimals;
+    return `${(Math.floor(share * 100 * scale + 1e-9) / scale).toFixed(decimals)}%`;
+}
+
+/** A share on a bar, or in a line of text: whole percent from 10%, one decimal below. */
+export function cutPercent(share: number): string {
+    return cut(share, share >= 0.1 ? 0 : 1);
 }
 
 function categoryBars(t: UsageTotals): string {
@@ -187,7 +239,7 @@ function categoryBars(t: UsageTotals): string {
         ['Input', t.input],
         ['Output', t.output],
     ];
-    return rankedBars(ranked(rows, t.processed));
+    return rankedBars(ranked(rows, t.processed), cutPercent);
 }
 
 function ranked(rows: [string, number][], total: number): RankedValue[] {
@@ -227,7 +279,7 @@ function dayColumns(report: UsageReport, view: PanelView): string {
             const t = byDate.get(date);
             const value = t?.processed ?? 0;
             const height = tallest > 0 ? (value / tallest) * 100 : 0;
-            const label = `${date}: ${totalPrefix(t?.provenance ?? 'reported')}${value.toLocaleString('en-US')} processed`;
+            const label = `${date}: ${mark(view, t?.provenance ?? 'reported')}${value.toLocaleString('en-US')} processed`;
             return `<div class="column" role="listitem" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><div class="column-bar" style="height: ${height.toFixed(2)}%"></div></div>`;
         })
         .join('')}</div>
@@ -252,20 +304,34 @@ function modelName(view: PanelView, model: string, variant: string | null): stri
     return `${view.modelLabel(model)}${variant ? ` (${variant})` : ''}`;
 }
 
+/**
+ * How much of the total is cache reads, beside it: the conversation each
+ * request sends again, which is why one prompt making dozens of calls on a
+ * large context processes tens of millions. As the Cache read bar below it
+ * writes it (see cutPercent).
+ */
+function cacheReadPart(t: UsageTotals): string {
+    if (t.processed <= 0 || t.cacheRead <= 0) {
+        return '';
+    }
+    const share = t.cacheRead / t.processed;
+    return ` · ${share < 0.01 ? 'under 1%' : cutPercent(share)} cache reads, the conversation each request sends again`;
+}
+
 function overview(report: UsageReport, view: PanelView): string {
     const t = report.totals;
-    const prefix = totalPrefix(t.provenance);
-    const share = cacheReadShare(t);
+    const prefix = mark(view, t.provenance);
     const sessions = report.sessions.length + report.omitted.sessions;
-    const thinking = t.output > 0 && t.thinking > 0 ? ` · ${((t.thinking / t.output) * 100).toFixed(0)}% of output was thinking` : '';
-    const writes =
-        t.cacheWrite5m + t.cacheWrite1h > 0
-            ? ` · cache writes ${formatNumber(t.cacheWrite5m)} for 5 minutes, ${formatNumber(t.cacheWrite1h)} for 1 hour`
-            : '';
+    // The cache reads' share is the total's line's: a second one here, of
+    // input alone, read as the same figure, rounded otherwise.
+    const notes = [
+        t.output > 0 && t.thinking > 0 ? `${cutPercent(t.thinking / t.output)} of output was thinking` : '',
+        t.cacheWrite5m + t.cacheWrite1h > 0 ? `cache writes ${formatNumber(t.cacheWrite5m)} for 5 minutes, ${formatNumber(t.cacheWrite1h)} for 1 hour` : '',
+    ].filter(Boolean);
     return `
     <header>
         <div class="hero-value">${prefix}${formatNumber(t.processed)}</div>
-        <div class="hero-meta">tokens processed · ${t.coverage.requests.toLocaleString('en-US')} requests · ${sessions.toLocaleString('en-US')} sessions</div>
+        <div class="hero-meta">tokens processed${cacheReadPart(t)} · ${t.coverage.requests.toLocaleString('en-US')} requests · ${sessions.toLocaleString('en-US')} sessions</div>
         ${
             t.provenance === 'partial'
                 ? `<p class="note">≥: ${t.coverage.incompleteRequests.toLocaleString('en-US')} requests did not report every counter, so this is a lower bound.</p>`
@@ -275,24 +341,23 @@ function overview(report: UsageReport, view: PanelView): string {
     <section class="panel">
         <h2>What was processed</h2>
         ${categoryBars(t)}
-        <p class="note">${
-            share === null ? '' : `${(share * 100).toFixed(1)}% of input was read from the cache, which Claude Code resends every turn.`
-        }${thinking}${writes}</p>
+        ${notes.length > 0 ? `<p class="note">${notes.join(' · ')}</p>` : ''}
     </section>
     <section class="panel"><h2>By day</h2>${dayColumns(report, view)}</section>
     <section class="panel">
         <h2>By model</h2>
-        ${rankedBars(report.models.map(m => ({ label: modelName(view, m.model, m.variant), tokens: m.totals.processed, share: share0(m.totals, t) })))}
+        ${rankedBars(report.models.map(m => ({ label: modelName(view, m.model, m.variant), tokens: m.totals.processed, share: share0(m.totals, t) })), cutPercent)}
         ${capNote(report.omitted.models, 'models')}
     </section>
     <section class="panel">
         <h2>Delegated work</h2>
-        ${rankedBars(report.kinds.map(k => ({ label: KIND_LABELS[k.kind] ?? k.kind, tokens: k.totals.processed, share: share0(k.totals, t) })))}
+        ${rankedBars(report.kinds.map(k => ({ label: KIND_LABELS[k.kind] ?? k.kind, tokens: k.totals.processed, share: share0(k.totals, t) })), cutPercent)}
     </section>
     ${
         report.efforts.length > 1 || report.efforts[0]?.effort
             ? `<section class="panel"><h2>By effort</h2>${rankedBars(
                   report.efforts.map(e => ({ label: e.effort ?? 'not recorded', tokens: e.totals.processed, share: share0(e.totals, t) })),
+                  cutPercent,
               )}${capNote(report.omitted.efforts, 'effort levels')}</section>`
             : ''
     }
@@ -351,7 +416,7 @@ function table(
     </table>`;
 }
 
-function projects(report: UsageReport): string {
+function projects(report: UsageReport, view: PanelView): string {
     const total = report.totals.processed;
     return `
     <section class="panel">
@@ -369,8 +434,8 @@ function projects(report: UsageReport): string {
                 cells: [
                     `<span title="${escapeHtml(p.project.kind === 'root' ? p.project.path : p.project.projectDir)}">${escapeHtml(p.label)}</span>`,
                     p.sessions.toLocaleString('en-US'),
-                    `${totalPrefix(p.totals.provenance)}${p.totals.processed.toLocaleString('en-US')}`,
-                    total > 0 ? `${((p.totals.processed / total) * 100).toFixed(1)}%` : '—',
+                    `${mark(view, p.totals.provenance)}${p.totals.processed.toLocaleString('en-US')}`,
+                    total > 0 ? cut(p.totals.processed / total, 1) : '—',
                 ],
             })),
             'processed',
@@ -412,7 +477,7 @@ function sessions(report: UsageReport, view: PanelView): string {
                         escapeHtml(s.label),
                         escapeHtml(formatSpan(span)),
                         s.totals.coverage.requests.toLocaleString('en-US'),
-                        `${totalPrefix(s.totals.provenance)}${s.totals.processed.toLocaleString('en-US')}`,
+                        `${mark(view, s.totals.provenance)}${s.totals.processed.toLocaleString('en-US')}`,
                         s.compactions.length > 0 ? `<span title="${escapeHtml(compactions)}">${s.compactions.length}</span>` : '0',
                     ],
                 };
@@ -514,11 +579,14 @@ export function renderFragments(view: PanelView): PanelFragments {
                 ? `${banner(view)}<section class="empty-state"><h2>Nothing in this range</h2><p>${
                       report.coverage.requests === 0
                           ? 'No Claude Code requests have been read yet.'
-                          : view.scope === 'workspace'
-                            ? 'No session in this range started in a folder of this workspace.'
-                            : 'No requests fall in this range.'
+                          : view.reading
+                            ? // A range the reading has not reached yet is not one without requests.
+                              'Nothing has been read in this range yet.'
+                            : view.scope === 'workspace'
+                              ? 'No session in this range started in a folder of this workspace.'
+                              : 'No requests fall in this range.'
                   }</p></section>`
-                : `${banner(view)}${overview(report, view)}${projects(report)}${sessions(report, view)}`
+                : `${banner(view)}${overview(report, view)}${projects(report, view)}${sessions(report, view)}`
             : `${banner(view)}<p class="muted">Reading Claude Code's records…</p>`);
     return {
         controls: empty ? '' : controls(view),
@@ -645,10 +713,11 @@ button {
 .segmented button { border-radius: 0; margin-left: -1px; }
 .segmented button:first-child { border-radius: 3px 0 0 3px; margin-left: 0; }
 .segmented button:last-child { border-radius: 0 3px 3px 0; }
-button[aria-pressed="true"] {
+button[aria-pressed="true"], button.primary {
     color: var(--vscode-button-foreground);
     background: var(--vscode-button-background);
 }
+button[aria-disabled="true"] { opacity: 0.6; cursor: default; }
 button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .muted, .note, .reason { color: var(--ink-muted); }
 .note { font-size: 0.9em; margin: 10px 0 0; }
@@ -660,6 +729,10 @@ button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-off
     border-radius: 4px;
     border-left: 3px solid var(--warning);
     background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.banner.reading {
+    border-left-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .panel { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--hairline); }
 .panel h2, .empty-state h2 {
@@ -700,7 +773,7 @@ tbody tr:hover { background: var(--vscode-list-hoverBackground); }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0 0; }
 .facts dt { color: var(--ink-muted); }
 .facts dd { margin: 0; }
-.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
 .empty-state ul { padding-left: 18px; }
 </style>
 </head>

@@ -181,10 +181,10 @@ export class TokenizerService implements vscode.Disposable {
         //
         // Read before the first await, so nothing runs between count()'s
         // budget check and this. Read after the disk check instead, it missed
-        // a crash landing during that check — the first read of a large
-        // tokenizer.json takes a quarter of a second — and when that crash
-        // tripped the budget, the load the budget refused was recorded here as
-        // a vocabulary that cannot be used.
+        // a crash landing during that check — which reads and hashes the whole
+        // of a large tokenizer.json — and when that crash tripped the budget,
+        // the load the budget refused was recorded here as a vocabulary that
+        // cannot be used.
         const epoch = this.host.epoch;
 
         if (!(await this.store.isDownloaded(spec))) {
@@ -192,7 +192,7 @@ export class TokenizerService implements vscode.Disposable {
             return;
         }
 
-        if (!(await this.ensureExact(model)) && this.host.epoch === epoch) {
+        if (!(await this.load(model, false)) && this.host.epoch === epoch) {
             this.unavailable.add(repo);
         }
     }
@@ -255,6 +255,23 @@ export class TokenizerService implements vscode.Disposable {
         model: ModelInfo,
         token?: vscode.CancellationToken,
     ): Promise<boolean> {
+        return this.load(model, true, token);
+    }
+
+    /**
+     * `ensureExact`, and re-hydration's way in too.
+     *
+     * @param download whether a vocabulary missing from disk may be fetched.
+     *   Re-hydration passes false. Through `ensureExact` it never downloaded
+     *   only because the store kept every vocabulary it had read; now that it
+     *   keeps only that the file matched, one deleted since would be fetched
+     *   mid-count, and the setting that turns downloads off is not read here.
+     */
+    private async load(
+        model: ModelInfo,
+        download: boolean,
+        token?: vscode.CancellationToken,
+    ): Promise<boolean> {
         if (!isDownloadable(model.encoder)) {
             return model.encoder.kind === 'tiktoken';
         }
@@ -279,17 +296,25 @@ export class TokenizerService implements vscode.Disposable {
             return existing;
         }
 
-        const load = this.loadTokenizer(spec, token).finally(() => this.loading.delete(repo));
+        const load = this.loadTokenizer(spec, download, token).finally(() => this.loading.delete(repo));
         this.loading.set(repo, load);
         return load;
     }
 
-    private async loadTokenizer(spec: DownloadableSpec, token?: vscode.CancellationToken): Promise<boolean> {
+    private async loadTokenizer(
+        spec: DownloadableSpec,
+        download: boolean,
+        token?: vscode.CancellationToken,
+    ): Promise<boolean> {
         const { repo } = spec;
         const generation = this.loadGeneration;
 
         try {
-            const asset = await this.store.fetch(spec, token);
+            const asset = download ? await this.store.fetch(spec, token) : await this.store.peek(spec);
+            if (!asset) {
+                this.log.warn(`Falling back to an estimate for ${repo}: its tokenizer on disk has gone or changed since it was checked`);
+                return false;
+            }
             // Fetched now, whatever a count recorded while it was downloading.
             // Left in place, that "not on disk" outlived a load the crash budget
             // refused, and the model stayed an estimate for the session.

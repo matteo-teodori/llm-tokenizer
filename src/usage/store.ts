@@ -10,20 +10,23 @@
  * started beside it, which is left as it is rather than deleted.
  *
  * Measured, on the stand-in schema: a full import of about 4 GB of records in
- * 6.49 s on the engines floor's runtime, a 9.5 MB database for about 133,000
- * requests, a day-by-model GROUP BY in 65 ms.
+ * 6.49 s on the engines floor's runtime, a day-by-model GROUP BY in 65 ms. On
+ * this schema, one heavy user's transcripts, 229,367 requests in 3,880 files,
+ * make an 82.9 MB history: 379 bytes a request, where schema 2, which kept
+ * each request's transcript path in full, took 771.
  *
  * Only the API of Node 22.19, the floor's runtime, is used: no `limits`,
  * `serialize`, `createTagStore`, `enableDefensive` or `setAuthorizer`.
  */
 
+import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 import { BUCKET_MS } from './aggregate';
-import { copiesBeside, currentHistory, ownFiles } from './historyFiles';
+import { copiesBeside, currentHistory, linkWhole, ownFiles, removeQuietly } from './historyFiles';
 import { isComplete } from './provenance';
 import type {
     BucketSums,
@@ -38,7 +41,7 @@ import type {
 } from './types';
 
 /** `PRAGMA user_version` of the schema this code writes. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** How old a lease's heartbeat must be before another window may take it. */
 export const LEASE_TAKEOVER_MS = 20_000;
@@ -287,25 +290,126 @@ CREATE TABLE lease (
 ) STRICT;
 `;
 
-/** Tables that hold history, and the bookkeeping of reading it: everything Clear empties. */
-const DATA_TABLES = ['files', 'read_guards', 'requests', 'sessions', 'compactions', 'limit_hits'];
+/**
+ * What builds before schema 3 read as the newest parser that has held the
+ * import lease, and the key this one keeps it under. Schema 3 sets the old
+ * key past any parser: a build before it that still has the history open, in
+ * a window not reloaded since the update, can no longer write a request (its
+ * path is an id now), and finds itself outdated instead, stops importing, and
+ * says to reload, as it does when a newer parser has taken over. A later
+ * schema that the builds before it cannot write must do the same with this
+ * key, and keep the newest parser under another.
+ */
+const OLD_NEWEST_PARSER = 'max_parser_version';
+const NEWEST_PARSER = 'newest_parser';
 
 /**
- * Migrations by the version they produce. Forward-only and additive, each in
- * one transaction after a backup. Version 1 creates the schema; version 2
- * keeps each request's speed and where it ran, which its price depends on.
- * A row read before has neither, until its file is read again.
+ * Version 3: each transcript's path is kept once, in `paths`, and a request
+ * names it by its id there, rather than in full in every row and again in
+ * the index on it, which was half the history (see the header). The column
+ * keeps its name: a build before this schema prepares its upsert as it opens
+ * a history, read-only included, and one naming a column that is gone made
+ * that open fail. Nothing ever looked a request up by `request_id`, so the
+ * index on it is gone.
+ *
+ * The table is built anew, its indexes dropped first, so that the new one is
+ * written into their pages: measured on 229,000 requests, the file went from
+ * 151 MB to 154 MB this way, and to 212 MB with the indexes dropped after.
+ * `clear_paths` empties `paths` once a Clear by a build before this schema,
+ * which knows nothing of it, has emptied `requests`, so that nothing of the
+ * history stays readable on disk. A schema that drops either table must drop
+ * the trigger too.
+ */
+const MIGRATE_TO_3 = `
+DROP INDEX requests_ts;
+DROP INDEX requests_session;
+DROP INDEX requests_request_id;
+DROP INDEX requests_file;
+CREATE TABLE paths (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE
+) STRICT;
+INSERT INTO paths (path) SELECT DISTINCT file FROM requests ORDER BY file;
+CREATE TABLE requests_3 (
+    provider TEXT NOT NULL DEFAULT 'claude-code',
+    message_id TEXT NOT NULL,
+    parser_version INTEGER NOT NULL,
+    file INTEGER NOT NULL,
+    byte_offset INTEGER NOT NULL,
+    is_main INTEGER NOT NULL,
+    complete INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    model TEXT NOT NULL,
+    variant TEXT,
+    input INTEGER,
+    cache_creation INTEGER,
+    cache_read INTEGER,
+    output INTEGER,
+    cache_5m INTEGER,
+    cache_1h INTEGER,
+    thinking INTEGER,
+    effort TEXT,
+    web_search INTEGER,
+    web_fetch INTEGER,
+    request_id TEXT,
+    claude_code_version TEXT,
+    agent_id TEXT,
+    run_id TEXT,
+    speed TEXT,
+    inference_geo TEXT,
+    PRIMARY KEY (provider, message_id)
+) STRICT;
+INSERT INTO requests_3 (
+    provider, message_id, parser_version, file, byte_offset, is_main, complete, ts,
+    session_id, kind, model, variant, input, cache_creation, cache_read, output,
+    cache_5m, cache_1h, thinking, effort, web_search, web_fetch, request_id,
+    claude_code_version, agent_id, run_id, speed, inference_geo
+)
+SELECT r.provider, r.message_id, r.parser_version, p.id, r.byte_offset, r.is_main, r.complete, r.ts,
+       r.session_id, r.kind, r.model, r.variant, r.input, r.cache_creation, r.cache_read, r.output,
+       r.cache_5m, r.cache_1h, r.thinking, r.effort, r.web_search, r.web_fetch, r.request_id,
+       r.claude_code_version, r.agent_id, r.run_id, r.speed, r.inference_geo
+FROM requests r JOIN paths p ON p.path = r.file;
+DROP TABLE requests;
+ALTER TABLE requests_3 RENAME TO requests;
+CREATE INDEX requests_ts ON requests (ts);
+CREATE INDEX requests_session ON requests (session_id);
+CREATE INDEX requests_file ON requests (file);
+CREATE TRIGGER clear_paths AFTER UPDATE OF value ON meta
+WHEN new.key = 'store_generation' AND NOT EXISTS (SELECT 1 FROM requests)
+BEGIN
+    DELETE FROM paths;
+END;
+INSERT OR REPLACE INTO meta (key, value) SELECT '${NEWEST_PARSER}', value FROM meta WHERE key = '${OLD_NEWEST_PARSER}';
+INSERT OR REPLACE INTO meta (key, value) VALUES ('${OLD_NEWEST_PARSER}', '${Number.MAX_SAFE_INTEGER}');
+`;
+
+/** Tables that hold history, and the bookkeeping of reading it: everything Clear empties. */
+const DATA_TABLES = ['files', 'read_guards', 'requests', 'paths', 'sessions', 'compactions', 'limit_hits'];
+
+/**
+ * Migrations by the version they produce. Forward-only, each in one
+ * transaction after a backup. Version 1 creates the schema; version 2 keeps
+ * each request's speed and where it ran, which its price depends on. A row
+ * read before has neither, until its file is read again. Version 3 keeps
+ * each path once (see MIGRATE_TO_3), and is the one that is not additive:
+ * the file is compacted after it, and a build before it told to stop
+ * writing. On 229,000 requests it took 3.1 to 3.8 s, backup included.
  */
 const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
     1: db => db.exec(SCHEMA),
     2: db => db.exec('ALTER TABLE requests ADD COLUMN speed TEXT; ALTER TABLE requests ADD COLUMN inference_geo TEXT;'),
+    3: db => db.exec(MIGRATE_TO_3),
 };
 
 /**
  * The comparator of `accounting.ts`, as the upsert's condition: the incoming
  * record replaces the stored one only when it would represent the request
  * instead. Text compares as UTF-8 bytes (BINARY collation), as the
- * JavaScript side does.
+ * JavaScript side does. The tie-break compares the paths themselves, never
+ * their ids, which follow the order paths were first stored in.
  */
 const UPSERT_REQUEST = `
 INSERT INTO requests (
@@ -337,11 +441,17 @@ WHERE excluded.parser_version > requests.parser_version
           > (requests.is_main, requests.complete, coalesce(requests.output, -1))
      OR ((excluded.is_main, excluded.complete, coalesce(excluded.output, -1))
           = (requests.is_main, requests.complete, coalesce(requests.output, -1))
-         AND (excluded.file, excluded.byte_offset) < (requests.file, requests.byte_offset))))
+         AND ((SELECT path FROM paths WHERE id = excluded.file), excluded.byte_offset)
+           < ((SELECT path FROM paths WHERE id = requests.file), requests.byte_offset))))
 `;
 
 export class UsageStore {
-    private readonly upsertStatement: StatementSync;
+    /**
+     * What writes requests, prepared at the first write: never for a history
+     * only read, which a newer build may have made without a column these
+     * name, and must still open.
+     */
+    private writes: { upsert: StatementSync; findPath: StatementSync; addPath: StatementSync } | undefined;
 
     private constructor(
         private readonly db: DatabaseSync,
@@ -349,9 +459,7 @@ export class UsageStore {
         readonly readOnly: boolean,
         private readonly now: () => number,
         private readonly isAlive: (pid: number) => boolean,
-    ) {
-        this.upsertStatement = db.prepare(UPSERT_REQUEST);
-    }
+    ) {}
 
     /**
      * Open, or create, the history at `file`, through `sqlite`.
@@ -386,26 +494,29 @@ export class UsageStore {
         let db = new sqlite.DatabaseSync(file);
         try {
             db.exec(busyTimeout);
-            const schema = userVersion(db);
+            let schema = userVersion(db);
 
-            // A newer extension created it: read it, never write or migrate it.
-            if (schema > SCHEMA_VERSION) {
-                db.close();
-                db = new sqlite.DatabaseSync(file, { readOnly: true });
-                db.exec(busyTimeout);
-                return { status: 'read-only', store: new UsageStore(db, file, true, now, alive(options)), reason: 'newer-schema', schema };
-            }
+            if (schema <= SCHEMA_VERSION) {
+                if (schema > 0) {
+                    const check = (db.prepare('PRAGMA quick_check').get() as { quick_check: string }).quick_check;
+                    if (check !== 'ok') {
+                        throw Object.assign(new Error('quick_check failed'), { errcode: SQLITE_CORRUPT });
+                    }
+                }
 
-            if (schema > 0) {
-                const check = (db.prepare('PRAGMA quick_check').get() as { quick_check: string }).quick_check;
-                if (check !== 'ok') {
-                    throw Object.assign(new Error('quick_check failed'), { errcode: SQLITE_CORRUPT });
+                const journal = UsageStore.configure(db, file, options);
+                schema = UsageStore.migrate(db, file, schema);
+                if (schema <= SCHEMA_VERSION) {
+                    return { status: 'ready', store: new UsageStore(db, file, false, now, alive(options)), journal };
                 }
             }
 
-            const journal = UsageStore.configure(db, file, options);
-            UsageStore.migrate(db, file, schema);
-            return { status: 'ready', store: new UsageStore(db, file, false, now, alive(options)), journal };
+            // A newer extension created it, or created or migrated it while
+            // this one opened it: read it, never write or migrate it.
+            db.close();
+            db = new sqlite.DatabaseSync(file, { readOnly: true });
+            db.exec(busyTimeout);
+            return { status: 'read-only', store: new UsageStore(db, file, true, now, alive(options)), reason: 'newer-schema', schema };
         } catch (error) {
             db.close();
             throw error;
@@ -441,9 +552,21 @@ export class UsageStore {
      * editors' runtimes (measured on VS Code 1.105 and 1.141, Electron 37.6
      * and 43.7; never on Node 26.3 in 60). So the version is
      * read again once the write lock is held, and one already applied is
-     * skipped.
+     * skipped. A newer build can have created or migrated it meanwhile too,
+     * past this schema: then it is left as it is, for this one to read.
+     *
+     * @returns the version the history is at now: SCHEMA_VERSION, or the
+     * newer one another build gave it.
      */
-    private static migrate(db: DatabaseSync, file: string, from: number): void {
+    private static migrate(db: DatabaseSync, file: string, atOpen: number): number {
+        let from = atOpen;
+        if (from === 0) {
+            from = UsageStore.create(db);
+        }
+        if (from > SCHEMA_VERSION) {
+            return from;
+        }
+        let migrated = false;
         for (let version = from + 1; version <= SCHEMA_VERSION; version++) {
             // The first migration creates the schema; there is nothing to keep.
             if (from > 0) {
@@ -451,8 +574,12 @@ export class UsageStore {
             }
             db.exec('BEGIN IMMEDIATE');
             try {
-                if (userVersion(db) >= version) {
+                const found = userVersion(db);
+                if (found >= version) {
                     db.exec('COMMIT');
+                    if (found > SCHEMA_VERSION) {
+                        return found;
+                    }
                     continue;
                 }
                 MIGRATIONS[version](db);
@@ -462,10 +589,45 @@ export class UsageStore {
                 }
                 db.exec(`PRAGMA user_version = ${version}`);
                 db.exec('COMMIT');
+                migrated = true;
             } catch (error) {
                 db.exec('ROLLBACK');
                 throw error;
             }
+        }
+        if (migrated) {
+            compact(db);
+        }
+        return SCHEMA_VERSION;
+    }
+
+    /**
+     * A new history's whole schema in one transaction, so that no other window
+     * opening it meanwhile finds it at a version between, and backs it up to
+     * migrate it.
+     *
+     * @returns the version it is at once the transaction ends: SCHEMA_VERSION,
+     * made here or by another window of this build meanwhile; an older
+     * build's, which is then migrated as any other, after a backup; or a
+     * newer build's, which this one only reads.
+     */
+    private static create(db: DatabaseSync): number {
+        db.exec('BEGIN IMMEDIATE');
+        try {
+            const found = userVersion(db);
+            if (found === 0) {
+                for (let version = 1; version <= SCHEMA_VERSION; version++) {
+                    MIGRATIONS[version](db);
+                }
+                const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+                db.prepare("INSERT INTO meta (key, value) VALUES ('store_id', ?), ('store_generation', '0')").run(id);
+                db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+            }
+            db.exec('COMMIT');
+            return found === 0 ? SCHEMA_VERSION : found;
+        } catch (error) {
+            db.exec('ROLLBACK');
+            throw error;
         }
     }
 
@@ -495,12 +657,26 @@ export class UsageStore {
      */
     upsertRequests(requests: Iterable<UsageRequest>): void {
         this.assertWritable();
+        this.writes ??= {
+            upsert: this.db.prepare(UPSERT_REQUEST),
+            findPath: this.db.prepare('SELECT id FROM paths WHERE path = ?'),
+            addPath: this.db.prepare('INSERT INTO paths (path) VALUES (?)'),
+        };
+        const { upsert, findPath, addPath } = this.writes;
+        // A file's requests all name it: each path is looked up once a call.
+        const ids = new Map<string, number>();
         for (const r of requests) {
-            this.upsertStatement.run({
+            let file = ids.get(r.file);
+            if (file === undefined) {
+                const found = findPath.get(r.file) as { id: number } | undefined;
+                file = found?.id ?? Number(addPath.run(r.file).lastInsertRowid);
+                ids.set(r.file, file);
+            }
+            upsert.run({
                 provider: r.provider,
                 messageId: r.messageId,
                 parserVersion: r.parserVersion,
-                file: r.file,
+                file,
                 byteOffset: r.byteOffset,
                 isMain: r.isMain ? 1 : 0,
                 complete: isComplete(r) ? 1 : 0,
@@ -789,15 +965,18 @@ export class UsageStore {
     /**
      * Drop the rows read from `file` before re-reading it with a newer parser,
      * so that a change of key cannot leave its old rows behind as doubles.
+     * Only while the file still holds every line they were read from: the
+     * rows of lines since removed could never be read again.
      */
     deleteRequestsFromFile(provider: UsageProvider, file: string): void {
         this.assertWritable();
-        this.db.prepare('DELETE FROM requests WHERE provider = ? AND file = ?').run(provider, file);
+        this.db.prepare('DELETE FROM requests WHERE provider = ? AND file = (SELECT id FROM paths WHERE path = ?)').run(provider, file);
     }
 
     /** Every stored request, for the queries and the tests. */
     *requests(): IterableIterator<UsageRequest> {
-        for (const row of this.db.prepare('SELECT * FROM requests ORDER BY provider, message_id').iterate()) {
+        const all = 'SELECT requests.*, paths.path FROM requests JOIN paths ON paths.id = requests.file ORDER BY provider, message_id';
+        for (const row of this.db.prepare(all).iterate()) {
             yield toRequest(row);
         }
     }
@@ -924,7 +1103,13 @@ export class UsageStore {
         }
         const listed = pendingCopies(row.value);
         const folder = path.dirname(this.file);
-        const copies = new Set(copiesBeside(this.file));
+        let copies: Set<string>;
+        try {
+            copies = new Set(copiesBeside(this.file));
+        } catch {
+            // Which copies are still there cannot be told now: all are kept for later.
+            return { settled: false, copiesLeft: listed.length };
+        }
         // Never the history in use now, which another window may have just started.
         let inUse: Set<string> | undefined;
         try {
@@ -943,11 +1128,11 @@ export class UsageStore {
                 return true;
             }
             try {
-                fs.rmSync(path.join(folder, name), { force: true });
+                fs.unlinkSync(path.join(folder, name));
                 return false;
-            } catch {
+            } catch (error) {
                 // Open in another window, on Windows: removed once it lets go.
-                return true;
+                return (error as NodeJS.ErrnoException | null)?.code !== 'ENOENT';
             }
         });
         if (left.length > 0) {
@@ -991,7 +1176,13 @@ export class UsageStore {
      * name they gave the history.
      */
     setAside(): string | undefined {
-        const copies = copiesBeside(this.file);
+        let copies: string[];
+        try {
+            copies = copiesBeside(this.file);
+        } catch {
+            // Only a notice: told again at the next report.
+            return undefined;
+        }
         const row = this.db.prepare("SELECT value FROM meta WHERE key = 'set_aside'").get() as { value: string } | undefined;
         if (row && copies.includes(row.value)) {
             return row.value;
@@ -1053,9 +1244,7 @@ export class UsageStore {
                 .prepare('INSERT OR REPLACE INTO lease (role, holder, host, pid, parser_version, heartbeat) VALUES (?, ?, ?, ?, ?, ?)')
                 .run(role, holder, os.hostname(), process.pid, parserVersion, now);
             if (parserVersion > newest) {
-                this.db
-                    .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('max_parser_version', ?)")
-                    .run(String(parserVersion));
+                this.db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(NEWEST_PARSER, String(parserVersion));
             }
             return true;
         });
@@ -1067,7 +1256,7 @@ export class UsageStore {
     }
 
     private maxParserVersion(): number {
-        const row = this.db.prepare("SELECT value FROM meta WHERE key = 'max_parser_version'").get() as { value: string } | undefined;
+        const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(NEWEST_PARSER) as { value: string } | undefined;
         return row ? Number(row.value) : 0;
     }
 
@@ -1112,7 +1301,7 @@ function toRequest(row: Record<string, unknown>): UsageRequest {
         claudeCodeVersion: row.claude_code_version as string | null,
         agentId: row.agent_id as string | null,
         runId: row.run_id as string | null,
-        file: row.file as string,
+        file: row.path as string,
         byteOffset: row.byte_offset as number,
         parserVersion: row.parser_version as number,
     };
@@ -1196,17 +1385,50 @@ function userVersion(db: DatabaseSync): number {
 }
 
 /**
- * The copy of the store a migration starts from. VACUUM INTO refuses a file
- * that exists, so a second window migrating at the same moment finds the
- * first one's copy, and that copy is the backup.
+ * The copy of the store a migration starts from, made whole or not at all.
+ * VACUUM INTO writes it under a name of its own, and only a whole copy then
+ * takes the backup's name: written there at once, a copy cut short by a full
+ * disk or a crash was taken for the backup at the next attempt. A copy
+ * another window made at the same moment, under that name first, is the
+ * backup; one a crash left under its own name is a copy beside the history,
+ * which Clear removes.
  */
 function backUp(db: DatabaseSync, target: string): void {
+    if (fs.existsSync(target)) {
+        return;
+    }
+    const partial = `${target}.${randomBytes(6).toString('hex')}`;
     try {
-        db.exec(`VACUUM INTO ${sqlString(target)}`);
-    } catch (error) {
-        if (!fs.existsSync(target)) {
-            throw error;
+        db.exec(`VACUUM INTO ${sqlString(partial)}`);
+        linkWhole(partial, target);
+    } finally {
+        removeQuietly(partial);
+    }
+}
+
+/**
+ * Give back what a migration left behind. Schema 3 builds the requests table
+ * anew, which leaves the old one's pages free, and only VACUUM returns them:
+ * on 229,000 requests, 154 MB with 77 MB free became 75 MB. The new table
+ * and the file VACUUM writes both pass through the log, which only a
+ * checkpoint that truncates it empties. Only space: while another window
+ * writes, the free pages are filled as the history grows instead, and a
+ * checkpoint another window's read holds off is owed as a Clear's is, and
+ * done by whichever window comes next.
+ */
+function compact(db: DatabaseSync): void {
+    try {
+        db.exec('VACUUM');
+    } catch {
+        // Busy, or short of room for the copy VACUUM builds: kept as migrated.
+    }
+    try {
+        const result = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number } | undefined;
+        if (result?.busy === 1) {
+            db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('clear_pending', '[]')").run();
         }
+    } catch {
+        // The log is emptied at the next Clear instead.
     }
 }
 

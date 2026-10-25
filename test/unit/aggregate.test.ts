@@ -128,7 +128,30 @@ suite('language detection', () => {
     });
 
     test('handles extensionless files', () => {
-        assert.strictEqual(languageOf('/repo/Makefile'), 'No extension');
+        assert.strictEqual(languageOf('/repo/LICENSE'), 'No extension');
+    });
+
+    test('names the language of a file that says it by name', () => {
+        // A Dockerfile or a Makefile has no extension, so it read as "No
+        // extension" and the dockerfile and make entries never applied to it.
+        assert.strictEqual(languageOf('/repo/Dockerfile'), 'Dockerfile');
+        assert.strictEqual(languageOf('/repo/services/api/Containerfile'), 'Dockerfile');
+        assert.strictEqual(languageOf('/repo/Makefile'), 'Makefile');
+        assert.strictEqual(languageOf('/repo/makefile'), 'Makefile');
+        assert.strictEqual(languageOf('C:\\repo\\GNUmakefile'), 'Makefile');
+        assert.strictEqual(languageOf('/repo/Gemfile'), 'Ruby');
+        // An extension still decides when there is one.
+        assert.strictEqual(languageOf('/repo/build.dockerfile'), 'Dockerfile');
+        assert.strictEqual(languageOf('/repo/Makefile.txt'), 'Plain text');
+    });
+
+    test('a name that is an Object.prototype key is not a language', () => {
+        // The by-name map is null-prototyped like the extension map: a plain
+        // literal handed back a function for `constructor`, and the summary
+        // fell over on it.
+        assert.strictEqual(languageOf('/repo/constructor'), 'No extension');
+        assert.strictEqual(languageOf('/repo/__proto__'), 'No extension');
+        assert.strictEqual(languageOf('/repo/x.constructor'), '.constructor');
     });
 
     test('is case-insensitive', () => {

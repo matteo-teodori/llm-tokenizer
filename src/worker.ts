@@ -10,7 +10,6 @@ import { parentPort } from 'worker_threads';
 import {
     type Encoder,
     type EncoderSpec,
-    type TokenizerAsset,
     evictDownloadedEncoder,
     hfEncoder,
     isDownloadable,
@@ -25,20 +24,25 @@ if (!parentPort) {
 
 const port = parentPort;
 
-/** Vocabularies the host has handed us, keyed by repo id. */
-const loaded = new Map<string, TokenizerAsset>();
+/**
+ * The encoders built from the vocabularies the host has handed us, keyed by
+ * repo id. The encoder, not what it was built from: the host posts the text of
+ * the file, and keeping that would hold a second copy of each vocabulary for
+ * nothing beside the tokenizer built from it — 24 MB of heap for Gemma 3's,
+ * measured.
+ */
+const loaded = new Map<string, Encoder>();
 
 function reply(response: WorkerResponse): void {
     port.postMessage(response);
 }
 
 function encoderFor(spec: EncoderSpec): Encoder {
-    // resolveEncoder falls back to the spec's own heuristic when the asset is
-    // absent: not downloaded yet, so an estimate now beats an error, and the
-    // host re-counts once the download lands.
-    return isDownloadable(spec)
-        ? resolveEncoder(spec, loaded.get(spec.repo))
-        : resolveEncoder(spec);
+    const downloaded = isDownloadable(spec) ? loaded.get(spec.repo) : undefined;
+    // Without one, resolveEncoder falls back to the spec's own heuristic: not
+    // downloaded yet, so an estimate now beats an error, and the host
+    // re-counts once the download lands.
+    return downloaded?.kind === spec.kind ? downloaded : resolveEncoder(spec);
 }
 
 function handle(request: WorkerRequest): void {
@@ -55,19 +59,17 @@ function handle(request: WorkerRequest): void {
         }
 
         case 'loadTokenizer': {
-            // Built now so the cost lands here rather than inside the first
-            // count, and so a malformed vocabulary is reported as a failed load
-            // rather than a failed count.
-            if (request.asset.kind === 'hf') {
-                hfEncoder(request.repo, request.asset);
-            } else {
-                tiktokenModelEncoder(request.repo, request.asset);
-            }
+            // Parsed and built now, so the cost lands here rather than inside
+            // the first count, and so a malformed vocabulary is reported as a
+            // failed load rather than a failed count.
+            const encoder = request.asset.kind === 'hf'
+                ? hfEncoder(request.repo, request.asset)
+                : tiktokenModelEncoder(request.repo, request.asset);
             // Recorded only once it builds. Recording it first meant a
             // vocabulary that failed to build stayed in the map, so every
             // later count re-entered the same failing constructor and threw
             // instead of falling back to the model's estimate.
-            loaded.set(request.repo, request.asset);
+            loaded.set(request.repo, encoder);
             reply({ type: 'ack', id: request.id });
             break;
         }

@@ -28,7 +28,7 @@ const worker = new Worker(workerFile);
 worker.on('message', message => {
     if (message.type === 'progress') return;
     if (message.id === 1) {
-        console.log(JSON.stringify({ type: message.type, read: message.summary ? message.summary.read : null }));
+        console.log(JSON.stringify({ type: message.type, failure: message.failure, errorName: message.errorName, read: message.summary ? message.summary.read : null }));
         worker.postMessage({ type: 'close', id: 2 });
     } else {
         void worker.terminate();
@@ -71,7 +71,8 @@ suite('Claude Code usage, two processes on one history', () => {
     });
 
     teardown(() => {
-        fs.rmSync(tmp, { recursive: true, force: true });
+        // Windows lets a folder go only once nothing in it is open.
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     });
 
     test('two windows importing into an empty folder at once share one history, with the fixture totals', async function () {

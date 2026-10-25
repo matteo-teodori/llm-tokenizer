@@ -12,7 +12,14 @@
  * imports queued ahead of it, which stop at their next file. A query only
  * reads, so it is answered at once, between an import's files, rather than
  * after the whole import; meanwhile it reads the history the import writes,
- * even when another window has started a new one.
+ * even when another window has started a new one, and says how far the
+ * import has gone.
+ *
+ * A look at a running session first imports that session's transcript, so
+ * it waits its turn too, except behind a full pass: that is a first import's
+ * half a minute, and the pass reads the session's file anyway. Then the look
+ * only reads what is stored, at once, as a query does, and the status item
+ * looks again when the pass is done.
  */
 
 import * as fs from 'fs';
@@ -23,10 +30,17 @@ import { isTimeZone } from './usage/aggregate';
 import { importUnderLease } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS, rangeUntil } from './usage/report';
-import { PARSER_VERSION, sessionTranscripts } from './usage/transcripts';
-import { HistoryFileError, createHistory, publishHistory, removeHistory, removeLeftovers, resolveHistory, type Pointer } from './usage/historyFiles';
+import { PARSER_VERSION, sessionTranscripts, walkProjects } from './usage/transcripts';
+import { HistoryFileError, claimFound, createHistory, publishHistory, removeHistory, removeLeftovers, resolveHistory, type Pointer } from './usage/historyFiles';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
-import { SESSION_ID, type UsageFailure, type UsageWorkerRequest, type UsageWorkerResponse } from './usage/protocol';
+import {
+    SESSION_ID,
+    type ImportProgress,
+    type SqliteResult,
+    type UsageFailure,
+    type UsageWorkerRequest,
+    type UsageWorkerResponse,
+} from './usage/protocol';
 
 if (!parentPort) {
     throw new Error('usageWorker.ts must be run as a worker thread');
@@ -70,6 +84,31 @@ let opened: Opened | undefined;
 let holding = 0;
 /** A corrupt history this worker set aside, until an answer has said so. */
 let recovered: string | undefined;
+
+/** The import under way, for a report read meanwhile: how far it has gone. */
+interface Pass {
+    roots: string[];
+    paths: readonly string[] | undefined;
+    /** Files gone through so far. */
+    files: number;
+    /** Files it has to go through: a named pass's from the start, a full one's once a report asked. */
+    of: number | undefined;
+}
+
+let pass: Pass | undefined;
+
+/**
+ * How far `current` has gone, with how many files it has when `total`: for
+ * a full pass, that takes a walk of every root (24 ms for 3,880 transcripts,
+ * 75 ms cold), done once a pass, and only for a page that shows it.
+ */
+function progressOf(current: Pass, total: boolean): ImportProgress {
+    if (total && current.of === undefined) {
+        current.of = current.roots.reduce((n, root) => n + walkProjects(root).files.length, 0);
+    }
+    // A transcript Claude Code started since the walk can take the pass past it.
+    return current.of === undefined ? { files: current.files } : { files: current.files, of: Math.max(current.of, current.files) };
+}
 
 /** The name of the history set aside, once. */
 function takeRecovered(): { recovered?: string } {
@@ -130,6 +169,12 @@ function storeAt(storeFile: string): OpenResult {
         }
         throw error;
     }
+    try {
+        history = claimFound(folder, history);
+    } catch {
+        // Not published, so not opened: another window may be about to delete it.
+        return { status: 'failed', category: 'io' };
+    }
     if (opened && (opened.folder !== folder || opened.file !== history.file || identityOf(opened.file) !== opened.identity)) {
         closeOpened();
     }
@@ -167,6 +212,8 @@ function openHistory(folder: string, file: string | undefined, pointer: Pointer)
     }
     const result = UsageStore.open(sqlite, started, storeOptions);
     let used: string | undefined;
+    /** Whether `started` may be removed: only once the pointer is known not to name it. */
+    let unnamed = true;
     if (result.status === 'ready') {
         if (corrupt) {
             // Named before it is published: every window that follows the pointer is told.
@@ -175,7 +222,11 @@ function openHistory(folder: string, file: string | undefined, pointer: Pointer)
         try {
             used = publishHistory(folder, started, pointer);
         } catch {
-            used = undefined;
+            // Published or not is what the history in use is now, not what
+            // threw: on Windows a step after the pointer is replaced can fail.
+            const now = inUseNow(folder);
+            used = now.known && now.file === started ? started : undefined;
+            unnamed = now.known && now.file !== started;
         }
     }
     if (used === started && result.status === 'ready') {
@@ -186,7 +237,9 @@ function openHistory(folder: string, file: string | undefined, pointer: Pointer)
     if (result.status === 'ready' || result.status === 'read-only') {
         result.store.close();
     }
-    removeHistory(started);
+    if (unnamed) {
+        removeHistory(started);
+    }
     if (used === undefined) {
         return { folder, file: started, result: { status: 'failed', category: result.status === 'failed' ? result.category : 'io' }, identity: undefined };
     }
@@ -197,6 +250,15 @@ function openHistory(folder: string, file: string | undefined, pointer: Pointer)
         recovered = corrupt;
     }
     return { folder, file: used, result: theirs, identity: identityOf(used) };
+}
+
+/** The history in use in `folder` now, when that can be told. */
+function inUseNow(folder: string): { known: true; file: string | undefined } | { known: false } {
+    try {
+        return { known: true, file: resolveHistory(folder).file };
+    } catch {
+        return { known: false };
+    }
 }
 
 /** Name the corrupt history set aside in `store`. Only a notice: a store too busy to take it is used all the same. */
@@ -244,7 +306,8 @@ function failure(result: OpenResult): UsageFailure {
     }
 }
 
-async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): Promise<void> {
+/** `storedOnly`: a look behind a full pass, which reads what is stored and imports nothing. */
+async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, storedOnly = false): Promise<void> {
     if (request.type === 'close') {
         closeOpened();
         reply({ type: 'closed', id: request.id });
@@ -296,7 +359,14 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 now: Date.now(),
                 platform: process.platform,
             });
-            reply({ type: 'report', id: request.id, report, aside: store.setAside(), ...takeRecovered() });
+            reply({
+                type: 'report',
+                id: request.id,
+                report,
+                aside: store.setAside(),
+                ...(pass ? { reading: progressOf(pass, request.progress === true) } : {}),
+                ...takeRecovered(),
+            });
             return;
         }
         case 'import': {
@@ -309,9 +379,30 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 reply({ type: 'failed', id: request.id, failure: 'outdated', errorName: 'StoreError' });
                 return;
             }
-            const summary = await holdingStore(() =>
-                importUnderLease(store, request.roots, holderOf(request), { isCancelled, countCrashes: request.crashed === true, progress: beat }, paths),
-            );
+            const current: Pass = { roots: request.roots, paths, files: 0, of: paths?.length };
+            pass = current;
+            let summary: Awaited<ReturnType<typeof importUnderLease>>;
+            try {
+                summary = await holdingStore(() =>
+                    importUnderLease(
+                        store,
+                        request.roots,
+                        holderOf(request),
+                        {
+                            // The importer asks this once before each file: the count is how far it has gone.
+                            isCancelled: () => {
+                                current.files++;
+                                return isCancelled();
+                            },
+                            countCrashes: request.crashed === true,
+                            progress: beat,
+                        },
+                        paths,
+                    ),
+                );
+            } finally {
+                pass = undefined;
+            }
             reply(
                 summary
                     ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false, ...takeRecovered() }
@@ -324,7 +415,8 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean): 
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
             }
-            const paths = request.roots.flatMap(root => sessionTranscripts(root, request.sessionId));
+            // Behind a full pass, the pass reads the session's file: see the module comment.
+            const paths = storedOnly ? [] : request.roots.flatMap(root => sessionTranscripts(root, request.sessionId));
             // A read-only history is read as it is.
             if (paths.length > 0 && result.status === 'ready' && !store.outdated(PARSER_VERSION)) {
                 // Null when another window holds the lease: what is stored is read all the same.
@@ -362,28 +454,64 @@ async function holdingStore<T>(work: () => Promise<T>): Promise<T> {
     }
 }
 
+/** SQLite's primary results for a database another connection holds: they clear once it lets go. */
+const SQLITE_BUSY = 5;
+const SQLITE_LOCKED = 6;
+
+/**
+ * What a request that threw comes to. The error's name only, never its
+ * message: from anything that touched a record, that could quote its bytes.
+ * From SQLite, its result code and SQLite's own text for the code too.
+ */
+function failedOf(request: UsageWorkerRequest, error: unknown): UsageWorkerResponse {
+    const sqlite = sqliteResult(error);
+    const primary = sqlite === undefined ? undefined : sqlite.code & 0xff;
+    return {
+        type: 'failed',
+        id: request.id,
+        // Another window's write, or a checkpoint: busy, not broken.
+        failure: primary === SQLITE_BUSY || primary === SQLITE_LOCKED ? 'store-busy' : request.type === 'import' ? 'import-failed' : 'unknown',
+        errorName: error instanceof Error ? error.name : 'Error',
+        ...(sqlite ? { sqlite } : {}),
+    };
+}
+
+/** node:sqlite's `errcode` and `errstr` (sqlite3_errstr's text for that code) of an error SQLite raised. */
+function sqliteResult(error: unknown): SqliteResult | undefined {
+    const { errcode, errstr } = (error ?? {}) as { errcode?: unknown; errstr?: unknown };
+    if (typeof errcode !== 'number' || !Number.isInteger(errcode)) {
+        return undefined;
+    }
+    // SQLite's texts are a few words, with at most the slash of "disk I/O error": anything else is not one.
+    return typeof errstr === 'string' && /^[A-Za-z][A-Za-z /]{0,63}$/.test(errstr) ? { code: errcode, text: errstr } : { code: errcode };
+}
+
 let queue = Promise.resolve();
 let received = 0;
 /** Imports received before this one are cancelled. */
 let cancelBefore = 0;
+/** Full passes received and not yet answered: behind one, a look reads only what is stored. */
+let fullPasses = 0;
 
 port.on('message', (request: UsageWorkerRequest) => {
     const sequence = ++received;
     if (request.type === 'clear' || request.type === 'close') {
         cancelBefore = sequence;
     }
+    const full = request.type === 'import' && request.paths === undefined;
+    if (full) {
+        fullPasses++;
+    }
+    const storedOnly = request.type === 'liveContext' && fullPasses > 0;
     const run = () =>
-        handle(request, () => sequence < cancelBefore).catch((error: unknown) => {
-            // The name only: a message from anything that touched a record
-            // could quote its bytes.
-            reply({
-                type: 'failed',
-                id: request.id,
-                failure: request.type === 'import' ? 'import-failed' : 'unknown',
-                errorName: error instanceof Error ? error.name : 'Error',
+        handle(request, () => sequence < cancelBefore, storedOnly)
+            .catch((error: unknown) => reply(failedOf(request, error)))
+            .finally(() => {
+                if (full) {
+                    fullPasses--;
+                }
             });
-        });
-    if (request.type === 'query') {
+    if (request.type === 'query' || storedOnly) {
         void run();
     } else {
         queue = queue.then(run);

@@ -11,12 +11,12 @@
  */
 
 /**
- * tiktoken encodings we ship. Keep in sync with `TiktokenEncoding`.
- *
- * `p50k_base` and `r50k_base` are excluded: no model in the 2026 registry uses
- * them, and they would add ~400 KB gzipped to the VSIX for nothing.
+ * tiktoken encodings we ship. Keep in sync with `TiktokenEncoding`, which
+ * says why it is only the ones a model in the registry uses: the integration
+ * suite fails on an encoding the registry names that is not built, and on one
+ * built that no model names.
  */
-export const ENCODINGS = ['o200k_harmony', 'o200k_base', 'cl100k_base'];
+export const ENCODINGS = ['o200k_base'];
 
 /** esbuild options for each shipped bundle, before build.mjs's shared ones. */
 export const SHIPPED_BUNDLES = [

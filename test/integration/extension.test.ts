@@ -3,13 +3,15 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { Worker } from 'worker_threads';
 import * as vscode from 'vscode';
 
 import { logoIcon } from '../../src/logo';
 import { showMultiFileSummary, type MultiFileSummaryConfig } from '../../src/webview';
 import { downloadsAllowed, resolveInitialModel, settingsChangeEffects } from '../../src/extension';
-import { STORAGE_KEY } from '../../src/constants';
-import { MODEL_ALIASES } from '../../src/tokenizer/registry';
+import { DEBOUNCE_DELAY_MS, PROJECT_UPDATE_DELAY_MS, STORAGE_KEY } from '../../src/constants';
+import { accuracyOf } from '../../src/tokenizer/encoders';
+import { MODELS, MODEL_ALIASES, type ModelInfo } from '../../src/tokenizer/registry';
 
 const EXTENSION_ID = 'matteoteodori.llm-tokenizer';
 const CONFIG = 'llm-tokenizer';
@@ -25,6 +27,163 @@ function recordingChannel(lines: string[] = []): vscode.LogOutputChannel {
         lines.push(message);
     };
     return { trace: record, debug: record, info: record, warn: record, error: record } as unknown as vscode.LogOutputChannel;
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** Waits for `condition`, failing with `what` when it has not held within ten seconds. */
+async function until(condition: () => boolean, what: string): Promise<void> {
+    const started = Date.now();
+    while (!condition()) {
+        assert.ok(Date.now() - started < 10_000, `timed out waiting for ${what}`);
+        await sleep(25);
+    }
+}
+
+/**
+ * The count requests the tokenizer worker is sent, and a way to hold them.
+ *
+ * Nothing in the API says what the activated extension asks its worker, but
+ * the worker is a thread of this process, so the prototype's postMessage sees
+ * every request. A held request reaches the worker only on `release`, which
+ * lets a test act while a count is in flight.
+ */
+function spyOnCounts(options: { hold?: boolean } = {}) {
+    const original = Object.getOwnPropertyDescriptor(Worker.prototype, 'postMessage');
+    assert.ok(original, 'Worker.prototype.postMessage is not where this spy expects it');
+    const post = original.value as (this: Worker, message: unknown, transfer?: unknown) => void;
+    const requests: { text: string; spec: string }[] = [];
+    let held: (() => void)[] | undefined = options.hold ? [] : undefined;
+
+    Object.defineProperty(Worker.prototype, 'postMessage', {
+        ...original,
+        value(this: Worker, message: unknown, transfer?: unknown): void {
+            const request = message as { type?: unknown; text?: unknown; spec?: unknown } | null;
+            if (request?.type === 'count' && typeof request.text === 'string') {
+                requests.push({ text: request.text, spec: JSON.stringify(request.spec) });
+                if (held) {
+                    held.push(() => post.call(this, message, transfer));
+                    return;
+                }
+            }
+            post.call(this, message, transfer);
+        },
+    });
+
+    const release = (): void => {
+        const waiting = held ?? [];
+        held = undefined;
+        waiting.forEach(send => send());
+    };
+    return {
+        requests,
+        /** How many times `text` was sent, by any model. */
+        times: (text: string) => requests.filter(r => r.text === text).length,
+        /** Let every held request through, and hold no more. */
+        release,
+        restore(): void {
+            release();
+            Object.defineProperty(Worker.prototype, 'postMessage', original);
+        },
+    };
+}
+
+/**
+ * What the activated extension's status bar items are told, as "show <id>" or
+ * "hide <id>".
+ *
+ * Nothing in the API reads an item back, but the items share one prototype,
+ * so a probe of our own reaches the show and hide that the extension's call.
+ */
+function spyOnStatusItems() {
+    const probe = vscode.window.createStatusBarItem('llm-tokenizer.test-probe');
+    const prototype = Object.getPrototypeOf(probe) as Record<'show' | 'hide', (this: vscode.StatusBarItem) => void>;
+    probe.dispose();
+    const original = { show: prototype.show, hide: prototype.hide };
+    const events: string[] = [];
+    for (const name of ['show', 'hide'] as const) {
+        prototype[name] = function (this: vscode.StatusBarItem): void {
+            events.push(`${name} ${this.id}`);
+            original[name].call(this);
+        };
+    }
+    return {
+        events,
+        restore(): void {
+            prototype.show = original.show;
+            prototype.hide = original.hide;
+        },
+    };
+}
+
+/** The information notices shown until `restore`. */
+function captureNotices() {
+    const window = vscode.window as unknown as { showInformationMessage: unknown };
+    const original = window.showInformationMessage;
+    const notices: string[] = [];
+    window.showInformationMessage = (message: string) => (notices.push(message), Promise.resolve(undefined));
+    return {
+        notices,
+        restore: () => {
+            window.showInformationMessage = original;
+        },
+    };
+}
+
+/**
+ * Remove a folder `openFile` wrote to. Windows refuses to delete it while the
+ * editor still watches a file it had open, for a moment after the editors
+ * close.
+ */
+function removeOpened(dir: string): void {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+}
+
+/** A file written to `dir` and opened. */
+async function openFile(dir: string, name: string, text: string): Promise<vscode.TextDocument> {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, text);
+    return vscode.workspace.openTextDocument(vscode.Uri.file(file));
+}
+
+/** The model the extension counts with now: the one Count Tokens names for `document`. */
+async function countingWith(document: vscode.TextDocument): Promise<ModelInfo> {
+    await vscode.window.showTextDocument(document, { preview: false });
+    const { notices, restore } = captureNotices();
+    try {
+        await vscode.commands.executeCommand('llm-tokenizer.countTokens');
+    } finally {
+        restore();
+    }
+    const notice = notices.at(-1) ?? '';
+    const model = MODELS.find(m => notice.endsWith(`(${m.label})`));
+    assert.ok(model, `no model is named in "${notice}"`);
+    return model;
+}
+
+/** A model to switch to: estimated, so nothing is downloaded, and named unlike `from`. */
+function otherThan(from: ModelInfo): ModelInfo {
+    const model = MODELS.find(m => accuracyOf(m.encoder) === 'estimated' && m.label !== from.label);
+    assert.ok(model);
+    return model;
+}
+
+/**
+ * Whether the `defaultModel` setting moves the model the extension counts
+ * with, as it does for someone who has never picked one from the status bar.
+ * A test profile in which one was picked ignores the setting.
+ */
+async function settingMovesModel(probe: vscode.TextDocument, to: ModelInfo): Promise<boolean> {
+    const config = vscode.workspace.getConfiguration(CONFIG);
+    const original = config.inspect<string>('defaultModel')?.globalValue;
+    try {
+        await config.update('defaultModel', to.id, vscode.ConfigurationTarget.Global);
+        return (await countingWith(probe)).id === to.id;
+    } finally {
+        await config.update('defaultModel', original, vscode.ConfigurationTarget.Global);
+    }
 }
 
 suite('extension', () => {
@@ -277,11 +436,17 @@ suite('extension', () => {
             }
         }
         // The usage panel is one click from any editor's title, the panel's
-        // own included, while the feature is on: off, the button would be
-        // there for everyone, and say only that it is off.
+        // own included, for whoever has Claude Code's extension or the
+        // feature on: off, it opens the page that says what turning it on
+        // reads and keeps. Not for everyone, most of whom count tokens for
+        // other models.
         const title = manifest.contributes.menus['editor/title']?.find(item => item.command === 'llm-tokenizer.showClaudeCodeUsage');
         assert.ok(title?.group?.startsWith('navigation'), 'Show Claude Code Usage is not a button in the editor title');
-        assert.strictEqual(title?.when, 'config.llm-tokenizer.enableClaudeCodeUsage', 'the button shows while the feature is off, or hides somewhere while it is on');
+        assert.strictEqual(
+            title?.when,
+            'config.llm-tokenizer.enableClaudeCodeUsage || llm-tokenizer.claudeCodeInstalled',
+            "the button shows for everyone, or hides from someone with Claude Code's extension or the feature on",
+        );
         // The button and the tabs are one icon: the logo's T.
         const show = manifest.contributes.commands.find(c => c.command === 'llm-tokenizer.showClaudeCodeUsage');
         const tab = logoIcon(extension.extensionUri);
@@ -554,6 +719,169 @@ suite('extension', () => {
             );
         } finally {
             cancellation.dispose();
+        }
+    });
+
+    test('a cursor move, or a return to its tab, does not count an unchanged document again', async () => {
+        // Every cursor stop with no selection, and every switch back to a
+        // tab, sent the whole document to the worker again. Measured with
+        // Llama 3.3's tokenizer, that was half a second for a 1.9 MB file, and
+        // every count queued behind it waited.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-recount-'));
+        const counts = spyOnCounts();
+        try {
+            const a = await openFile(dir, 'a.ts', 'const a = 1;\n'.repeat(50));
+            const b = await openFile(dir, 'b.ts', 'const b = 2;\n'.repeat(50));
+            // Kept tabs, not previews: a preview is replaced by the next file
+            // opened, and its document closed, so coming back would open it
+            // again as a new document with nothing counted.
+            const editor = await vscode.window.showTextDocument(a, { preview: false });
+            await until(() => counts.times(a.getText()) > 0, 'the first count of a.ts');
+
+            for (let line = 1; line <= 3; line++) {
+                editor.selection = new vscode.Selection(line, 0, line, 0);
+                await sleep(DEBOUNCE_DELAY_MS * 2);
+            }
+            await vscode.window.showTextDocument(b, { preview: false });
+            await until(() => counts.times(b.getText()) > 0, 'the first count of b.ts');
+            const back = await vscode.window.showTextDocument(a, { preview: false });
+            await sleep(DEBOUNCE_DELAY_MS * 2);
+
+            assert.strictEqual(counts.times(a.getText()), 1, 'a.ts was counted again, unchanged');
+
+            // A selection is still counted as a selection, each time.
+            back.selection = new vscode.Selection(0, 0, 2, 0);
+            await until(() => counts.times(a.getText(back.selection)) > 0, 'the count of the selection');
+        } finally {
+            counts.restore();
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+            removeOpened(dir);
+        }
+    });
+
+    test('with the status bar showing the file count alone, nothing scans the workspace', async () => {
+        // In "file" mode the total is never shown, and the scan still ran at
+        // startup, after every save, and after every burst of changes on disk.
+        const workspace = vscode.workspace as unknown as { findFiles: (...args: unknown[]) => unknown };
+        const findFiles = workspace.findFiles;
+        let scans = 0;
+        workspace.findFiles = (...args: unknown[]) => {
+            scans++;
+            return findFiles.apply(vscode.workspace, args);
+        };
+        const config = vscode.workspace.getConfiguration(CONFIG);
+        const display = config.inspect<string>('statusBarDisplay')?.globalValue;
+        const gitignore = config.inspect<boolean>('ignoreGitignoredFiles')?.globalValue;
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        assert.ok(folder);
+        // Gitignored by the fixture's own rules, so one left behind by a run
+        // that failed changes no other test's count.
+        const written = path.join(folder.uri.fsPath, `written-outside-${process.pid}.tmp`);
+        try {
+            await config.update('statusBarDisplay', 'file', vscode.ConfigurationTarget.Global);
+            await sleep(500);
+            scans = 0;
+
+            // A setting that rescans, and a file written from outside the
+            // editor, which reaches the scan through the file watcher.
+            await config.update('ignoreGitignoredFiles', !(gitignore ?? true), vscode.ConfigurationTarget.Global);
+            fs.writeFileSync(written, 'written from outside the editor');
+            await sleep(PROJECT_UPDATE_DELAY_MS + 2_000);
+            assert.strictEqual(scans, 0, `the workspace was scanned ${scans} times for a total never shown`);
+
+            // Showing the total again scans for it.
+            await config.update('statusBarDisplay', 'both', vscode.ConfigurationTarget.Global);
+            await until(() => scans > 0, 'the scan once the total is shown again');
+        } finally {
+            workspace.findFiles = findFiles;
+            fs.rmSync(written, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+            await config.update('ignoreGitignoredFiles', gitignore, vscode.ConfigurationTarget.Global);
+            await config.update('statusBarDisplay', display, vscode.ConfigurationTarget.Global);
+        }
+    });
+
+    test('Count Tokens names the model it counted with, though the model changes while it counts', async function () {
+        // The label read the current model again once the count was in, so a
+        // switch meanwhile put one model's number under the other's name: up
+        // to 3 s for a 9 MB file with Llama 3.3's tokenizer.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-label-'));
+        const config = vscode.workspace.getConfiguration(CONFIG);
+        const original = config.inspect<string>('defaultModel')?.globalValue;
+        let counts: ReturnType<typeof spyOnCounts> | undefined;
+        let shown: ReturnType<typeof captureNotices> | undefined;
+        try {
+            const probe = await openFile(dir, 'probe.ts', 'const probe = 1;\n');
+            const before = await countingWith(probe);
+            const after = otherThan(before);
+            if (!(await settingMovesModel(probe, after))) {
+                this.skip();
+            }
+
+            // Every count is held from here, so Count Tokens' is still in
+            // flight when the model changes.
+            const held = await openFile(dir, 'held.ts', 'const held = 1;\n'.repeat(40));
+            counts = spyOnCounts({ hold: true });
+            shown = captureNotices();
+            await vscode.window.showTextDocument(held, { preview: false });
+            const counting = vscode.commands.executeCommand('llm-tokenizer.countTokens');
+            await until(() => counts !== undefined && counts.times(held.getText()) > 0, 'the count to be sent');
+
+            await config.update('defaultModel', after.id, vscode.ConfigurationTarget.Global);
+            const changed = JSON.stringify(after.encoder);
+            await until(
+                () => counts !== undefined && counts.requests.some(r => r.text === held.getText() && r.spec === changed),
+                'the status bar to count with the new model',
+            );
+            counts.release();
+            await counting;
+
+            const notice = shown.notices.find(n => n.startsWith('held.ts:'));
+            assert.ok(notice?.endsWith(`(${before.label})`), `"${notice}" does not name ${before.label}`);
+        } finally {
+            counts?.restore();
+            shown?.restore();
+            await config.update('defaultModel', original, vscode.ConfigurationTarget.Global);
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+            removeOpened(dir);
+        }
+    });
+
+    test("a defaultModel change takes the previous model's total off the bar at once", async function () {
+        // A pick from the status bar cleared it: a cold rescan takes seconds
+        // on a large repository, and meanwhile the old total stayed up under
+        // the new model's name, metered against the old model's limit. A
+        // change of the setting did not.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-total-'));
+        const config = vscode.workspace.getConfiguration(CONFIG);
+        const original = config.inspect<string>('defaultModel')?.globalValue;
+        const gitignore = config.inspect<boolean>('ignoreGitignoredFiles')?.globalValue;
+        const items = spyOnStatusItems();
+        const project = () => items.events.filter(e => e.endsWith(' llm-tokenizer.project'));
+        try {
+            const probe = await openFile(dir, 'probe.ts', 'const probe = 1;\n');
+            const after = otherThan(await countingWith(probe));
+            if (!(await settingMovesModel(probe, after))) {
+                this.skip();
+            }
+
+            // A total on the bar first: a rescan puts one there. The fixture
+            // takes milliseconds to scan; the pause lets it settle.
+            await config.update('ignoreGitignoredFiles', !(gitignore ?? true), vscode.ConfigurationTarget.Global);
+            await config.update('ignoreGitignoredFiles', gitignore, vscode.ConfigurationTarget.Global);
+            await until(() => project().includes('show llm-tokenizer.project'), 'a total on the bar');
+            await sleep(1_000);
+
+            // Until the new model's total is up, the old one must not be:
+            // while it stayed, nothing ever hid the item.
+            items.events.length = 0;
+            await config.update('defaultModel', after.id, vscode.ConfigurationTarget.Global);
+            await until(() => project().includes('show llm-tokenizer.project'), "the new model's total");
+            assert.ok(project().includes('hide llm-tokenizer.project'), `the old total stayed up: ${project().join(', ')}`);
+        } finally {
+            items.restore();
+            await config.update('defaultModel', original, vscode.ConfigurationTarget.Global);
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+            removeOpened(dir);
         }
     });
 });

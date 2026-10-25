@@ -404,7 +404,10 @@ function settleGuard(store: UsageStore, guard: ReadGuard, writeIfCurrent: (work:
 /** One file's rows, sightings and checkpoint. Runs inside the batch's transaction. */
 function write(store: UsageStore, file: TranscriptFile, result: ReadResult, previous: FileCheckpoint | undefined): void {
     // A newer parser re-reads the file whole: its old rows go first, so a
-    // change of key cannot leave doubles behind.
+    // change of key cannot leave doubles behind. Only when the file still
+    // holds every line they came from, which is when the reader says
+    // `parser`: the rows of lines Claude Code has since removed are kept,
+    // each replaced only where the newer parser reads its request again.
     if (result.restarted === 'parser') {
         store.deleteRequestsFromFile(PROVIDER, file.path);
     }

@@ -1,11 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { promises as fs } from 'fs';
 
 import { TokenizerService } from './tokenizer/tokenizerService';
 import { TokenizerStore } from './tokenizer/tokenizerStore';
 import { findModel, defaultModel, MODELS, MODEL_ALIASES, type ModelInfo } from './tokenizer/registry';
-import { StatusBarManager } from './statusbar';
+import { StatusBarManager, displayMode } from './statusbar';
 import { showMultiFileSummary } from './webview';
 import { formatNumber } from './utils';
 import {
@@ -18,6 +17,7 @@ import {
 import {
     FolderContext,
     buildExcludeGlob,
+    claimFile,
     couldAffectCount,
     dedupeSelection,
     describeSkipReason,
@@ -28,7 +28,7 @@ import {
     type SkipReason,
 } from './scan';
 import { accuracyOf, isDownloadable } from './tokenizer/encoders';
-import { CountCache, isBinaryOutcome } from './countCache';
+import { CountCache, DocumentCounts, isBinaryOutcome, type CachedCount } from './countCache';
 import { registerClaudeCodeUsage } from './usage/onDemand';
 import { affectsUsage } from './usage/settings';
 import type { ModelQuickPickItem, ProcessedFile, SkippedFile, IgnoredFile } from './types';
@@ -72,6 +72,9 @@ let fileCountGeneration = 0;
 /** Per-file counts, keyed by model and file revision. See src/countCache.ts. */
 const countCache = new CountCache();
 
+/** The open documents' whole-text counts, which the status bar shows. See src/countCache.ts. */
+const documentCounts = new DocumentCounts((text, model) => tokenizer.count(text, model));
+
 /**
  * Incremented whenever a scan is superseded or cancelled.
  *
@@ -87,10 +90,13 @@ let scanGeneration = 0;
  *
  * The two have to happen together. Clearing the cache alone left a running
  * scan writing results computed under the previous model or gitignore setting
- * into the cache that was just emptied.
+ * into the cache that was just emptied. The open documents' counts go with it,
+ * for the same reasons: a vocabulary downloaded or deleted changes the answer
+ * for an unchanged document too.
  */
 function invalidateCounts(): void {
     countCache.clear();
+    documentCounts.clear();
     scanGeneration++;
 }
 
@@ -116,7 +122,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
     void refreshFileStatusBar(vscode.window.activeTextEditor);
     const startupScan = refreshProjectCount();
-    // Off, this registers its three commands and a settings listener, nothing more.
+    // Off, this registers its three commands, a settings listener and the
+    // context key that shows the editor title's T, nothing more.
     registerClaudeCodeUsage(context, log, startupScan);
 
     // If the startup model needs a tokenizer and the user has opted into
@@ -139,8 +146,7 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
     clearTimeout(statusBarTimer);
     cancelProjectScan();
-    scanGeneration++;
-    countCache.clear();
+    invalidateCounts();
 }
 
 /**
@@ -525,7 +531,12 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
                 const model = configured ? findModel(configured) : undefined;
                 if (model && model.id !== currentModel.id) {
                     currentModel = model;
+                    // Cleared as well as invalidated, as setModel does: until
+                    // the rescan below finished, the bar kept the previous
+                    // model's total, metered against its limit, under the new
+                    // model's name.
                     invalidateCounts();
+                    statusBar.clearProjectCount();
                     log.info(`Default model changed to ${model.id}`);
                     void refreshFileStatusBar(vscode.window.activeTextEditor);
                     void ensureExactTokenizer(model, false);
@@ -534,7 +545,7 @@ function registerEventListeners(context: vscode.ExtensionContext): void {
 
             statusBar.applyDisplayMode(isProjectScanEnabled());
 
-            if (isProjectScanEnabled()) {
+            if (isProjectTotalWanted()) {
                 void refreshProjectCount();
             } else {
                 // Stop the in-flight scan; otherwise it completes minutes later
@@ -633,6 +644,19 @@ function isProjectScanEnabled(): boolean {
     return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('enableProjectScan', true);
 }
 
+/**
+ * Whether the workspace total is wanted: scanning is on, and the status bar
+ * shows the total.
+ *
+ * With `statusBarDisplay` set to "file" the total is never shown, and the
+ * scan still ran at startup, after every save and after every burst of changes
+ * on disk, for a number nobody saw. Setting it back rescans, as any change to
+ * it does.
+ */
+function isProjectTotalWanted(): boolean {
+    return isProjectScanEnabled() && displayMode() !== 'file';
+}
+
 function respectGitignore(): boolean {
     return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('ignoreGitignoredFiles', true);
 }
@@ -645,7 +669,6 @@ async function refreshFileStatusBar(editor: vscode.TextEditor | undefined): Prom
 
     const document = editor.document;
     const hasSelection = !editor.selection.isEmpty;
-    const text = hasSelection ? document.getText(editor.selection) : document.getText();
 
     // Snapshotted for the whole operation, as countSelection already does. Read
     // twice — once to count, once to display — a model switch mid-count rendered
@@ -654,7 +677,12 @@ async function refreshFileStatusBar(editor: vscode.TextEditor | undefined): Prom
     const model = currentModel;
     const generation = ++fileCountGeneration;
 
-    const { count, exact } = await tokenizer.count(text, model);
+    // This runs at every cursor stop and every switch of tab. A selection is
+    // counted each time; the whole document only when its text or the model
+    // has changed since it was last counted.
+    const { count, exact } = hasSelection
+        ? await tokenizer.count(document.getText(editor.selection), model)
+        : await documentCounts.count(document, model);
 
     // The editor may have changed while we were counting; writing the result
     // now would show file A's count while file B is on screen. The generation
@@ -680,13 +708,19 @@ async function countActiveEditor(): Promise<void> {
         return;
     }
 
+    const document = editor.document;
     const hasSelection = !editor.selection.isEmpty;
-    const text = hasSelection ? editor.document.getText(editor.selection) : editor.document.getText();
-    const { count, exact } = await tokenizer.count(text, currentModel);
+    // Snapshotted, as in refreshFileStatusBar. Read again for the label once
+    // the count was in, a model switch while it ran put one model's number
+    // under the other's name.
+    const model = currentModel;
+    const { count, exact } = hasSelection
+        ? await tokenizer.count(document.getText(editor.selection), model)
+        : await documentCounts.count(document, model);
 
-    const what = hasSelection ? 'Selection' : path.basename(editor.document.uri.fsPath);
+    const what = hasSelection ? 'Selection' : path.basename(document.uri.fsPath);
     void vscode.window.showInformationMessage(
-        `${what}: ${exact ? '' : '≈'}${formatNumber(count)} tokens (${currentModel.label})`,
+        `${what}: ${exact ? '' : '≈'}${formatNumber(count)} tokens (${model.label})`,
     );
 }
 
@@ -699,28 +733,68 @@ interface ScanResult {
 }
 
 /** A successful count, or the reason the file was not counted. */
-type FileOutcome = { count: number; exact: boolean } | { skip: SkipReason };
+export type FileOutcome = CachedCount | { skip: SkipReason };
 
-function isCounted(outcome: FileOutcome): outcome is { count: number; exact: boolean } {
+function isCounted(outcome: FileOutcome): outcome is CachedCount {
     return 'count' in outcome;
+}
+
+/** What `countFile` counts with, and where it keeps what it counted. */
+export interface FileCounting {
+    count(text: string, model: ModelInfo): Promise<CachedCount>;
+    cache: CountCache;
+    debug(message: string): void;
+}
+
+/** The extension host's own: its tokenizer worker and its cache. */
+const hostCounting: FileCounting = {
+    count: (text, model) => tokenizer.count(text, model),
+    cache: countCache,
+    debug: message => log.debug(message),
+};
+
+/**
+ * A file's stat, or undefined when it cannot be read — deleted since it was
+ * listed, say.
+ */
+async function statFile(uri: vscode.Uri): Promise<vscode.FileStat | undefined> {
+    try {
+        return await vscode.workspace.fs.stat(uri);
+    } catch (error) {
+        log.debug(`Skipping ${uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+    }
 }
 
 /**
  * Count one file, caching the result.
  *
+ * `stat` is the caller's, taken just before. The project scan took two of
+ * every file, one to check its size and another in here.
+ *
+ * `exactNow` is whether `model` can be counted exactly at the moment, as
+ * `TokenizerService.isExact` says, asked once per scan or command rather than
+ * per file: for a downloadable model it can cost a read. It decides whether an
+ * estimate may be cached; see below.
+ *
  * `stillValid` guards the cache write. A scan that has been superseded — by a
  * model change, or by the gitignore setting flipping — would otherwise keep
  * writing results computed under the old settings into the cache the new scan
  * had just cleared, poisoning it.
+ *
+ * Exported so it can be tested directly. `using` is defaulted rather than read
+ * from the module, as `resolveInitialModel`'s channel is: a test is a second
+ * instance of this module, whose tokenizer was never started.
  */
-async function countFile(
+export async function countFile(
     uri: vscode.Uri,
-    size: number,
+    stat: vscode.FileStat,
     model: ModelInfo,
+    exactNow: boolean,
     stillValid: () => boolean = () => true,
+    using: FileCounting = hostCounting,
 ): Promise<FileOutcome> {
     try {
-        const stat = await vscode.workspace.fs.stat(uri);
         // A regular file, or a link to one: a device or a FIFO reports size 0
         // and would be read without end.
         if (!(stat.type & vscode.FileType.File)) {
@@ -729,7 +803,7 @@ async function countFile(
         if (stat.size > MAX_TOKENIZED_FILE_BYTES) {
             return { skip: 'too-large' };
         }
-        const cached = countCache.get(model.id, uri, stat.mtime);
+        const cached = using.cache.get(model.id, uri, stat.mtime);
         if (cached) {
             return isBinaryOutcome(cached) ? { skip: 'binary' } : cached;
         }
@@ -743,29 +817,33 @@ async function countFile(
             // Cached under the same key as a count. The verdict cost a full read
             // and the answer cannot change without the mtime changing.
             if (stillValid()) {
-                countCache.set(model.id, uri, stat.mtime, { binary: true });
+                using.cache.set(model.id, uri, stat.mtime, { binary: true });
             }
             return { skip: 'binary' };
         }
 
         const text = new TextDecoder().decode(bytes);
-        const { count, exact } = await tokenizer.count(text, model);
+        const { count, exact } = await using.count(text, model);
 
         // A non-exact result is only cacheable when the estimate *is* this
-        // model's answer. For every other kind it means the count degraded — the
-        // worker crashed, timed out, or errored — and caching that pins the file
-        // to a guess. A downloadable model recovers when the download fires
-        // `onDidChangeAccuracy`, but a bundled tiktoken model emits no such
-        // event, so the wrong number would survive for the rest of the session.
-        // Recomputing an estimate costs one division, so nothing is lost.
-        const cacheable = exact || accuracyOf(model.encoder) === 'estimated';
+        // model's answer: when the model cannot be counted exactly at the
+        // moment, because its provider publishes no tokenizer, or because its
+        // vocabulary is not on disk — downloads turned off, offline, a proxy in
+        // the way. A vocabulary that arrives fires `onDidChangeAccuracy`, which
+        // empties the cache. Otherwise the estimate means the count degraded —
+        // the worker crashed, timed out, or errored — and caching that pins the
+        // file to a guess: a bundled tiktoken model emits no event to clear it,
+        // so the wrong number would survive for the rest of the session. This
+        // used to cache only a heuristic model's estimates, so a downloadable
+        // model without its vocabulary cached nothing, and every rescan read
+        // every file again and sent it to the worker to divide its length.
+        const cacheable = exact || !exactNow;
         if (stillValid() && cacheable) {
-            countCache.set(model.id, uri, stat.mtime, { count, exact });
+            using.cache.set(model.id, uri, stat.mtime, { count, exact });
         }
         return { count, exact };
     } catch (error) {
-        log.debug(`Skipping ${uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
-        void size;
+        using.debug(`Skipping ${uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
         return { skip: 'unreadable' };
     }
 }
@@ -776,6 +854,7 @@ async function recordFile(
     context: FolderContext,
     result: ScanResult,
     model: ModelInfo,
+    exactNow: boolean,
 ): Promise<void> {
     const skip: SkipReason | undefined = shouldCount(uri, size, context);
     if (skip === 'gitignored') {
@@ -787,7 +866,10 @@ async function recordFile(
         return;
     }
 
-    const outcome = await countFile(uri, size, model);
+    // A stat of its own rather than discovery's: on a large folder that one can
+    // be minutes old by the time the count reaches this file.
+    const stat = await statFile(uri);
+    const outcome: FileOutcome = stat ? await countFile(uri, stat, model, exactNow) : { skip: 'unreadable' };
     if (!isCounted(outcome)) {
         result.skipped.push({ path: uri.fsPath, reason: describeSkipReason(outcome.skip) });
         return;
@@ -801,7 +883,7 @@ async function recordFile(
 /** Count an open document's current text, saved or not. */
 async function countOpenDocument(document: vscode.TextDocument): Promise<void> {
     const model = currentModel;
-    const { count, exact } = await tokenizer.count(document.getText(), model);
+    const { count, exact } = await documentCounts.count(document, model);
     const name = document.isUntitled
         ? 'Untitled'
         : path.basename(document.uri.fsPath);
@@ -811,8 +893,8 @@ async function countOpenDocument(document: vscode.TextDocument): Promise<void> {
     );
 }
 
-/** Count one file and report it as a notification. */
-async function countSingleFile(uri: vscode.Uri, size: number): Promise<void> {
+/** Count one file and report it as a notification; `stat` is the caller's, taken just before. */
+async function countSingleFile(uri: vscode.Uri, stat: vscode.FileStat): Promise<void> {
     const name = path.basename(uri.fsPath);
     const model = currentModel;
     const folder = vscode.workspace.getWorkspaceFolder(uri);
@@ -820,7 +902,7 @@ async function countSingleFile(uri: vscode.Uri, size: number): Promise<void> {
         ? await FolderContext.create(folder, respectGitignore())
         : FolderContext.none(uri);
 
-    const skip = shouldCount(uri, size, context);
+    const skip = shouldCount(uri, stat.size, context);
     if (skip && skip !== 'gitignored') {
         void vscode.window.showWarningMessage(
             `LLM Tokenizer: ${name} was not counted — ${describeSkipReason(skip).toLowerCase()}.`,
@@ -828,7 +910,7 @@ async function countSingleFile(uri: vscode.Uri, size: number): Promise<void> {
         return;
     }
 
-    const outcome = await countFile(uri, size, model);
+    const outcome = await countFile(uri, stat, model, await tokenizer.isExact(model));
     if (!isCounted(outcome)) {
         void vscode.window.showWarningMessage(
             `LLM Tokenizer: ${name} was not counted — ${describeSkipReason(outcome.skip).toLowerCase()}.`,
@@ -883,7 +965,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
         }
 
         if (!isDirectory(stat.type)) {
-            await countSingleFile(only, stat.size);
+            await countSingleFile(only, stat);
             return;
         }
     }
@@ -896,6 +978,8 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
             // was part one model and part another, and cached both under
             // whichever id happened to be current at the time.
             const model = currentModel;
+            // Asked once for the run; see countFile.
+            const exactNow = await tokenizer.isExact(model);
             const result: ScanResult = { total: 0, processed: [], skipped: [], ignored: [], exact: true };
             const contexts = new Map<string, FolderContext>();
             const useGitignore = respectGitignore();
@@ -985,7 +1069,7 @@ async function countSelection(uris: readonly vscode.Uri[]): Promise<void> {
                     pending = 0;
                 }
 
-                await recordFile(uri, size, context, result, model);
+                await recordFile(uri, size, context, result, model, exactNow);
             }
 
             showMultiFileSummary({
@@ -1028,24 +1112,8 @@ export function outermostFolders(
     return folders.filter(folder => outermost.delete(folder.uri.toString()));
 }
 
-/**
- * Record a file's real path, returning false if it has already been counted.
- *
- * Falls back to the URI when the path cannot be resolved, which keeps a file on
- * a filesystem without symlink support countable rather than silently dropped.
- */
-async function claimRealPath(uri: vscode.Uri, seen: Set<string>): Promise<boolean> {
-    let key: string;
-    try {
-        key = await fs.realpath(uri.fsPath);
-    } catch {
-        key = uri.toString();
-    }
-    return !seen.has(key) && (seen.add(key), true);
-}
-
 async function refreshProjectCount(): Promise<void> {
-    if (!isProjectScanEnabled()) {
+    if (!isProjectTotalWanted()) {
         statusBar.clearProjectCount();
         return;
     }
@@ -1065,6 +1133,8 @@ async function refreshProjectCount(): Promise<void> {
 
     try {
         const useGitignore = respectGitignore();
+        // Asked once for the scan; see countFile.
+        const exactNow = await tokenizer.isExact(model);
         let total = 0;
         let exact = true;
 
@@ -1093,10 +1163,11 @@ async function refreshProjectCount(): Promise<void> {
 
         // Symlinked trees are visited once. `findFiles` is the ripgrep walker,
         // which follows symlinks (per `search.followSymlinks`) and does not
-        // deduplicate, so a sibling symlink counted the same tree twice — while
-        // the right-click count, which goes through `collectFiles`, resolves
-        // real paths and counted it once. The two totals disagreed on the same
-        // directory.
+        // deduplicate, so a sibling symlink counted the same tree twice, and
+        // the two totals disagreed on the same directory. Every file is now
+        // claimed by its real path through `claimFile`, here and in the
+        // right-click count's walk alike, so a linked file or tree counts once
+        // in both.
         const seen = new Set<string>();
 
         for (const folder of roots) {
@@ -1111,22 +1182,17 @@ async function refreshProjectCount(): Promise<void> {
                     return;
                 }
 
-                if (!(await claimRealPath(uri, seen))) {
+                // Ruled out by its path, which costs no I/O, or reached before
+                // through a link; then one stat, whose size countFile checks.
+                if ((await claimFile(uri, contextFor(uri), seen)) !== 'claimed') {
+                    continue;
+                }
+                const stat = await statFile(uri);
+                if (!stat) {
                     continue;
                 }
 
-                let size: number;
-                try {
-                    size = (await vscode.workspace.fs.stat(uri)).size;
-                } catch {
-                    continue;
-                }
-
-                if (shouldCount(uri, size, contextFor(uri))) {
-                    continue;
-                }
-
-                const outcome = await countFile(uri, size, model, () => !superseded());
+                const outcome = await countFile(uri, stat, model, exactNow, () => !superseded());
                 if (isCounted(outcome)) {
                     total += outcome.count;
                     exact &&= outcome.exact;
@@ -1134,9 +1200,9 @@ async function refreshProjectCount(): Promise<void> {
             }
         }
 
-        // Checked once more: the scan may have been superseded, or the setting
+        // Checked once more: the scan may have been superseded, or the total
         // turned off, while the last file was being counted.
-        if (superseded() || !isProjectScanEnabled()) {
+        if (superseded() || !isProjectTotalWanted()) {
             return;
         }
 

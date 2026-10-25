@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { StatementSync } from 'node:sqlite';
 
 import { dedupe } from '../../src/usage/accounting';
 import { totalsOf } from '../../src/usage/aggregate';
@@ -60,6 +61,104 @@ function ready(result: OpenResult): UsageStore {
     return result.store;
 }
 
+/**
+ * Turn the history at `file`, made by this build, into one as a build at
+ * `schema` left it, every row kept: each request with its transcript's path
+ * in full, under the four indexes it had, and at schema 1 without its speed
+ * or where it ran. The newest parser to hold the lease is where those builds
+ * kept it.
+ */
+function asSchema(file: string, schema: 1 | 2): void {
+    assert.ok(sqlite, 'this runtime has no node:sqlite');
+    const db = new sqlite.DatabaseSync(file);
+    try {
+        db.exec(`
+            BEGIN;
+            DROP TRIGGER clear_paths;
+            CREATE TABLE old_requests (
+                provider TEXT NOT NULL DEFAULT 'claude-code',
+                message_id TEXT NOT NULL,
+                parser_version INTEGER NOT NULL,
+                file TEXT NOT NULL,
+                byte_offset INTEGER NOT NULL,
+                is_main INTEGER NOT NULL,
+                complete INTEGER NOT NULL,
+                ts INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                model TEXT NOT NULL,
+                variant TEXT,
+                input INTEGER,
+                cache_creation INTEGER,
+                cache_read INTEGER,
+                output INTEGER,
+                cache_5m INTEGER,
+                cache_1h INTEGER,
+                thinking INTEGER,
+                effort TEXT,
+                web_search INTEGER,
+                web_fetch INTEGER,
+                request_id TEXT,
+                claude_code_version TEXT,
+                agent_id TEXT,
+                run_id TEXT,
+                PRIMARY KEY (provider, message_id)
+            ) STRICT;
+            INSERT INTO old_requests
+            SELECT r.provider, r.message_id, r.parser_version, p.path, r.byte_offset, r.is_main, r.complete, r.ts,
+                   r.session_id, r.kind, r.model, r.variant, r.input, r.cache_creation, r.cache_read, r.output,
+                   r.cache_5m, r.cache_1h, r.thinking, r.effort, r.web_search, r.web_fetch, r.request_id,
+                   r.claude_code_version, r.agent_id, r.run_id
+            FROM requests r JOIN paths p ON p.id = r.file;
+            ${
+                schema === 2
+                    ? `ALTER TABLE old_requests ADD COLUMN speed TEXT;
+                       ALTER TABLE old_requests ADD COLUMN inference_geo TEXT;
+                       UPDATE old_requests SET (speed, inference_geo) = (
+                           SELECT speed, inference_geo FROM requests r
+                           WHERE r.provider = old_requests.provider AND r.message_id = old_requests.message_id);`
+                    : ''
+            }
+            DROP TABLE requests;
+            DROP TABLE paths;
+            ALTER TABLE old_requests RENAME TO requests;
+            CREATE INDEX requests_ts ON requests (ts);
+            CREATE INDEX requests_session ON requests (session_id);
+            CREATE INDEX requests_request_id ON requests (request_id);
+            CREATE INDEX requests_file ON requests (file);
+            DELETE FROM meta WHERE key = 'max_parser_version';
+            UPDATE meta SET key = 'max_parser_version' WHERE key = 'newest_parser';
+            PRAGMA user_version = ${schema};
+            COMMIT;
+        `);
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * `node:sqlite`, but right after the first read of a history's version,
+ * `meanwhile` runs, as another window would between this one's read and the
+ * write lock it then takes.
+ */
+function racing(meanwhile: () => void): { sqlite: NonNullable<typeof sqlite>; raced: () => boolean } {
+    assert.ok(sqlite, 'this runtime has no node:sqlite');
+    let raced = false;
+    class Racing extends sqlite.DatabaseSync {
+        override prepare(sql: string): StatementSync {
+            const statement = super.prepare(sql);
+            if (raced || sql !== 'PRAGMA user_version') {
+                return statement;
+            }
+            raced = true;
+            const read = statement.get();
+            meanwhile();
+            return { get: () => read } as unknown as StatementSync;
+        }
+    }
+    return { sqlite: { ...sqlite, DatabaseSync: Racing }, raced: () => raced };
+}
+
 suite('usage history store', () => {
     let dir: string;
     let file: string;
@@ -97,7 +196,27 @@ suite('usage history store', () => {
         assert.strictEqual(store.generation(), 0);
         assert.match(store.storeId(), /^[0-9a-z]+-[0-9a-z]+$/);
         assert.ok(fs.existsSync(file));
-        assert.strictEqual(SCHEMA_VERSION, 2);
+        assert.strictEqual(SCHEMA_VERSION, 3);
+    });
+
+    test("a transcript's path is kept once, not in every request read from it", () => {
+        // In every row and again in the index on it, the path was half the
+        // history: 771 bytes a request on one heavy user's transcripts.
+        const store = ready(open());
+        const marker = 'Path-Marker-0xFACADE';
+        const transcript = `/root/projects/-Users-someone-${marker}/session-a.jsonl`;
+        store.transaction(() =>
+            store.upsertRequests(Array.from({ length: 300 }, (_, i) => req({ messageId: `m${i}`, requestId: `r${i}`, file: transcript, byteOffset: i * 1000 }))),
+        );
+        assert.ok(store.checkpoint());
+        const bytes = fs.readFileSync(file);
+        let copies = 0;
+        for (let at = bytes.indexOf(marker); at !== -1; at = bytes.indexOf(marker, at + 1)) {
+            copies++;
+        }
+        // Its row in paths, and that row's entry in the index on them.
+        assert.strictEqual(copies, 2);
+        assert.ok([...store.requests()].every(r => r.file === transcript));
     });
 
     test('the upsert keeps the record the comparator prefers, in any order', () => {
@@ -258,8 +377,9 @@ suite('usage history store', () => {
         return fs.readdirSync(folder).filter(name => fs.statSync(path.join(folder, name)).isFile() && fs.readFileSync(path.join(folder, name)).includes(marker));
     }
 
-    /** `n` requests whose model id carries `marker`, as text a recovery tool would find. */
-    const marked = (marker: string, n: number) => Array.from({ length: n }, (_, i) => req({ messageId: `m${i}`, requestId: `r${i}`, model: `${marker}-${i}` }));
+    /** `n` requests whose model id and transcript carry `marker`, as text a recovery tool would find. */
+    const marked = (marker: string, n: number) =>
+        Array.from({ length: n }, (_, i) => req({ messageId: `m${i}`, requestId: `r${i}`, model: `${marker}-${i}`, file: `/root/projects/-${marker}/s${i % 4}.jsonl` }));
 
     test('Clear leaves nothing of the history readable on disk, while the history stays open', () => {
         // Another window's worker has it open too, idle, as a status item keeps it.
@@ -270,6 +390,32 @@ suite('usage history store', () => {
         assert.deepStrictEqual(store.clear(), { settled: true, copiesLeft: 0 });
         assert.deepStrictEqual(holding('Secret-Client-0xC0FFEE'), [], 'the deleted history is still on disk');
         assert.strictEqual([...other.requests()].length, 0);
+    });
+
+    test('a Clear in a build before this schema, which knows nothing of paths, leaves none of them on disk', () => {
+        // A window not reloaded since the update, its history open since
+        // before the migration: its Clear, as 2.2.0 runs it, empties the
+        // tables it knows of, and bumps the generation.
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests(marked('Secret-Project-0xD1CE', 40)));
+        assert.ok(holding('Secret-Project-0xD1CE').length > 0);
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const old = new sqlite.DatabaseSync(file);
+        try {
+            old.exec('PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; BEGIN IMMEDIATE');
+            for (const table of ['files', 'read_guards', 'requests', 'sessions', 'compactions', 'limit_hits']) {
+                old.exec(`DELETE FROM ${table}`);
+            }
+            old.exec("DELETE FROM lease; UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
+            old.exec('COMMIT');
+            old.exec('VACUUM');
+            old.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+        } finally {
+            old.close();
+        }
+        assert.deepStrictEqual(holding('Secret-Project-0xD1CE'), [], "a transcript's path is still on disk");
+        store.transaction(() => store.upsertRequests([req()]));
+        assert.deepStrictEqual([...store.requests()].map(r => r.file), [req().file]);
     });
 
     test("a Clear another window's read holds off is finished, once that read ends, by whichever window comes next", () => {
@@ -351,30 +497,189 @@ suite('usage history store', () => {
         assert.deepStrictEqual(latest(), ['claude-sonnet-4-6', null, 50_000, 230_000]);
     });
 
-    test('a version 1 history gains the speed and where each request ran, after a backup, and keeps every row', () => {
+    /** What the backup at `name` holds: its version, and each request's id and transcript. */
+    function backedUp(name: string): unknown[] {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const backup = new sqlite.DatabaseSync(name, { readOnly: true });
+        try {
+            return [
+                (backup.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
+                backup.prepare('SELECT message_id, file FROM requests ORDER BY message_id').all().map(r => [r.message_id, r.file]),
+            ];
+        } finally {
+            backup.close();
+        }
+    }
+
+    test('a version 1 history gains the speed and where each request ran, then keeps each path once, after a backup at each step, and keeps every row', () => {
+        // Only development builds made one.
         const store = ready(open());
         store.transaction(() => store.upsertRequests([req({ messageId: 'kept', input: 5 })]));
         store.close();
         opened.length = 0;
-        assert.ok(sqlite, 'this runtime has no node:sqlite');
-        // As a build before these columns left it.
-        const db = new sqlite.DatabaseSync(file);
-        db.exec('ALTER TABLE requests DROP COLUMN speed; ALTER TABLE requests DROP COLUMN inference_geo; PRAGMA user_version = 1');
-        db.close();
+        asSchema(file, 1);
 
         const migrated = ready(open());
-        assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.input, r.speed, r.inferenceGeo]), [['kept', 5, null, null]]);
+        assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.input, r.speed, r.inferenceGeo, r.file]), [['kept', 5, null, null, req().file]]);
         migrated.transaction(() => migrated.upsertRequests([req({ messageId: 'new', requestId: 'req_2', speed: 'fast', inferenceGeo: 'us' })]));
         assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.speed, r.inferenceGeo]).sort(), [['kept', null, null], ['new', 'fast', 'us']]);
-        // The backup is the history as it was.
-        const backup = new sqlite.DatabaseSync(`${file}.bak-v1`, { readOnly: true });
+        // Each backup is the history as that step found it.
+        assert.deepStrictEqual(backedUp(`${file}.bak-v1`), [1, [['kept', req().file]]]);
+        assert.deepStrictEqual(backedUp(`${file}.bak-v2`), [2, [['kept', req().file]]]);
+    });
+
+    test("a migration's backup is made whole or not at all: a copy cut short is never taken for it", () => {
+        // VACUUM INTO wrote the backup under its own name, and one that a full
+        // disk cut short was trusted as the backup at the next attempt.
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ messageId: 'kept' })]));
+        store.close();
+        opened.length = 0;
+        asSchema(file, 2);
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const prototype = sqlite.DatabaseSync.prototype as unknown as { exec: (this: unknown, sql: string) => void };
+        const exec = prototype.exec;
+        prototype.exec = function (this: unknown, sql: string) {
+            exec.call(this, sql);
+            const copy = /^VACUUM INTO '(.*)'$/.exec(sql)?.[1]?.replace(/''/g, "'");
+            if (copy) {
+                // Half written, then the disk was full.
+                fs.truncateSync(copy, Math.floor(fs.statSync(copy).size / 2));
+                throw Object.assign(new Error('database or disk is full'), { errcode: 13 });
+            }
+        };
         try {
-            assert.deepStrictEqual(
-                [{ ...backup.prepare('PRAGMA user_version').get() }, backup.prepare('SELECT message_id FROM requests').all().map(r => ({ ...r }))],
-                [{ user_version: 1 }, [{ message_id: 'kept' }]],
-            );
+            assert.strictEqual(open().status, 'failed');
+        } finally {
+            prototype.exec = exec;
+        }
+        const backups = () => fs.readdirSync(path.dirname(file)).filter(name => name.includes('.bak-v'));
+        assert.deepStrictEqual(backups(), [], 'a copy cut short was left, or taken for the backup');
+        // The next attempt makes it whole, and migrates.
+        const migrated = ready(open());
+        assert.deepStrictEqual([...migrated.requests()].map(r => r.messageId), ['kept']);
+        assert.deepStrictEqual(backups(), [`${path.basename(file)}.bak-v2`]);
+        const backup = new sqlite.DatabaseSync(`${file}.bak-v2`, { readOnly: true });
+        try {
+            assert.deepStrictEqual({ ...backup.prepare('PRAGMA quick_check').get() }, { quick_check: 'ok' });
+            assert.deepStrictEqual(backup.prepare('SELECT message_id FROM requests').all().map(r => ({ ...r })), [{ message_id: 'kept' }]);
         } finally {
             backup.close();
+        }
+    });
+
+    test('a version 2 history keeps every row, and each path once, after a backup; the file shrinks by what the paths took', () => {
+        // As 2.2.0 left it. Paths whose order as bytes is not the order they
+        // were first stored in, so that ids cannot stand in for them.
+        const store = ready(open());
+        const paths = ['/r/b.jsonl', '/r/a.jsonl', '/r/\u{10000}.jsonl', '/r/\uffff.jsonl'].map(p => `/Users/someone/.claude/projects/-Users-someone-dev-project${p}`);
+        store.transaction(() =>
+            store.upsertRequests(
+                Array.from({ length: 2_000 }, (_, i) =>
+                    req({ messageId: `m${i}`, requestId: `r${i}`, file: paths[i % 4], byteOffset: i, speed: i % 2 ? 'fast' : null, inferenceGeo: i % 3 ? 'us' : null }),
+                ),
+            ),
+        );
+        assert.ok(store.acquireLease('import', 'window-a', 7));
+        const rows = [...store.requests()];
+        store.close();
+        opened.length = 0;
+        asSchema(file, 2);
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const vacuumed = new sqlite.DatabaseSync(file);
+        vacuumed.exec('VACUUM');
+        vacuumed.close();
+        const before = fs.statSync(file).size;
+
+        const migrated = ready(open());
+        assert.deepStrictEqual([...migrated.requests()], rows);
+        const raw = new sqlite.DatabaseSync(file, { readOnly: true });
+        try {
+            const one = (sql: string) => Object.values(raw.prepare(sql).get() ?? {})[0];
+            assert.strictEqual(one('SELECT count(*) FROM paths'), 4);
+            assert.strictEqual(one("SELECT count(*) FROM requests WHERE typeof(file) != 'integer'"), 0);
+            // Nothing looked a request up by its request id.
+            assert.deepStrictEqual(
+                raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'requests' AND sql IS NOT NULL ORDER BY name").all().map(r => r.name),
+                ['requests_file', 'requests_session', 'requests_ts'],
+            );
+        } finally {
+            raw.close();
+        }
+        // Compacted: the old table's pages given back, and the log emptied.
+        const after = fs.statSync(file).size + (fs.existsSync(`${file}-wal`) ? fs.statSync(`${file}-wal`).size : 0);
+        assert.ok(after < before * 0.7, `${after} bytes after migrating, ${before} before`);
+
+        // The tie-break still goes by the path, as UTF-8 bytes: of two
+        // records alike, the one whose path comes first, whatever its id.
+        // This one is stored last, under the largest id.
+        const first = '/Users/someone/.claude/projects/-Users-someone-dev-project/r/0.jsonl';
+        migrated.transaction(() => migrated.upsertRequests([req({ messageId: 'm0', requestId: 'r0', file: first, byteOffset: 9 })]));
+        migrated.transaction(() => migrated.upsertRequests([req({ messageId: 'm2', requestId: 'r2', file: paths[3], byteOffset: 0 })]));
+        assert.deepStrictEqual(
+            [...migrated.requests()].filter(r => r.messageId === 'm0' || r.messageId === 'm2').map(r => [r.messageId, r.file, r.byteOffset]),
+            [['m0', first, 9], ['m2', paths[3], 0]],
+        );
+        // The newest parser to hold the lease still keeps an older one out.
+        assert.deepStrictEqual([migrated.outdated(6), migrated.outdated(7)], [true, false]);
+        // The backup is the history as it was.
+        const backup = backedUp(`${file}.bak-v2`) as [number, string[][]];
+        assert.deepStrictEqual([backup[0], backup[1].length, backup[1].find(r => r[0] === 'm1')], [2, 2_000, ['m1', paths[1]]]);
+    });
+
+    test("a migration's log that another window's read holds on to is emptied at the next request", () => {
+        // The table built anew passes through the log, as large as the table.
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests(marked('Migrated-0xABBA', 2_000)));
+        store.close();
+        opened.length = 0;
+        asSchema(file, 2);
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const reader = new sqlite.DatabaseSync(file);
+        let migrated: UsageStore;
+        try {
+            reader.exec('BEGIN');
+            reader.prepare('SELECT count(*) FROM requests').get();
+            migrated = ready(open({ busyTimeoutMs: 50 }));
+        } finally {
+            reader.exec('COMMIT');
+            reader.close();
+        }
+        assert.ok(fs.statSync(`${file}-wal`).size > 0, 'the premise: the log was held');
+        assert.deepStrictEqual(migrated.finishClear(), { settled: true, copiesLeft: 0 });
+        assert.strictEqual(fs.statSync(`${file}-wal`).size, 0, 'the log was left as large as the table');
+        assert.ok(fs.existsSync(`${file}.bak-v2`), "the migration's backup went with it");
+    });
+
+    test('a build before this schema that had the history open as it was migrated stops writing, and says to reload', () => {
+        // A window not reloaded since the update. 2.2.0 takes itself for
+        // outdated, as when a newer parser has held the lease, once its
+        // parser is older than `max_parser_version`; and its upsert would
+        // write a path where an id now goes.
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req()]));
+        store.close();
+        opened.length = 0;
+        asSchema(file, 2);
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const old = new sqlite.DatabaseSync(file);
+        try {
+            const newest = () => Number((old.prepare("SELECT value FROM meta WHERE key = 'max_parser_version'").get() as { value: string } | undefined)?.value ?? 0);
+            assert.strictEqual(newest(), 0);
+            const migrated = ready(open());
+            for (const parser of [2, 1_000]) {
+                assert.ok(parser < newest(), `a build at parser ${parser} would go on importing`);
+            }
+            const write = old.prepare(
+                `INSERT INTO requests (provider, message_id, parser_version, file, byte_offset, is_main, complete, ts, session_id, kind, model)
+                 VALUES ('claude-code', 'msg_2', 2, '/root/projects/p/session-a.jsonl', 0, 1, 1, 0, 'session-a', 'main', 'm')`,
+            );
+            assert.throws(() => write.run(), /TEXT value in INTEGER column/);
+            // This build is not outdated by it.
+            assert.ok(!migrated.outdated(2));
+            assert.ok(migrated.acquireLease('import', 'window-a', 2));
+        } finally {
+            old.close();
         }
     });
 
@@ -445,6 +750,54 @@ suite('usage history store', () => {
         assert.throws(() => store.transaction(() => store.upsertRequests([req()])), /newer LLM Tokenizer/);
     });
 
+    test('a history a newer version created opens read-only, even without a column this version writes', () => {
+        // As schema 3 had to keep the path's column, for the builds before it.
+        ready(open()).close();
+        opened.length = 0;
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec(`ALTER TABLE requests DROP COLUMN request_id; PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+        raw.close();
+        const result = open();
+        assert.strictEqual(result.status, 'read-only', JSON.stringify(result));
+        assert.strictEqual(result.store.coverage().requests, 0);
+    });
+
+    for (const [what, schema] of [
+        ['creates', 0],
+        ['migrates', 2],
+    ] as const) {
+        test(`a history a newer build ${what} at the moment this one opens it opens read-only`, () => {
+            // Both windows read the old version; the newer build has given it
+            // its own by the time this one holds the write lock.
+            assert.ok(sqlite, 'this runtime has no node:sqlite');
+            const base = sqlite;
+            if (schema > 0) {
+                ready(open()).close();
+                opened.length = 0;
+                asSchema(file, 2);
+            }
+            const race = racing(() => {
+                if (schema === 0) {
+                    ready(UsageStore.open(base, file)).close();
+                }
+                const newer = new base.DatabaseSync(file);
+                newer.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+                newer.close();
+            });
+            const result = UsageStore.open(race.sqlite, file);
+            assert.ok(race.raced(), 'nothing ran between the two reads');
+            if (result.status === 'ready' || result.status === 'read-only') {
+                opened.push(result.store);
+            }
+            assert.strictEqual(result.status, 'read-only', JSON.stringify(result));
+            assert.strictEqual(result.schema, SCHEMA_VERSION + 1);
+            const store = result.store;
+            assert.strictEqual(store.coverage().requests, 0);
+            assert.throws(() => store.transaction(() => store.upsertRequests([req()])), /newer LLM Tokenizer/);
+        });
+    }
+
     test('a corrupt history opens as corrupt, and is left exactly as it is', () => {
         // Not renamed, not rewritten: a window may still have it open, and
         // it is the only copy of what the records on disk no longer hold.
@@ -494,9 +847,11 @@ suite('usage history store', () => {
         const db = new sqlite.DatabaseSync(file);
         try {
             // A static that uses no `this`, called as a second window would.
-            const migrate = (UsageStore as unknown as { migrate: (db: unknown, file: string, from: number) => void }).migrate;
-            assert.doesNotThrow(() => migrate(db, file, 0));
-            assert.strictEqual((db.prepare('SELECT count(*) AS n FROM meta').get() as { n: number }).n, 2, 'the second window wrote its own meta rows');
+            const migrate = (UsageStore as unknown as { migrate: (db: unknown, file: string, from: number) => number }).migrate;
+            const meta = () => db.prepare('SELECT key, value FROM meta ORDER BY key').all().map(row => ({ ...row }));
+            const before = meta();
+            assert.strictEqual(migrate(db, file, 0), SCHEMA_VERSION);
+            assert.deepStrictEqual(meta(), before, 'the second window wrote its own meta rows');
         } finally {
             db.close();
         }

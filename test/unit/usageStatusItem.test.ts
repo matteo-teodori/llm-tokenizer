@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { modelById } from '../../src/tokenizer/registry';
 import { CLOCK_SKEW_MS, RECENT_MS, parseLiveSession, readLiveSessions, type LiveSession } from '../../src/usage/liveSessions';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
+import type { UsageReport } from '../../src/usage/report';
 import type { ResolvedRoots } from '../../src/usage/roots';
 import { UsageStatusItem, contextWindow, describeLive, type LiveInput, type StatusItemService } from '../../src/usage/statusItem';
 import { currentHistory } from '../../src/usage/historyFiles';
@@ -229,6 +230,12 @@ suite('usage status item: the item', () => {
             context?: Awaited<ReturnType<StatusItemService['liveContext']>>;
             started?: Promise<void>;
             largeContextDisabledRoots?: string[];
+            /** Today's tokens in the workspace, as its report gives them. */
+            today?: number;
+            reading?: StatusItemService['reading'];
+            /** In place of `context` and `today`: the service's own answers, as they come. */
+            liveContext?: StatusItemService['liveContext'];
+            report?: StatusItemService['report'];
         } = {},
     ) {
         const calls = { readLive: 0, holds: 0, released: 0, liveContext: 0 };
@@ -248,12 +255,19 @@ suite('usage status item: the item', () => {
                 calls.holds++;
                 return new vscode.Disposable(() => calls.released++);
             },
-            liveContext: () => {
+            liveContext: sessionId => {
                 calls.liveContext++;
+                if (options.liveContext) {
+                    return options.liveContext(sessionId);
+                }
                 return Promise.resolve('context' in options ? options.context : { latest: latest(), compactions: [] });
             },
-            report: () => Promise.resolve(undefined),
+            report: (...args) =>
+                options.report
+                    ? options.report(...args)
+                    : Promise.resolve(options.today === undefined ? undefined : ({ totals: { processed: options.today, provenance: 'reported' } } as UsageReport)),
             whenStarted: () => options.started ?? Promise.resolve(),
+            reading: options.reading,
         };
         let shown = options.shown ?? true;
         const items: ReturnType<typeof fakeItem>[] = [];
@@ -355,6 +369,54 @@ suite('usage status item: the item', () => {
         assert.strictEqual(await shownFor('/claude'), '$(warning) 850.0K · 85%');
     });
 
+    test("while the history is read, the tooltip says the figure can be behind, and today's total is a lower bound", async () => {
+        const look = async (reading: StatusItemService['reading']) => {
+            const h = harness({ sessions: [session('/work/repo')], context: { latest: null, compactions: [] }, today: 1_234_567, reading });
+            await settle();
+            await h.statusItem.refresh();
+            const tooltip = String(h.items[0].tooltip);
+            h.statusItem.dispose();
+            return tooltip;
+        };
+        const reading = await look({ by: 'this window', files: 10, of: 100 });
+        for (const said of ['Context: not read yet.', "Still reading Claude Code's records, so this can be behind.", 'Today in this workspace: ≥1.2M processed']) {
+            assert.ok(reading.includes(said), `${said} | ${reading}`);
+        }
+        const done = await look(undefined);
+        assert.ok(done.includes('Context: not reported yet.') && !done.includes('Still reading') && done.includes('Today in this workspace: 1.2M processed'), done);
+    });
+
+    test('a change while a look is under way is looked at once that look ends, not at the next tick', async () => {
+        // Found capturing the README's images: a first import's first look
+        // read the history still empty, then waited for today's report while
+        // the import went through. The import's change came during that look
+        // and was folded into it, and the item said "—" for a minute.
+        let stored: LatestRequest | null = null;
+        let release!: () => void;
+        const held = new Promise<void>(resolve => (release = resolve));
+        let reports = 0;
+        const { statusItem, items, emitter, calls } = harness({
+            sessions: [session('/work/repo')],
+            liveContext: () => Promise.resolve({ latest: stored, compactions: [] }),
+            report: async () => {
+                if (reports++ === 0) {
+                    await held;
+                }
+                return undefined;
+            },
+        });
+        await settle();
+        assert.strictEqual(calls.liveContext, 1, 'the first look has not asked yet');
+        // The import goes through, and says so, while the look waits.
+        stored = latest({ cacheRead: 520_000 });
+        emitter.fire();
+        release();
+        await settle();
+        assert.strictEqual(items[0].text, '$(comment-discussion) 530.0K · 53%');
+        assert.strictEqual(calls.liveContext, 2, 'one look followed, and only one');
+        statusItem.dispose();
+    });
+
     test('a failure shows a neutral dash; turned off, the item goes and the hold with it', async () => {
         const { statusItem, items, calls, setShown } = harness({ sessions: [session('/work/repo')], context: undefined });
         await settle();
@@ -439,5 +501,45 @@ suite('usage status item: through the worker', () => {
             const refused = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [FIXTURE_ROOT], sessionId });
             assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'bad-request', sessionId.slice(0, 20));
         }
+    });
+
+    test('a look behind a full pass reads what is stored, at once, and the next one reads the session', async () => {
+        // The item stayed hidden through a whole first import, its look
+        // queued behind it: 24 s for 10,000 transcripts.
+        const host = new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(WORKER, {
+            name: 'usage',
+            fallback: 'nothing',
+            log: { error: () => undefined, warn: () => undefined },
+        });
+        hosts.push(host);
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const root = path.join(tmp, 'root');
+        const project = path.join(root, 'projects', '-repo');
+        fs.mkdirSync(project, { recursive: true });
+        const transcript = (sessionId: string, input: number) => {
+            const record = (fields: object) => JSON.stringify({ sessionId, timestamp: '2026-10-09T10:00:00.000Z', ...fields }) + '\n';
+            fs.writeFileSync(
+                path.join(project, `${sessionId}.jsonl`),
+                record({ type: 'user', uuid: `u-${sessionId}`, cwd: '/repo', message: { role: 'user', content: 'x' } }) +
+                    record({
+                        type: 'assistant',
+                        uuid: `a-${sessionId}`,
+                        message: { model: 'claude-opus-5-5', id: `m-${sessionId}`, usage: { input_tokens: input, cache_creation_input_tokens: 3, cache_read_input_tokens: 11, output_tokens: 1 } },
+                    }),
+            );
+        };
+        for (let i = 0; i < 600; i++) {
+            transcript(`sess-${i}`, 1);
+        }
+        // Last in the pass's order, so not read yet when the look is answered.
+        transcript('zzz-live', 7);
+        const order: string[] = [];
+        const pass = host.send({ type: 'import', id: 0, storeFile, roots: [root] }).then(r => (order.push('pass'), r));
+        const look = host.send({ type: 'liveContext', id: 0, storeFile, roots: [root], sessionId: 'zzz-live' }).then(r => (order.push('look'), r));
+        const [, early] = await Promise.all([pass, look]);
+        assert.deepStrictEqual(order, ['look', 'pass'], 'the look waited for the whole pass');
+        assert.ok(early.type === 'liveContext' && early.latest === null, JSON.stringify(early).slice(0, 200));
+        const later = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [root], sessionId: 'zzz-live' });
+        assert.ok(later.type === 'liveContext' && later.latest?.input === 7, JSON.stringify(later).slice(0, 200));
     });
 });

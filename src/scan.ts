@@ -3,8 +3,10 @@
  *
  * There used to be two independent walks — one for right-click on a folder and
  * one for the project-wide count — and they disagreed about dotfiles, ignored
- * directories and `.gitignore`, so the same tree produced two different totals.
- * Both now go through `shouldDescend` / `shouldCount` here.
+ * directories, `.gitignore` and symlinks, so the same tree produced two
+ * different totals. Both now go through the rules here: `shouldDescend` for a
+ * directory, `shouldCount` for a file (or `excludedByPath`, its checks that need
+ * no stat), and `claimFile` for a file reached twice.
  */
 
 import * as vscode from 'vscode';
@@ -149,7 +151,7 @@ export function shouldCount(
     size: number,
     context: FolderContext,
 ): SkipReason | undefined {
-    if (BINARY_EXTENSIONS.has(path.extname(uri.fsPath).toLowerCase())) {
+    if (hasBinaryExtension(uri)) {
         return 'binary';
     }
     if (size > MAX_TOKENIZED_FILE_BYTES) {
@@ -159,6 +161,19 @@ export function shouldCount(
         return 'gitignored';
     }
     return undefined;
+}
+
+/** Whether a file's extension marks it as binary: decided from the name alone. */
+function hasBinaryExtension(uri: vscode.Uri): boolean {
+    return BINARY_EXTENSIONS.has(path.extname(uri.fsPath).toLowerCase());
+}
+
+/**
+ * Whether a file's path alone rules it out, before anything about it is read
+ * from disk: a binary extension, or an ignore rule.
+ */
+export function excludedByPath(uri: vscode.Uri, context: FolderContext): boolean {
+    return hasBinaryExtension(uri) || context.isIgnored(uri, false);
 }
 
 /** How much of a file to inspect when deciding whether it is text. */
@@ -194,14 +209,6 @@ export function describeSkipReason(reason: SkipReason): string {
 }
 
 /**
- * A glob that excludes the directories we never count.
- *
- * `findFiles` replaces VS Code's default excludes when given an explicit
- * pattern, so excluding only node_modules silently re-enabled `.git`
- * traversal — and loose git objects have no extension, so they sailed past the
- * binary check and got tokenized as compressed text.
- */
-/**
  * Whether a path could contribute to a count, judged from the path alone.
  *
  * Used to filter file-watcher events before they re-arm a scan. It has to be
@@ -222,6 +229,14 @@ export function couldAffectCount(uri: vscode.Uri): boolean {
     return !uri.path.split('/').some(segment => IGNORED_DIRECTORIES.has(segment));
 }
 
+/**
+ * A glob that excludes the directories we never count.
+ *
+ * `findFiles` replaces VS Code's default excludes when given an explicit
+ * pattern, so excluding only node_modules silently re-enabled `.git`
+ * traversal — and loose git objects have no extension, so they sailed past the
+ * binary check and got tokenized as compressed text.
+ */
 export function buildExcludeGlob(): string {
     return `{${[...IGNORED_DIRECTORIES].map(dir => `**/${dir}/**`).join(',')}}`;
 }
@@ -259,11 +274,11 @@ export function dedupeSelection(uris: readonly vscode.Uri[]): vscode.Uri[] {
 }
 
 /**
- * A directory's canonical identity, for detecting one reached twice.
+ * A directory's or a file's canonical identity, for detecting one reached twice.
  *
  * Falls back to the URI when the path cannot be resolved — a deleted directory,
  * or a file system where realpath does not apply. Being conservative there only
- * risks walking something twice, never skipping it.
+ * risks counting something twice, never skipping it.
  */
 async function realPath(uri: vscode.Uri): Promise<string> {
     try {
@@ -271,6 +286,43 @@ async function realPath(uri: vscode.Uri): Promise<string> {
     } catch {
         return uri.toString();
     }
+}
+
+/** What a walk makes of a file it has reached: see `claimFile`. */
+export type Claim = 'excluded' | 'claimed' | 'duplicate';
+
+/**
+ * Claim a file a walk has reached by its real path, so that a file reached
+ * twice — through a symlink to it, or a linked directory — is counted once.
+ * `seen` holds the real paths claimed so far.
+ *
+ * Its path is checked first, and a file its path rules out claims nothing.
+ * `findFiles` does not apply .gitignore and lists files in no defined order,
+ * so a gitignored link to a counted file — a bazel-out tree, which ripgrep
+ * follows under `search.followSymlinks` — claimed that file's real path when
+ * it was listed first, and the file itself was then dropped as a duplicate:
+ * in the total or out of it by the order of the listing. And every file of a
+ * large gitignored tree, a .venv or a .tox, cost a realpath and a stat at every
+ * rescan before it was ruled out.
+ *
+ * `resolve` gives the file's real path; `collectFiles` knows a regular file's
+ * already.
+ */
+export async function claimFile(
+    uri: vscode.Uri,
+    context: FolderContext,
+    seen: Set<string>,
+    resolve: () => Promise<string> = () => realPath(uri),
+): Promise<Claim> {
+    if (excludedByPath(uri, context)) {
+        return 'excluded';
+    }
+    const identity = await resolve();
+    if (seen.has(identity)) {
+        return 'duplicate';
+    }
+    seen.add(identity);
+    return 'claimed';
 }
 
 /** A file the walk found, with the size already read from its stat. */
@@ -318,6 +370,14 @@ export async function collectFiles(
      */
     const visited = new Set<string>();
 
+    /**
+     * Files already listed, by real path, as the project scan claims them.
+     * The directories above did not cover a file: `a.ts -> b.ts` in one folder
+     * listed the same file twice, so the summary counted it twice while the
+     * status bar, whose scan resolved every file, counted it once.
+     */
+    const claimed = new Set<string>();
+
     const walk = async (dir: vscode.Uri): Promise<void> => {
         const identity = await realPath(dir);
         if (visited.has(identity)) {
@@ -352,6 +412,17 @@ export async function collectFiles(
                 continue;
             }
 
+            // Only a link has to be resolved. Any other file's real path is
+            // its directory's, joined with its name.
+            const resolve = isSymbolicLink(type)
+                ? undefined
+                : () => Promise.resolve(path.join(identity, name));
+            // An excluded file is still listed, so the summary can say why it
+            // was not counted; only a duplicate is left out.
+            if ((await claimFile(child, context, claimed, resolve)) === 'duplicate') {
+                continue;
+            }
+
             try {
                 const { size } = await vscode.workspace.fs.stat(child);
                 discovery.files.push({ uri: child, size });
@@ -375,4 +446,9 @@ export function isDirectory(type: vscode.FileType): boolean {
 
 export function isFile(type: vscode.FileType): boolean {
     return (type & vscode.FileType.File) !== 0;
+}
+
+/** A link, to a file or to a directory: `readDirectory` sets this bit beside the target's type. */
+export function isSymbolicLink(type: vscode.FileType): boolean {
+    return (type & vscode.FileType.SymbolicLink) !== 0;
 }

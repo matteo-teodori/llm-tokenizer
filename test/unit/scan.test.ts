@@ -6,12 +6,15 @@ import * as vscode from 'vscode';
 
 import {
     FolderContext,
+    claimFile,
     collectFiles,
     buildExcludeGlob,
     dedupeSelection,
     describeSkipReason,
+    excludedByPath,
     isDirectory,
     isFile,
+    isSymbolicLink,
     looksBinary,
     shouldCount,
     shouldDescend,
@@ -256,6 +259,8 @@ suite('directory traversal', () => {
         assert.strictEqual(isFile(vscode.FileType.File), true);
         assert.strictEqual(isDirectory(vscode.FileType.File), false);
         assert.strictEqual(isFile(vscode.FileType.Directory), false);
+        assert.strictEqual(isSymbolicLink(vscode.FileType.File | vscode.FileType.SymbolicLink), true);
+        assert.strictEqual(isSymbolicLink(vscode.FileType.File), false);
     });
 });
 
@@ -317,14 +322,119 @@ suite('symlinked directories', () => {
 
     test('a symlinked file is still counted', async function () {
         // Following links was the point of the original change; only the
-        // duplication was wrong.
+        // duplication was wrong. The file it names is outside the walk, so
+        // this link is the only way to it.
         const root = await tree(async dir => {
-            await write(path.join(dir, 'real.txt'), 'a');
-            await fs.symlink(path.join(dir, 'real.txt'), path.join(dir, 'alias.txt'));
+            await write(path.join(dir, 'elsewhere', 'real.txt'), 'a');
+            await fs.mkdir(path.join(dir, 'walked'), { recursive: true });
+            await fs.symlink(path.join(dir, 'elsewhere', 'real.txt'), path.join(dir, 'walked', 'alias.txt'));
+        });
+
+        const files = await count(vscode.Uri.joinPath(root, 'walked'));
+        assert.deepStrictEqual(files.map(f => path.basename(f)), ['alias.txt']);
+    });
+
+    test('a file and a link to it are listed once, as the project scan counts them', async function () {
+        // The walk skipped a directory it had been through under its real path,
+        // but not a file: `a.ts -> b.ts` listed the same file twice, so the
+        // summary counted it twice where the status bar's scan counted it once.
+        const root = await tree(async dir => {
+            await write(path.join(dir, 'src', 'b.ts'), 'const b = 1;');
+            await fs.symlink(path.join(dir, 'src', 'b.ts'), path.join(dir, 'src', 'a.ts'));
+            await fs.mkdir(path.join(dir, 'docs'), { recursive: true });
+            await fs.symlink(path.join(dir, 'src'), path.join(dir, 'docs', 'src-link'), 'dir');
         });
 
         const files = await count(root);
-        assert.strictEqual(files.length, 2, 'a symlinked file is a separate entry');
+        assert.strictEqual(files.length, 1, `expected 1 file, got ${files.join(', ')}`);
+    });
+
+    test('a link its ignore rules exclude is listed for the summary, and takes nothing from its target', async function () {
+        const root = await tree(async dir => {
+            await write(path.join(dir, '.gitignore'), '*.gen.ts\n');
+            await write(path.join(dir, 'b.ts'), 'const b = 1;');
+            await fs.symlink(path.join(dir, 'b.ts'), path.join(dir, 'x.gen.ts'));
+        });
+        const context = await FolderContext.create({ uri: root, name: 'fixture', index: 0 }, true);
+        const cancellation = new vscode.CancellationTokenSource();
+        try {
+            const found = await collectFiles(root, context, cancellation.token);
+            const listed = found.files.map(f => path.basename(f.uri.fsPath)).sort();
+            assert.deepStrictEqual(listed, ['.gitignore', 'b.ts', 'x.gen.ts']);
+            assert.strictEqual(shouldCount(vscode.Uri.joinPath(root, 'x.gen.ts'), 12, context), 'gitignored');
+        } finally {
+            cancellation.dispose();
+        }
+    });
+});
+
+suite('claiming a file by its real path', () => {
+    /** A temp root holding `src/a.ts`, and an ignored `bazel-out/a.ts` linked to it. */
+    async function bazel(): Promise<{ context: FolderContext; real: vscode.Uri; link: vscode.Uri }> {
+        const { context, root } = await contextFor('bazel-out/\n');
+        await fs.mkdir(path.join(root.fsPath, 'src'), { recursive: true });
+        await fs.writeFile(path.join(root.fsPath, 'src', 'a.ts'), 'const a = 1;');
+        await fs.mkdir(path.join(root.fsPath, 'bazel-out'), { recursive: true });
+        await fs.symlink(path.join(root.fsPath, 'src', 'a.ts'), path.join(root.fsPath, 'bazel-out', 'a.ts'));
+        return {
+            context,
+            real: vscode.Uri.joinPath(root, 'src', 'a.ts'),
+            link: vscode.Uri.joinPath(root, 'bazel-out', 'a.ts'),
+        };
+    }
+
+    test('an ignored link to a counted file does not take it out of the total, whichever comes first', async () => {
+        // findFiles does not apply .gitignore and lists files in no defined
+        // order. Claimed before the ignore check, the link listed first took
+        // the real path, and the real file was then skipped as a duplicate.
+        const { context, real, link } = await bazel();
+        for (const order of [[link, real], [real, link]]) {
+            const seen = new Set<string>();
+            const claims = [];
+            for (const uri of order) {
+                claims.push(await claimFile(uri, context, seen));
+            }
+            const forReal = claims[order.indexOf(real)];
+            const forLink = claims[order.indexOf(link)];
+            assert.strictEqual(forReal, 'claimed', `src/a.ts was ${forReal} with ${order.map(u => path.basename(path.dirname(u.fsPath))).join(' first, then ')}`);
+            assert.strictEqual(forLink, 'excluded');
+        }
+    });
+
+    test('a path its rules exclude is never resolved', async () => {
+        // Every file of a large gitignored tree outside the ignored directory
+        // names — a .venv, a .tox — cost a realpath and a stat at each rescan.
+        const { context, root } = await contextFor('.venv/\n');
+        const seen = new Set<string>();
+        const resolved: string[] = [];
+        const resolve = (uri: vscode.Uri) => () => {
+            resolved.push(uri.path);
+            return Promise.resolve(uri.path);
+        };
+        for (const uri of [
+            vscode.Uri.joinPath(root, '.venv', 'lib', 'site.py'),
+            vscode.Uri.joinPath(root, 'logo.png'),
+        ]) {
+            assert.strictEqual(await claimFile(uri, context, seen, resolve(uri)), 'excluded');
+            assert.strictEqual(excludedByPath(uri, context), true);
+        }
+        assert.deepStrictEqual(resolved, []);
+        assert.strictEqual(seen.size, 0);
+
+        const counted = vscode.Uri.joinPath(root, 'src', 'a.py');
+        assert.strictEqual(await claimFile(counted, context, seen, resolve(counted)), 'claimed');
+        assert.deepStrictEqual(resolved, [counted.path]);
+    });
+
+    test('a file reached twice through a link is claimed once', async () => {
+        const { context, root } = await contextFor('');
+        await fs.writeFile(path.join(root.fsPath, 'b.ts'), 'const b = 1;');
+        await fs.symlink(path.join(root.fsPath, 'b.ts'), path.join(root.fsPath, 'a.ts'));
+        const seen = new Set<string>();
+        assert.strictEqual(await claimFile(vscode.Uri.joinPath(root, 'a.ts'), context, seen), 'claimed');
+        assert.strictEqual(await claimFile(vscode.Uri.joinPath(root, 'b.ts'), context, seen), 'duplicate');
+        // A path that cannot be resolved is its own: counted, never dropped.
+        assert.strictEqual(await claimFile(vscode.Uri.joinPath(root, 'gone.ts'), context, seen), 'claimed');
     });
 });
 

@@ -4,6 +4,114 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.2.1] - 2026-10-25
+
+### Changed
+- **The LLM Tokenizer T shows wherever Claude Code's VS Code extension is
+  installed**, rather than only while Claude Code usage is on. Clicked while
+  the feature is off, it opens the page that says what turning it on reads
+  and keeps, which now has **Turn On**: nothing is read until then. To hide
+  the T, right-click the editor's title bar and choose
+  **Hide 'Show Claude Code Usage'**.
+- **While Claude Code's records are read, the panel says so.** A first
+  import takes a while on a large history, and meanwhile its totals showed
+  as the whole history, then grew. The panel now says how many of the files
+  it has gone through and marks every total `≥` until it is done, and says
+  so as well while another window reads them.
+- **The total's line says how much of it is cache reads.** Claude Code
+  sends the whole conversation again with every request, so a single prompt
+  that makes dozens of model calls processes tens of millions of tokens.
+  Every share on the page is written one way, cut rather than rounded up, so
+  the line and the bars below it always agree, and 99.6% is never all of it.
+- **The Claude Code usage history is about half the size**: each
+  transcript's path is kept once, rather than in every request read from
+  it. The first window of this version to open the history converts it, in
+  a few seconds on a large one, and keeps a copy of the old one beside it,
+  which **Clear Claude Code Usage History** removes. A window still running
+  2.2.0 stops reading and says to reload.
+- **The model registry, checked again against each provider's documentation
+  on 2026-10-25.**
+  - Removed, as OpenAI shut them down on 23 October: o4-mini, GPT-4 Turbo
+    and GPT-3.5 Turbo. A saved choice moves to the substitute OpenAI names:
+    GPT-5.6 Terra for o4-mini and GPT-3.5 Turbo, GPT-5.6 Sol for GPT-4
+    Turbo.
+  - MiniMax M3.1 Flash is out of preview and counts exactly, with M3's
+    tokenizer. A saved choice of the preview, or of the retired M2.1 and
+    M2, moves to it.
+  - Added: Kimi K3.1 Pro, and Muse Spark Open 816B-A42B, Meta's open
+    weights of Muse Spark, both counted exactly after a one-time download.
+  - A retired Claude 3 model saved by an older version moves to the newest
+    of its line, as Anthropic suggests, and Gemini 2.0 Flash to 3.6 Flash,
+    as Google does, which is estimated.
+
+  That makes 93 models across 13 providers, 59 of them counted with the
+  model's own tokenizer.
+- **The VSIX is less than half its former size**: it ships one tiktoken
+  encoding rather than three. Nothing uses cl100k_base any more, and gpt-oss
+  counts with o200k_base, which gives every text the count gpt-oss's own
+  o200k_harmony does.
+
+### Fixed
+- **Turning Claude Code usage on, on Windows, could fail, then work a few
+  tries later.** Windows refuses a file for a moment while another program
+  has it open, an antivirus for one, and a window that met such a refusal
+  while setting up the history failed, or deleted the history it had just
+  made. Refusals are waited out now, and a cleanup that fails no longer
+  undoes the setup.
+- **A failure that clears by itself no longer shows as failing for an
+  hour.** A read that finds the history busy, a file refused for a moment
+  or its worker stopped is tried again after 5 and 30 seconds, then 2 and 10
+  minutes, and shows as failing only once a retry has failed too.
+- **The status item no longer waits for a whole first import**, nor a minute
+  after it, before it shows the running session's context.
+- **A range picked while the panel was updating** could show its button
+  pressed over the figures of the range before, for a moment.
+- **Moving the cursor or switching back to a tab no longer recounts an
+  unchanged document**, which held up every count queued behind it.
+- **Forgetting changed files no longer stalls the window.** After a checkout
+  or a formatter run touching thousands of files, each one forgotten cost a
+  walk of the whole count cache on the extension host's thread, which every
+  extension in the window shares: 7.5 seconds or more for 5,000 files in a
+  35,000-file workspace.
+- **Loading a downloaded tokenizer no longer holds up the editor.** The
+  tokenizer worker parses it now, where the extension host did, and the
+  extension host keeps no copy of it, which came to 44 MB for Gemma 3's.
+- **A gitignored symlink to a counted file**, a bazel-out tree's for one,
+  took that file out of the workspace total when it was listed first, and
+  rescans no longer resolve and stat every file of a gitignored tree such as
+  a `.venv` before skipping it.
+- **With a downloadable model whose tokenizer is not downloaded, rescans
+  keep the estimates** rather than read every file again.
+- **With `statusBarDisplay` set to `file`, the workspace is no longer
+  scanned** for a total the status bar never shows.
+- **Count Tokens names the model it counted with**, even when the model
+  changes while it counts, and changing `defaultModel` takes the previous
+  model's total off the status bar at once, as picking one from the status
+  bar does.
+- **Counting a folder counts a symlinked file once**, as the workspace total
+  does.
+- **The summary names the language of a Dockerfile, a Makefile** and other
+  files that give it by name, and its copied and exported note on files not
+  listed uses the page's number format, whatever the system's locale.
+- **Only `true` turns Claude Code usage or its status item on**: `"false"`
+  written as a string turned them on.
+- **What Claude Code usage keeps is listed in full** in its setting's
+  description and on the page that turns it on, as in the README: 2.2.0
+  left out the window's process id, which each import writes, and each
+  transcript's size and file id.
+- **A tokenizer cleared in another window is not downloaded again unasked**
+  when this window's tokenizer worker restarts, nor still reported as
+  downloaded.
+
+### Internal
+- When the usage history fails, the log gives SQLite's result code and its
+  own text for it, and still never the error's message.
+- A backup made before the history is converted is made whole or not at
+  all, and a later change of the transcript parser keeps the requests of
+  lines Claude Code has since removed from a transcript.
+- The README's and the manifest's model counts are checked against the
+  registry.
+
 ## [2.2.0] - 2026-10-20
 
 ### Added

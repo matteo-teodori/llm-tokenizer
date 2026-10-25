@@ -319,7 +319,11 @@ export type MalformedCategory = 'json-syntax' | 'not-object' | 'oversize' | `bad
 export interface ReadResult {
     /** Not read at all: size and mtime are as the checkpoint left them. */
     unchanged: boolean;
-    /** Read from the start rather than the checkpoint, and why. */
+    /**
+     * Read from the start rather than the checkpoint, and why. `parser` only
+     * for a file that still holds every line the checkpoint read: one that
+     * has also changed says how.
+     */
     restarted: 'new' | 'replaced' | 'truncated' | 'rewritten' | 'parser' | null;
     requests: UsageRequest[];
     compactions: Compaction[];
@@ -398,10 +402,14 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
     }
 }
 
+/**
+ * Why `previous` cannot be read on from, or null when it can. A newer parser
+ * is the reason only once the file is known to hold every line `previous`
+ * read: the importer then deletes their rows before reading it again, and
+ * the rows of lines Claude Code has since removed from a file replaced,
+ * truncated or rewritten could never be read again.
+ */
 function restartReason(fd: number, state: FileState, previous: ReadCheckpoint): ReadResult['restarted'] {
-    if (previous.parserVersion < PARSER_VERSION) {
-        return 'parser';
-    }
     if (previous.ino !== null && state.ino !== null && (state.ino !== previous.ino || state.dev !== previous.dev)) {
         return 'replaced';
     }
@@ -415,7 +423,7 @@ function restartReason(fd: number, state: FileState, previous: ReadCheckpoint): 
             return 'rewritten';
         }
     }
-    return null;
+    return previous.parserVersion < PARSER_VERSION ? 'parser' : null;
 }
 
 /** A hash of the TAIL_BYTES before `offset`, or null at the start of a file. */

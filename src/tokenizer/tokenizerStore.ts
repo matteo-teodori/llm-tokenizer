@@ -103,38 +103,70 @@ export class TokenizerDownloadError extends Error {
  */
 export class TokenizerStore {
     private readonly inFlight = new Map<string, Promise<TokenizerAsset>>();
-    private readonly memory = new Map<string, TokenizerAsset>();
 
     /**
-     * Bumped by `clear()`, so a download that was already in flight when the
-     * user cleared the cache does not put its result back afterwards.
+     * The hash each repo's file on disk matched when it was last read, so that
+     * asking again whether a vocabulary is downloaded reads nothing.
+     *
+     * Only that, never the vocabulary. This used to keep each one parsed, from
+     * the first look at it for the rest of the session and across model
+     * switches, though the worker holds its own copy from the moment it is
+     * loaded: measured in VS Code 1.105's runtime, 44 MB of the extension
+     * host's heap for Gemma 3's, and 85 MB once Llama 3.3's and Qwen 3.8's had
+     * joined it. A load now reads the file again, which is what re-hydration
+     * after a worker crash does too.
+     */
+    private readonly verified = new Map<string, string>();
+
+    /**
+     * Bumped by `clear()`, so a download or a read that was already in flight
+     * when the user cleared the cache does not put its result back afterwards.
      */
     private generation = 0;
 
     constructor(private readonly storageUri: vscode.Uri) {}
 
     /**
-     * The cached asset for `spec`, or undefined if it has never been
+     * The vocabulary on disk for `spec`, or undefined if it has never been
      * downloaded, or what is on disk is not the file the registry names.
+     *
+     * Never downloads, which is why re-hydration loads through this rather
+     * than `fetch`: a vocabulary deleted since it was verified — by "Clear
+     * Downloaded Tokenizers" in another window — stays an estimate instead of
+     * being downloaded again with nobody asked.
      */
     public async peek(spec: DownloadableSpec): Promise<TokenizerAsset | undefined> {
-        const cached = this.memory.get(spec.repo);
-        if (cached) {
-            return cached;
-        }
-
+        const generation = this.generation;
         try {
             const asset = await this.readFromDisk(spec);
-            this.memory.set(spec.repo, asset);
+            this.markVerified(spec, generation);
             return asset;
         } catch {
+            // Forgotten, or the download command would answer "already
+            // downloaded" for a file that is no longer there, and never fetch
+            // it again.
+            if (this.verified.get(spec.repo) === spec.keptSha256) {
+                this.verified.delete(spec.repo);
+            }
             return undefined;
         }
     }
 
     /** True when `spec`'s vocabulary is already on disk, so the UI can offer an exact count. */
     public async isDownloaded(spec: DownloadableSpec): Promise<boolean> {
-        return (await this.peek(spec)) !== undefined;
+        if (this.verified.get(spec.repo) === spec.keptSha256) {
+            return true;
+        }
+
+        const generation = this.generation;
+        try {
+            // Hashed only: nothing read here is kept, so nothing is decoded.
+            await this.readPinned(spec);
+            this.markVerified(spec, generation);
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     /**
@@ -159,9 +191,7 @@ export class TokenizerStore {
             .then(asset => {
                 // Still the caller's asset either way — it just no longer
                 // belongs in a cache the user has since emptied.
-                if (generation === this.generation) {
-                    this.memory.set(repo, asset);
-                }
+                this.markVerified(spec, generation);
                 return asset;
             })
             .finally(() => {
@@ -200,7 +230,7 @@ export class TokenizerStore {
     public async clear(): Promise<void> {
         this.generation++;
         this.inFlight.clear();
-        this.memory.clear();
+        this.verified.clear();
 
         let entries: [string, vscode.FileType][];
         try {
@@ -231,39 +261,43 @@ export class TokenizerStore {
         return vscode.Uri.joinPath(this.storageUri, repo.replace(/[/\\]/g, REPO_SEPARATOR));
     }
 
+    /** Record that `spec`'s file matched, unless the cache was cleared since. */
+    private markVerified(spec: DownloadableSpec, generation: number): void {
+        if (generation === this.generation) {
+            this.verified.set(spec.repo, spec.keptSha256);
+        }
+    }
+
+    /** The vocabulary file's bytes, only when it is the one the registry names. */
+    private async readPinned(spec: DownloadableSpec): Promise<Uint8Array> {
+        const name = spec.kind === 'tiktokenModel' ? RANK_FILE : 'tokenizer.json';
+        const bytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.repoDir(spec.repo), name));
+        if (keptSha256(bytes) !== spec.keptSha256) {
+            throw new TokenizerDownloadError(spec.repo, `the cached ${name} is not the file this version names`);
+        }
+        return bytes;
+    }
+
+    /** Decoded, never parsed: the worker parses it, for the reason `TokenizerAsset` gives. */
     private async readFromDisk(spec: DownloadableSpec): Promise<TokenizerAsset> {
-        const dir = this.repoDir(spec.repo);
         const decoder = new TextDecoder();
-        /** The vocabulary file, only when it is the one the registry names. */
-        const pinned = async (name: string): Promise<string> => {
-            const bytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name));
-            if (keptSha256(bytes) !== spec.keptSha256) {
-                throw new TokenizerDownloadError(spec.repo, `the cached ${name} is not the file this version names`);
-            }
-            return decoder.decode(bytes);
-        };
+        const text = decoder.decode(await this.readPinned(spec));
 
         if (spec.kind === 'tiktokenModel') {
-            return { kind: 'tiktokenModel', rankFile: await pinned(RANK_FILE) };
+            return { kind: 'tiktokenModel', rankFile: text };
         }
-
-        const read = async (name: string): Promise<unknown> =>
-            JSON.parse(
-                decoder.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name))),
-            ) as unknown;
-
-        const tokenizerJSON = JSON.parse(await pinned('tokenizer.json')) as unknown;
 
         // Optional: some tokenizer-only mirrors omit it, and counting does not
         // need it.
-        let tokenizerConfig: unknown;
+        let tokenizerConfig: string;
         try {
-            tokenizerConfig = await read('tokenizer_config.json');
+            const config = vscode.Uri.joinPath(this.repoDir(spec.repo), 'tokenizer_config.json');
+            tokenizerConfig = decoder.decode(await vscode.workspace.fs.readFile(config));
         } catch {
-            tokenizerConfig = {};
+            tokenizerConfig = '{}';
         }
 
-        return { kind: 'hf', tokenizerJSON, tokenizerConfig };
+        return { kind: 'hf', tokenizerJSON: text, tokenizerConfig };
     }
 
     private async download(
@@ -298,15 +332,18 @@ export class TokenizerStore {
         // Kept as it is written out again, which is what the hash is of.
         const kept = JSON.stringify(tokenizerJSON);
         check('tokenizer.json', kept);
+        const config = JSON.stringify(tokenizerConfig);
 
         if (!stale()) {
             const dir = this.repoDir(repo);
             await vscode.workspace.fs.createDirectory(dir);
             await writeWhole(dir, 'tokenizer.json', kept);
-            await writeWhole(dir, 'tokenizer_config.json', JSON.stringify(tokenizerConfig));
+            await writeWhole(dir, 'tokenizer_config.json', config);
         }
 
-        return { kind: 'hf', tokenizerJSON, tokenizerConfig };
+        // The text a read of these files gives back, for the worker to parse:
+        // the object parsed here goes no further.
+        return { kind: 'hf', tokenizerJSON: kept, tokenizerConfig: config };
     }
 
     /** Fetch a file as text, for vocabularies that are not JSON. */

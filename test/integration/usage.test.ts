@@ -145,3 +145,42 @@ suite('Claude Code usage, turned on, in the editor', () => {
         assert.ok(shown.some(s => /read 4 changed of 4/.test(s.message)), JSON.stringify(shown));
     });
 });
+
+suite('Claude Code usage, turned on from its own page, in the editor', () => {
+    const config = () => vscode.workspace.getConfiguration('llm-tokenizer');
+    const window = vscode.window as unknown as Record<string, unknown>;
+    const originals: Record<string, unknown> = {};
+    let page: ReturnType<typeof fakePanel>;
+
+    setup(() => {
+        page = fakePanel();
+        for (const name of ['createWebviewPanel', 'showInformationMessage', 'showWarningMessage']) {
+            originals[name] = window[name];
+        }
+        window.createWebviewPanel = () => page.panel;
+        window.showInformationMessage = () => Promise.resolve(undefined);
+        // Clear's modal question, answered as the teardown needs.
+        window.showWarningMessage = (_message: string, ...items: unknown[]) => Promise.resolve(typeof items[0] === 'object' ? 'Clear History' : undefined);
+    });
+
+    teardown(async () => {
+        page.panel.dispose();
+        // Cleared and off again, as the next run expects to find it.
+        await vscode.commands.executeCommand('llm-tokenizer.clearClaudeCodeUsageHistory');
+        await config().update('enableClaudeCodeUsage', undefined, vscode.ConfigurationTarget.Global);
+        Object.assign(window, originals);
+    });
+
+    test('Turn On, on the off page, sets the feature on for the user, and the page then shows what it read', async () => {
+        assert.strictEqual(config().get('enableClaudeCodeUsage'), false);
+        await vscode.commands.executeCommand('llm-tokenizer.showClaudeCodeUsage');
+        assert.ok(page.panel.webview.html.includes('data-action="turnOn"'), 'the off page has no Turn On');
+        page.send({ type: 'turnOn' });
+        await until(() => config().inspect('enableClaudeCodeUsage')?.globalValue === true, 5_000);
+        const inspected = config().inspect('enableClaudeCodeUsage');
+        assert.deepStrictEqual([inspected?.globalValue, inspected?.workspaceValue], [true, undefined]);
+        page.send({ type: 'setRange', range: 'coverage' });
+        await until(() => processedInCsv(page.posted.at(-1)) === 1_278, 20_000);
+        assert.strictEqual(processedInCsv(page.posted.at(-1)), 1_278, `the last export added up to ${processedInCsv(page.posted.at(-1))}`);
+    });
+});

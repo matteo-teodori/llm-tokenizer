@@ -193,7 +193,7 @@ suite('usage accounting', () => {
         // F09. An unknown or renamed id stays unresolved: following the alias
         // would credit a retired model's usage to its replacement.
         assert.strictEqual(modelById('claude-3-opus'), undefined);
-        assert.strictEqual(findModel('claude-3-opus')?.id, 'claude-opus-5', 'the premise: the tokenizer side follows it');
+        assert.strictEqual(findModel('claude-3-opus')?.id, 'claude-opus-5-5', 'the premise: the tokenizer side follows it');
         assert.strictEqual(modelById('claude-opus-5-5')?.label, 'Claude Opus 5.5');
         assert.strictEqual(modelById('claude-opus-5-5[1m]'), undefined, 'the bracket is not part of an id');
 

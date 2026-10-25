@@ -60,6 +60,8 @@ export interface LiveInput {
     compactions: readonly Compaction[];
     largeContextDisabled: boolean;
     todayProcessed: { tokens: number; partial: boolean } | undefined;
+    /** Claude Code's records are still being read: the session's latest request may not be, yet. */
+    reading?: boolean;
     formatTime(epochMs: number): string;
 }
 
@@ -97,7 +99,9 @@ export function describeLive(input: LiveInput): LiveView {
     // otherwise render as a link.
     const tooltip = ['Claude Code, in this workspace', ''];
     if (occupancy === null) {
-        tooltip.push(afterCompaction ? 'Context: compacted; its size after was not recorded.' : 'Context: not reported yet.');
+        tooltip.push(
+            afterCompaction ? 'Context: compacted; its size after was not recorded.' : input.reading ? 'Context: not read yet.' : 'Context: not reported yet.',
+        );
     } else if (share !== undefined && window !== undefined) {
         tooltip.push(`Context: ${occupancy.toLocaleString('en-US')} of ${window.toLocaleString('en-US')} tokens (${percent(share)})${afterCompaction ? ', after compacting' : ''}.`);
     } else {
@@ -121,6 +125,9 @@ export function describeLive(input: LiveInput): LiveView {
     }
     if (input.todayProcessed) {
         tooltip.push(`Today in this workspace: ${input.todayProcessed.partial ? '≥' : ''}${formatNumber(input.todayProcessed.tokens)} processed`);
+    }
+    if (input.reading) {
+        tooltip.push("Still reading Claude Code's records, so this can be behind.");
     }
     tooltip.push('', 'Click to show Claude Code usage.');
     return { text, tooltip, status };
@@ -160,13 +167,15 @@ export interface StatusItemDeps {
     createItem(): vscode.StatusBarItem;
 }
 
-export type StatusItemService = Pick<UsageService, 'roots' | 'liveContext' | 'report' | 'onDidChange' | 'hold' | 'whenStarted'>;
+export type StatusItemService = Pick<UsageService, 'roots' | 'liveContext' | 'report' | 'onDidChange' | 'hold' | 'whenStarted' | 'reading'>;
 
 export class UsageStatusItem implements vscode.Disposable {
     private item: vscode.StatusBarItem | undefined;
     private hold: vscode.Disposable | undefined;
     private timer: NodeJS.Timeout | undefined;
     private refreshing: Promise<void> | undefined;
+    /** Asked again while a look was under way: one more look follows it. */
+    private again = false;
     private readonly listener: vscode.Disposable;
 
     constructor(
@@ -211,23 +220,37 @@ export class UsageStatusItem implements vscode.Disposable {
         this.timer = undefined;
         // A look that never ends must not hold the next item's looks.
         this.refreshing = undefined;
+        this.again = false;
         this.hold?.dispose();
         this.hold = undefined;
         this.item?.dispose();
         this.item = undefined;
     }
 
-    /** Look again; a call during a look waits for it rather than starting another. */
+    /**
+     * Look again. A call during a look waits for it rather than starting
+     * another, and one more look follows it: what the look under way read can
+     * be older than what the call was told. A first import's first look read
+     * the history still empty, then waited for today's report while the import
+     * went through, and the import's change, folded into that look, left the
+     * item at "—" until the next tick, a minute later.
+     */
     refresh(): Promise<void> {
-        if (!this.refreshing) {
-            const look: Promise<void> = this.look().finally(() => {
-                if (this.refreshing === look) {
-                    this.refreshing = undefined;
-                }
-            });
-            this.refreshing = look;
+        if (this.refreshing) {
+            this.again = true;
+            return this.refreshing;
         }
-        return this.refreshing;
+        const look: Promise<void> = this.look().finally(() => {
+            if (this.refreshing === look) {
+                this.refreshing = undefined;
+                if (this.again) {
+                    this.again = false;
+                    void this.refresh();
+                }
+            }
+        });
+        this.refreshing = look;
+        return look;
     }
 
     private async look(): Promise<void> {
@@ -264,10 +287,14 @@ export class UsageStatusItem implements vscode.Disposable {
         if (item !== this.item) {
             return;
         }
+        // While a pass reads, today's total is what it has read so far, and
+        // the session's latest request may not be read yet.
+        const reading = this.service.reading !== undefined;
         const view = describeLive({
             ...context,
             largeContextDisabled: resolved.largeContextDisabled || (live.root !== undefined && resolved.largeContextDisabledRoots.includes(live.root)),
-            todayProcessed: report && { tokens: report.totals.processed, partial: report.totals.provenance === 'partial' },
+            todayProcessed: report && { tokens: report.totals.processed, partial: report.totals.provenance === 'partial' || reading },
+            reading,
             formatTime: this.deps.formatTime,
         });
         item.text = view.text;

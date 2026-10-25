@@ -111,18 +111,20 @@ suite('tokenizer service', () => {
         }
     });
 
-    test('every tiktoken encoding the registry names is actually shipped', async () => {
+    test('the encodings built are exactly the ones the registry names', async () => {
         // build.mjs writes one file per encoding into out/encodings/ and
         // encoders.ts requires them by path at runtime. The two lists are
         // maintained by hand in different files — the TiktokenEncoding union
         // says it "must stay in sync with ENCODINGS" and nothing checked it. A registry entry naming an encoding that was not built
         // throws MODULE_NOT_FOUND inside the worker, which the service catches
-        // and turns into a silent estimate for every OpenAI model.
+        // and turns into a silent estimate for every OpenAI model. One built
+        // that no model names ships its rank tables for nothing, as
+        // cl100k_base did once GPT-4 Turbo was gone.
         const { MODELS } = await import('../../src/tokenizer/registry');
-        const encodings = new Set(
+        const named = new Set<string>(
             MODELS.map(m => m.encoder).flatMap(e => (e.kind === 'tiktoken' ? [e.encoding] : [])),
         );
-        assert.ok(encodings.size > 0, 'no model uses a bundled encoding');
+        assert.ok(named.size > 0, 'no model uses a bundled encoding');
 
         const dir = vscode.Uri.file(path.join(__dirname, '..', '..', '..', 'out', 'encodings'));
         const built = new Set(
@@ -131,8 +133,13 @@ suite('tokenizer service', () => {
                 .map(([name]) => name.replace(/\.js$/, '')),
         );
 
-        for (const encoding of encodings) {
+        for (const encoding of named) {
             assert.ok(built.has(encoding), `${encoding} is in the registry but was not built`);
+        }
+        for (const encoding of built) {
+            // A development build never empties out/, so a file an earlier
+            // build left there fails this too; deleting out/ clears it.
+            assert.ok(named.has(encoding), `${encoding} is built, but no model in the registry names it`);
         }
     });
 
@@ -146,12 +153,12 @@ suite('tokenizer service', () => {
         // workspace as estimated.
         //
         // Entered through TokenizerService rather than the encoding module, so
-        // the whole chain — worker, protocol, error path — is under test. Both
-        // shipped OpenAI encodings are covered because their special-token sets
-        // differ (Harmony adds <|start|>, <|message|>, <|channel|> and friends).
+        // the whole chain — worker, protocol, error path — is under test.
+        // gpt-oss is covered with Harmony's own literals (<|start|>,
+        // <|message|> and friends), which o200k_harmony, the encoding
+        // tiktoken gives it, reads as special tokens.
         const cases: [string, string][] = [
             ['gpt-5.6-sol', '<|endoftext|>'],
-            ['gpt-4-turbo', '<|endoftext|>'],
             ['gpt-oss-120b', '<|start|>system<|message|>hi<|end|>'],
         ];
 
@@ -177,7 +184,6 @@ suite('tokenizer service', () => {
         // tables shifted, which would silently move every OpenAI count.
         const cases: [string, string, number][] = [
             ['gpt-5.6-sol', 'Hello world!', 3],
-            ['gpt-4-turbo', 'Hello world!', 3],
             ['gpt-5.6-sol', 'const x = 42;', 6],
         ];
 
@@ -188,13 +194,23 @@ suite('tokenizer service', () => {
         }
     });
 
-    test('the three bundled encodings all load', async () => {
+    test('every bundled encoding loads', async () => {
         // Each encoding is a separate lazily-required bundle; a packaging
-        // mistake shows up as one of these failing to load.
-        for (const id of ['gpt-5.6-sol', 'gpt-oss-120b', 'gpt-4-turbo']) {
-            const result = await tokenizer.count('token counting', model(id));
-            assert.ok(result.count > 0, `${id} produced no tokens`);
-            assert.strictEqual(result.exact, true, `${id} should be exact`);
+        // mistake shows up as one of these failing to load. One model for each
+        // encoding the registry names, so the list cannot fall behind it.
+        const { MODELS } = await import('../../src/tokenizer/registry');
+        const byEncoding = new Map<string, ModelInfo>();
+        for (const m of MODELS) {
+            if (m.encoder.kind === 'tiktoken' && !byEncoding.has(m.encoder.encoding)) {
+                byEncoding.set(m.encoder.encoding, m);
+            }
+        }
+        assert.ok(byEncoding.size > 0, 'no model uses a bundled encoding');
+
+        for (const [encoding, m] of byEncoding) {
+            const result = await tokenizer.count('token counting', m);
+            assert.ok(result.count > 0, `${encoding} (${m.id}) produced no tokens`);
+            assert.strictEqual(result.exact, true, `${encoding} (${m.id}) should be exact`);
         }
     });
 
@@ -394,6 +410,43 @@ suite('tokenizer service', () => {
         );
     });
 
+    test('re-hydration reads the vocabulary from disk again, and never downloads it', async () => {
+        // The extension host no longer keeps a vocabulary once the worker has
+        // it, so a crash takes the only loaded copy with it and re-hydration
+        // reads the file again. One deleted in the meantime — "Clear
+        // Downloaded Tokenizers" in another window — must leave an estimate,
+        // not a download: nothing on the count path reads the setting that
+        // turns downloads off. Nor may it still be reported as downloaded, or
+        // the download command would refuse to fetch it.
+        const llama = seeded('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-on-demand.js'), store, log);
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        assert.deepStrictEqual(await tokenizer.count('abc', llama), { count: 2, exact: true });
+
+        const dir = vscode.Uri.joinPath(storageUri, llama.encoder.repo.replace(/[/\\]/g, '--'));
+        await vscode.workspace.fs.delete(vscode.Uri.joinPath(dir, 'tokenizer.json'));
+        const asked: string[] = [];
+        const original = globalThis.fetch;
+        globalThis.fetch = (url: string | URL | Request) => {
+            asked.push(url instanceof Request ? url.url : url.toString());
+            return Promise.reject(new Error('the test is offline'));
+        };
+        try {
+            assert.strictEqual((await tokenizer.count('CRASH', model('gpt-5.6-sol'))).exact, false);
+
+            const after = await tokenizer.count('abc', llama);
+            assert.strictEqual(after.exact, false, 'counted exactly with a vocabulary no longer on disk');
+            assert.deepStrictEqual(asked, [], 're-hydration downloaded the vocabulary');
+            assert.strictEqual(await tokenizer.isExact(llama), false, 'a deleted vocabulary is still reported as downloaded');
+        } finally {
+            globalThis.fetch = original;
+        }
+    });
+
     test('a crash that trips the budget mid re-hydration does not shelve the vocabulary', async () => {
         // Re-hydration compares the crash epoch to tell a vocabulary that cannot
         // be used from a worker that is dying. It read the epoch after checking
@@ -582,8 +635,8 @@ suite('tokenizer service', () => {
 
     test('every Kimi model shares one downloaded rank table', async () => {
         // The rank file is byte-identical across the family, so the registry
-        // points them all at one repo: downloading once must serve all three.
-        const repos = ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'].map(id => {
+        // points them all at one repo: downloading once must serve all four.
+        const repos = ['kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'].map(id => {
             const m = model(id);
             assert.strictEqual(m.encoder.kind, 'tiktokenModel');
             return m.encoder.kind === 'tiktokenModel' ? m.encoder.repo : '';
@@ -591,7 +644,7 @@ suite('tokenizer service', () => {
         assert.strictEqual(new Set(repos).size, 1, `expected one repo, got ${repos.join(', ')}`);
 
         await seedRankTable(storageUri, repos[0]);
-        for (const id of ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']) {
+        for (const id of ['kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']) {
             const result = await tokenizer.count('Hello', seeded(id));
             assert.strictEqual(result.exact, true, `${id} should be exact`);
             assert.strictEqual(result.count, 3, id);
@@ -657,6 +710,46 @@ suite('tokenizer service', () => {
         assert.strictEqual(await store.isDownloaded(pinned.encoder), true);
     });
 
+    test('the store hands over a vocabulary as text, and keeps none of it', async () => {
+        // Parsing is the worker's: done on the extension host, whose thread
+        // every extension in the window shares, it held that thread for up to a
+        // third of a second on Gemma 3's tokenizer.json, and the store then kept
+        // the parsed object for the rest of the session, beside the worker's own.
+        const llama = seeded('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        const asset = await store.peek(llama.encoder);
+        assert.ok(asset?.kind === 'hf', 'the seeded vocabulary was not read');
+        assert.strictEqual(asset.tokenizerJSON, readFileSync(path.join(FIXTURES, 'tokenizer', 'tokenizer.json'), 'utf8'));
+        assert.strictEqual(asset.tokenizerConfig, readFileSync(path.join(FIXTURES, 'tokenizer', 'tokenizer_config.json'), 'utf8'));
+
+        // Read from disk every time, never from a copy: gone from disk, gone.
+        const dir = vscode.Uri.joinPath(storageUri, llama.encoder.repo.replace(/[/\\]/g, '--'));
+        await vscode.workspace.fs.delete(vscode.Uri.joinPath(dir, 'tokenizer.json'));
+        assert.strictEqual(await store.peek(llama.encoder), undefined, 'the store answered from a copy it kept');
+        assert.strictEqual(await store.isDownloaded(llama.encoder), false);
+    });
+
+    test('a tokenizer_config.json that is missing or does not parse costs the config, not the load', async () => {
+        // Counting does not need it, and some tokenizer-only mirrors publish
+        // none. The worker parses it now, so the leniency the store had when it
+        // parsed it has to hold there.
+        const llama = seeded('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+        const config = vscode.Uri.joinPath(storageUri, llama.encoder.repo.replace(/[/\\]/g, '--'), 'tokenizer_config.json');
+
+        await vscode.workspace.fs.writeFile(config, new TextEncoder().encode('{ "unk_token": '));
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        assert.deepStrictEqual(await tokenizer.count('abc', llama), { count: 2, exact: true }, 'a damaged config cost the load');
+
+        await vscode.workspace.fs.delete(config);
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(WORKER, store, log);
+        assert.deepStrictEqual(await tokenizer.count('abc', llama), { count: 2, exact: true }, 'a missing config cost the load');
+    });
+
     test('a download is read at the commit the registry names, and refused when its file is not the one named', async () => {
         const llama = model('llama-3.3-70b');
         assert.ok(llama.encoder.kind === 'hf');
@@ -679,7 +772,11 @@ suite('tokenizer service', () => {
             );
             // Nothing of it was kept.
             assert.strictEqual(await store.isDownloaded(spec), false);
-            assert.strictEqual((await store.fetch(spec)).kind, 'hf');
+            const fetched = await store.fetch(spec);
+            assert.ok(fetched.kind === 'hf');
+            // Handed over as the text it kept, for the worker to parse, rather
+            // than as the object parsed here to work that text out.
+            assert.strictEqual(fetched.tokenizerJSON, JSON.stringify(JSON.parse(readFileSync(fixture, 'utf8'))));
             const at = `https://huggingface.co/${spec.repo}/resolve/${spec.revision}/`;
             assert.ok(asked.length > 0 && asked.every(u => u.startsWith(at)), asked.join(' '));
             // What it kept is what the hash is of: another window reads it back as the same file.
@@ -730,6 +827,26 @@ suite('tokenizer service', () => {
             await store.isDownloaded(kimi.encoder),
             false,
             'the store still reports a tokenizer after being cleared',
+        );
+    });
+
+    test('a check still reading when the cache is cleared does not undo the clear', async () => {
+        // The store remembers which files matched their pins, so that asking
+        // again reads nothing. A check that began before the clear finds the
+        // file; recorded after the clear, that would report it downloaded for
+        // the rest of the session.
+        const kimi = seeded('kimi-k3');
+        assert.ok(kimi.encoder.kind === 'tiktokenModel');
+        await seedRankTable(storageUri, kimi.encoder.repo);
+
+        const during = store.isDownloaded(kimi.encoder);
+        await store.clear();
+        await during; // Began before the clear, so whatever it answered is stale.
+
+        assert.strictEqual(
+            await store.isDownloaded(kimi.encoder),
+            false,
+            'a check begun before the clear restored what it cleared',
         );
     });
 
