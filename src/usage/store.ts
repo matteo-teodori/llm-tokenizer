@@ -443,7 +443,15 @@ export class UsageStore {
      * read again once the write lock is held, and one already applied is
      * skipped.
      */
-    private static migrate(db: DatabaseSync, file: string, from: number): void {
+    private static migrate(db: DatabaseSync, file: string, atOpen: number): void {
+        let from = atOpen;
+        if (from === 0) {
+            const meanwhile = UsageStore.create(db);
+            if (meanwhile === undefined) {
+                return;
+            }
+            from = meanwhile;
+        }
         for (let version = from + 1; version <= SCHEMA_VERSION; version++) {
             // The first migration creates the schema; there is nothing to keep.
             if (from > 0) {
@@ -466,6 +474,36 @@ export class UsageStore {
                 db.exec('ROLLBACK');
                 throw error;
             }
+        }
+    }
+
+    /**
+     * A new history's whole schema in one transaction, so that no other window
+     * opening it meanwhile finds it at a version between, and backs it up to
+     * migrate it. Returns the version an older build created it at meanwhile,
+     * which is then migrated as any other, after a backup; undefined once done.
+     */
+    private static create(db: DatabaseSync): number | undefined {
+        db.exec('BEGIN IMMEDIATE');
+        try {
+            const found = userVersion(db);
+            if (found > 0 && found < SCHEMA_VERSION) {
+                db.exec('COMMIT');
+                return found;
+            }
+            if (found === 0) {
+                for (let version = 1; version <= SCHEMA_VERSION; version++) {
+                    MIGRATIONS[version](db);
+                }
+                const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+                db.prepare("INSERT INTO meta (key, value) VALUES ('store_id', ?), ('store_generation', '0')").run(id);
+                db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+            }
+            db.exec('COMMIT');
+            return undefined;
+        } catch (error) {
+            db.exec('ROLLBACK');
+            throw error;
         }
     }
 
@@ -924,7 +962,13 @@ export class UsageStore {
         }
         const listed = pendingCopies(row.value);
         const folder = path.dirname(this.file);
-        const copies = new Set(copiesBeside(this.file));
+        let copies: Set<string>;
+        try {
+            copies = new Set(copiesBeside(this.file));
+        } catch {
+            // Which copies are still there cannot be told now: all are kept for later.
+            return { settled: false, copiesLeft: listed.length };
+        }
         // Never the history in use now, which another window may have just started.
         let inUse: Set<string> | undefined;
         try {
@@ -943,11 +987,11 @@ export class UsageStore {
                 return true;
             }
             try {
-                fs.rmSync(path.join(folder, name), { force: true });
+                fs.unlinkSync(path.join(folder, name));
                 return false;
-            } catch {
+            } catch (error) {
                 // Open in another window, on Windows: removed once it lets go.
-                return true;
+                return (error as NodeJS.ErrnoException | null)?.code !== 'ENOENT';
             }
         });
         if (left.length > 0) {
@@ -991,7 +1035,13 @@ export class UsageStore {
      * name they gave the history.
      */
     setAside(): string | undefined {
-        const copies = copiesBeside(this.file);
+        let copies: string[];
+        try {
+            copies = copiesBeside(this.file);
+        } catch {
+            // Only a notice: told again at the next report.
+            return undefined;
+        }
         const row = this.db.prepare("SELECT value FROM meta WHERE key = 'set_aside'").get() as { value: string } | undefined;
         if (row && copies.includes(row.value)) {
             return row.value;

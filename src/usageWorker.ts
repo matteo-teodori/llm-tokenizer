@@ -24,7 +24,7 @@ import { importUnderLease } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS, rangeUntil } from './usage/report';
 import { PARSER_VERSION, sessionTranscripts } from './usage/transcripts';
-import { HistoryFileError, createHistory, publishHistory, removeHistory, removeLeftovers, resolveHistory, type Pointer } from './usage/historyFiles';
+import { HistoryFileError, claimFound, createHistory, publishHistory, removeHistory, removeLeftovers, resolveHistory, type Pointer } from './usage/historyFiles';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import { SESSION_ID, type UsageFailure, type UsageWorkerRequest, type UsageWorkerResponse } from './usage/protocol';
 
@@ -130,6 +130,12 @@ function storeAt(storeFile: string): OpenResult {
         }
         throw error;
     }
+    try {
+        history = claimFound(folder, history);
+    } catch {
+        // Not published, so not opened: another window may be about to delete it.
+        return { status: 'failed', category: 'io' };
+    }
     if (opened && (opened.folder !== folder || opened.file !== history.file || identityOf(opened.file) !== opened.identity)) {
         closeOpened();
     }
@@ -167,6 +173,8 @@ function openHistory(folder: string, file: string | undefined, pointer: Pointer)
     }
     const result = UsageStore.open(sqlite, started, storeOptions);
     let used: string | undefined;
+    /** Whether `started` may be removed: only once the pointer is known not to name it. */
+    let unnamed = true;
     if (result.status === 'ready') {
         if (corrupt) {
             // Named before it is published: every window that follows the pointer is told.
@@ -175,7 +183,11 @@ function openHistory(folder: string, file: string | undefined, pointer: Pointer)
         try {
             used = publishHistory(folder, started, pointer);
         } catch {
-            used = undefined;
+            // Published or not is what the history in use is now, not what
+            // threw: on Windows a step after the pointer is replaced can fail.
+            const now = inUseNow(folder);
+            used = now.known && now.file === started ? started : undefined;
+            unnamed = now.known && now.file !== started;
         }
     }
     if (used === started && result.status === 'ready') {
@@ -186,7 +198,9 @@ function openHistory(folder: string, file: string | undefined, pointer: Pointer)
     if (result.status === 'ready' || result.status === 'read-only') {
         result.store.close();
     }
-    removeHistory(started);
+    if (unnamed) {
+        removeHistory(started);
+    }
     if (used === undefined) {
         return { folder, file: started, result: { status: 'failed', category: result.status === 'failed' ? result.category : 'io' }, identity: undefined };
     }
@@ -197,6 +211,15 @@ function openHistory(folder: string, file: string | undefined, pointer: Pointer)
         recovered = corrupt;
     }
     return { folder, file: used, result: theirs, identity: identityOf(used) };
+}
+
+/** The history in use in `folder` now, when that can be told. */
+function inUseNow(folder: string): { known: true; file: string | undefined } | { known: false } {
+    try {
+        return { known: true, file: resolveHistory(folder).file };
+    } catch {
+        return { known: false };
+    }
 }
 
 /** Name the corrupt history set aside in `store`. Only a notice: a store too busy to take it is used all the same. */

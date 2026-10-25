@@ -7,6 +7,7 @@ import { Worker } from 'worker_threads';
 
 import {
     HistoryFileError,
+    claimFound,
     copiesBeside,
     createHistory,
     currentHistory,
@@ -285,6 +286,28 @@ suite('usage history files', () => {
             await other.terminate();
         }
         assert.strictEqual(currentHistory(folder), c);
+    });
+
+    test('a history found with no pointer is published before it is used, so its maker and its finder use one history', () => {
+        // Window A started a history and has not published it yet; window B,
+        // finding no pointer, takes the newest there, which is A's. Used
+        // unpublished, B imported into a file A deleted once it lost the race.
+        const theirs = createHistory(folder);
+        const found = resolveHistory(folder);
+        assert.deepStrictEqual([found.file, found.pointer], [theirs, { kind: 'absent' }]);
+        const claimed = claimFound(folder, found);
+        assert.deepStrictEqual(claimed, { file: theirs, pointer: { kind: 'name', name: path.basename(theirs) } });
+        assert.strictEqual(fs.readFileSync(pointer, 'utf8'), path.basename(theirs));
+        // A then publishes it, as it would have: it finds it in use, and keeps it.
+        assert.strictEqual(publishHistory(folder, theirs, found.pointer), theirs);
+        // Found again, it is the pointer's, and nothing more is published.
+        assert.deepStrictEqual(claimFound(folder, resolveHistory(folder)), claimed);
+        // The history from before the pointer is used as it is.
+        fs.rmSync(pointer);
+        fs.rmSync(theirs);
+        fs.writeFileSync(path.join(folder, 'usage.sqlite'), '');
+        assert.deepStrictEqual(claimFound(folder, resolveHistory(folder)), { file: path.join(folder, 'usage.sqlite'), pointer: { kind: 'absent' } });
+        assert.ok(!fs.existsSync(pointer), 'the legacy history was given a pointer');
     });
 
     test("copies are every history file beside the current one but the current one's own", () => {

@@ -51,6 +51,12 @@ const MAX_POINTER_BYTES = 256;
 const LOCK = 'usage.current.lock';
 /** A lock older than this was left by a window that died holding it. */
 const LOCK_STALE_MS = 5_000;
+/** A pointer's temporary file: the pointer's name, a dot, and 12 random hex digits. */
+const TEMPORARY = /^usage\.current\.[0-9a-f]{12}$/;
+/** One older than this is no window's publish in flight, but one a refused removal left. */
+const TEMPORARY_STALE_MS = 60_000;
+/** How long Windows is given to let go of a file before its refusal counts. */
+const RETRY_BUDGET_MS = 2_000;
 
 /** The history's files could not be told apart for a reason other than their absence. */
 export class HistoryFileError extends Error {
@@ -90,6 +96,23 @@ export function resolveHistory(folder: string): History {
     return { file: newestHistory(folder), pointer };
 }
 
+/**
+ * `history`, published first when no pointer names it: the newest history
+ * found with no pointer may be another window's, started but not yet
+ * published, which that window deletes if it loses the race to publish one.
+ * Published through the same race, every window ends on the history the
+ * pointer names. The legacy history is used as it is, as before the pointer.
+ *
+ * @throws as `publishHistory` does: the request fails, and nothing is opened.
+ */
+export function claimFound(folder: string, history: History): History {
+    if (history.pointer.kind !== 'absent' || history.file === undefined || path.basename(history.file) === LEGACY) {
+        return history;
+    }
+    const used = publishHistory(folder, history.file, history.pointer);
+    return { file: used, pointer: { kind: 'name', name: path.basename(used) } };
+}
+
 /** The history in use in `folder`, or undefined when there is none. */
 export function currentHistory(folder: string): string | undefined {
     return resolveHistory(folder).file;
@@ -117,6 +140,7 @@ export function publishHistory(folder: string, file: string, over: Pointer, opti
         return file;
     }
     const pointer = path.join(folder, POINTER);
+    sweepTemporaries(folder);
     const written = `${pointer}.${randomBytes(6).toString('hex')}`;
     const fd = fs.openSync(written, 'wx');
     try {
@@ -129,7 +153,9 @@ export function publishHistory(folder: string, file: string, over: Pointer, opti
     try {
         return publishOver(folder, file, over, written, pointer, options.lockWaitMs ?? 3_000);
     } finally {
-        fs.rmSync(written, { force: true });
+        // Tidying only: what the pointer names was decided above, and a
+        // removal Windows refuses must not undo it. One left is swept later.
+        removeQuietly(written);
     }
 }
 
@@ -143,9 +169,15 @@ function publishOver(
 ): string {
     if (over.kind === 'absent') {
         try {
-            fs.linkSync(written, pointer);
+            // Refused for a moment on Windows, as a file just written can be:
+            // tried again before it is taken for a file system without links.
+            retrying(() => fs.linkSync(written, pointer));
             return file;
         } catch (error) {
+            if (transient(error)) {
+                // Refused past the budget: nothing is replaced, and the request fails.
+                throw error;
+            }
             if (codeOf(error) !== 'EEXIST') {
                 // No links on this file system: replaced as any pointer is,
                 // and a window that started one at the same moment follows
@@ -158,12 +190,17 @@ function publishOver(
     }
     // Read, compared and replaced as one step: two windows replacing it at
     // once both found the name they replace, and each kept its own history.
-    return underLock(folder, lockWaitMs, () => {
+    return underLock(folder, lockWaitMs, held => {
         const now = readPointer(folder);
         if (now.kind === 'absent') {
             return publishOver(folder, file, now, written, pointer, lockWaitMs);
         }
         if (now.kind === 'name' && now.name === over.name) {
+            // Taken over meanwhile by a window that found it stale: that
+            // window replaces the pointer, never both.
+            if (!held()) {
+                throw new HistoryFileError('EBUSY');
+            }
             renameRetrying(written, pointer);
             return file;
         }
@@ -177,38 +214,104 @@ function publishOver(
  *
  * @throws HistoryFileError when another window holds it past `waitMs`.
  */
-function underLock<T>(folder: string, waitMs: number, work: () => T): T {
+function underLock<T>(folder: string, waitMs: number, work: (held: () => boolean) => T): T {
     const lock = path.join(folder, LOCK);
     const until = Date.now() + waitMs;
+    /** The lock this window made, as it was made: whether it still holds it is whether that file is still there. */
+    let mine: fs.BigIntStats;
     for (;;) {
         try {
-            fs.closeSync(fs.openSync(lock, 'wx'));
+            mine = made(lock);
             break;
         } catch (error) {
-            if (codeOf(error) !== 'EEXIST') {
+            // On Windows a lock another window has just let go of can still be
+            // "delete pending" while any handle is open on it, and creating it
+            // then fails with EPERM: it is held a moment longer, not a failure.
+            if (codeOf(error) !== 'EEXIST' && !transient(error)) {
                 throw error;
             }
         }
-        let age: number;
+        let seen: fs.BigIntStats | undefined;
         try {
-            age = Date.now() - fs.statSync(lock).mtimeMs;
-        } catch {
-            // Let go of meanwhile.
-            continue;
+            // The lock itself, never what a link there leads to: one leading
+            // nowhere would otherwise be looked at, and passed over, forever.
+            seen = fs.lstatSync(lock, { bigint: true });
+        } catch (error) {
+            // Let go of meanwhile, or being let go of: looked at again below.
+            if (!absent(error) && !transient(error)) {
+                throw new HistoryFileError(codeOf(error));
+            }
         }
-        if (age > LOCK_STALE_MS) {
-            fs.rmSync(lock, { force: true });
+        // Removed only while it is still the lock judged stale: another
+        // window that judged it so too may have taken it over meanwhile.
+        if (seen && Date.now() - Number(seen.mtimeMs) > LOCK_STALE_MS && isStill(lock, seen) && removeQuietly(lock)) {
             continue;
         }
         if (Date.now() >= until) {
             throw new HistoryFileError('EBUSY');
         }
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        sleep(seen ? 5 : 1);
     }
+    const held = () => isStill(lock, mine);
     try {
-        return work();
+        return work(held);
     } finally {
-        fs.rmSync(lock, { force: true });
+        // Tidying only: the pointer is replaced, or not, by now. A lock that
+        // cannot be removed is taken over once LOCK_STALE_MS old; one another
+        // window took over is that window's to remove.
+        if (held()) {
+            removeQuietly(lock);
+        }
+    }
+}
+
+/**
+ * Make the lock, exclusively; what it is once made, as the lock is looked at
+ * again later: by its path, after it is closed, so that no time the system
+ * sets on closing it can tell it apart from itself.
+ */
+function made(lock: string): fs.BigIntStats {
+    fs.closeSync(fs.openSync(lock, 'wx'));
+    try {
+        return retrying(() => fs.lstatSync(lock, { bigint: true }));
+    } catch (error) {
+        // Made, but not known as this window's: let go of at once.
+        removeQuietly(lock);
+        throw new HistoryFileError(codeOf(error));
+    }
+}
+
+/**
+ * Whether `file` is still the file `seen` describes, and not one put in its
+ * place since. As bigints: an NTFS file id passes 2^53, where a number loses
+ * the digits that tell two files apart.
+ */
+function isStill(file: string, seen: fs.BigIntStats): boolean {
+    try {
+        const now = retrying(() => fs.lstatSync(file, { bigint: true }));
+        return now.ino === seen.ino && now.dev === seen.dev && now.mtimeNs === seen.mtimeNs && now.birthtimeNs === seen.birthtimeNs;
+    } catch {
+        return false;
+    }
+}
+
+/** Remove what a refused removal left of other publishes: never one in flight. */
+function sweepTemporaries(folder: string): void {
+    let names: string[];
+    try {
+        names = fs.readdirSync(folder).filter(name => TEMPORARY.test(name));
+    } catch {
+        return;
+    }
+    for (const name of names) {
+        const file = path.join(folder, name);
+        try {
+            if (Date.now() - fs.lstatSync(file).mtimeMs > TEMPORARY_STALE_MS) {
+                fs.unlinkSync(file);
+            }
+        } catch {
+            // Gone, or refused: swept at a later publish.
+        }
     }
 }
 
@@ -222,9 +325,9 @@ function published(folder: string, file: string): string {
 export function removeHistory(file: string): void {
     for (const suffix of OWN_SUFFIXES) {
         try {
-            fs.rmSync(`${file}${suffix}`, { force: true });
+            fs.unlinkSync(`${file}${suffix}`);
         } catch {
-            // Opened meanwhile by a window that took it for the newest: a copy, which Clear removes.
+            // Absent; or opened meanwhile by a window that took it for the newest: a copy, which Clear removes.
         }
     }
 }
@@ -248,22 +351,34 @@ export function removeLeftovers(folder: string): number {
     let left = 0;
     for (const name of names.filter(n => HISTORY_FILE.test(n))) {
         try {
-            fs.rmSync(path.join(folder, name), { force: true });
-        } catch {
-            left++;
+            fs.unlinkSync(path.join(folder, name));
+        } catch (error) {
+            if (!absent(error)) {
+                left++;
+            }
         }
     }
     return left;
 }
 
-/** The history files in `current`'s folder that are not `current`'s own: what Clear removes. */
+/**
+ * The history files in `current`'s folder that are not `current`'s own: what Clear removes.
+ *
+ * @throws HistoryFileError when the folder cannot be listed for a reason other
+ * than its absence: none found is not the same as none there.
+ */
 export function copiesBeside(current: string): string[] {
     const own = new Set(ownFiles(current));
+    let names: string[];
     try {
-        return fs.readdirSync(path.dirname(current)).filter(name => HISTORY_FILE.test(name) && !own.has(name));
-    } catch {
-        return [];
+        names = fs.readdirSync(path.dirname(current));
+    } catch (error) {
+        if (absent(error)) {
+            return [];
+        }
+        throw new HistoryFileError(codeOf(error));
     }
+    return names.filter(name => HISTORY_FILE.test(name) && !own.has(name));
 }
 
 /**
@@ -358,21 +473,50 @@ function newestHistory(folder: string): string | undefined {
 }
 
 /**
- * Windows refuses, for a moment, to open or replace a file another window
- * has open or is replacing: tried again a few times before it counts.
+ * Windows refuses, for a moment, to open, replace or delete a file another
+ * handle has open, an antivirus's or an indexer's among them: tried again for
+ * up to RETRY_BUDGET_MS before it counts.
  */
 function retrying<T>(work: () => T): T {
+    const until = Date.now() + RETRY_BUDGET_MS;
     for (let attempt = 1; ; attempt++) {
         try {
             return work();
         } catch (error) {
-            const code = codeOf(error);
-            if (process.platform !== 'win32' || attempt >= 8 || (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY')) {
+            if (!transient(error) || Date.now() >= until) {
                 throw error;
             }
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * attempt);
+            sleep(Math.min(10 * attempt, 100));
         }
     }
+}
+
+/** EPERM, EACCES or EBUSY on Windows: another handle has the file open, or it is being deleted. */
+function transient(error: unknown): boolean {
+    const code = codeOf(error);
+    return process.platform === 'win32' && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY');
+}
+
+/**
+ * Remove one of this module's own small files: true once it is gone, false
+ * when it could not be. Never throws: what it tidies has been decided.
+ *
+ * unlink, never rm: from Node 23, fs.rmSync is std::filesystem::remove, which
+ * in the editor's Electron build (libc++) deletes on close, so the name stays,
+ * "delete pending", while any other handle is open on it, and creating it
+ * fails meanwhile; libuv's unlink removes the name at once where NTFS can.
+ */
+function removeQuietly(file: string): boolean {
+    try {
+        retrying(() => fs.unlinkSync(file));
+        return true;
+    } catch (error) {
+        return absent(error);
+    }
+}
+
+function sleep(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function renameRetrying(from: string, to: string): void {

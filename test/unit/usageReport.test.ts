@@ -732,6 +732,17 @@ suite('usage worker queries', () => {
         }
     });
 
+    test('a history the worker finds with no pointer is published before it is read', async () => {
+        // Another window's, started and not yet published: unpublished, it
+        // could be deleted under this worker when that window lost the race.
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const folder = path.dirname(storeFile);
+        const theirs = createHistory(folder);
+        const answer = await host().send(ask(storeFile));
+        assert.strictEqual(answer.type, 'report', JSON.stringify(answer).slice(0, 200));
+        assert.strictEqual(fs.readFileSync(path.join(folder, 'usage.current'), 'utf8'), path.basename(theirs));
+    });
+
     test('Clear where there is no history starts none, and removes what earlier builds left', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const folder = path.dirname(storeFile);
