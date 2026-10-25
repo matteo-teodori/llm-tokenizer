@@ -601,6 +601,71 @@ suite('usage transcripts', () => {
         assert.deepStrictEqual([...store.requests()].map(r => [r.messageId, r.parserVersion]), [['m0', PARSER_VERSION]]);
     });
 
+    test('a checkpoint an older parser left is a parser restart only while the file still holds every line it read', () => {
+        const file = path.join(tmp, 's1.jsonl');
+        const a = line(assistant('m1', 5));
+        fs.writeFileSync(file, a + line(assistant('m2', 7)));
+        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: PARSER_VERSION - 1 };
+        fs.appendFileSync(file, line(assistant('m3', 9)));
+        assert.strictEqual(readTranscript(mainFile(file), older).restarted, 'parser');
+        fs.writeFileSync(file, a);
+        assert.strictEqual(readTranscript(mainFile(file), older).restarted, 'truncated');
+        // As long as before, another record where m2 was, its last bytes
+        // other ones too: the reader looks at the 64 before the checkpoint.
+        fs.writeFileSync(file, a + line(assistant('m9', 7, { version: '2.1.293' })));
+        assert.strictEqual(readTranscript(mainFile(file), older).restarted, 'rewritten');
+    });
+
+    test('a newer parser keeps the rows of lines Claude Code has since removed from a transcript', async () => {
+        // Read by an older parser, then cut short, replaced or rewritten:
+        // those lines can never be read again. Only the file that still
+        // holds every line read loses its old rows, read again at once.
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(dir, { recursive: true });
+        const records = (prefix: string, ids: number[], extra: Record<string, unknown> = {}) => ids.map(i => line(assistant(`${prefix}${i}`, 1, extra))).join('');
+        const names = ['cut', 'replaced', 'rewritten', 'whole'];
+        const files = names.map(name => path.join(dir, `${name}.jsonl`));
+        files.forEach((file, i) => fs.writeFileSync(file, records(names[i], [0, 1, 2])));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+
+        // As the next parser will find the history: every row and checkpoint
+        // older, and one row the newer parser no longer gives.
+        store.transaction(() => {
+            for (const file of files.map(f => fs.realpathSync(f))) {
+                const checkpoint = store.getFile('claude-code', file);
+                assert.ok(checkpoint);
+                const rows = [...store.requests()].filter(r => r.file === file);
+                store.deleteRequestsFromFile('claude-code', file);
+                store.upsertRequests(rows.map(r => ({ ...r, parserVersion: PARSER_VERSION - 1 })));
+                store.putFile({ ...checkpoint, parserVersion: PARSER_VERSION - 1 });
+                if (file.endsWith('whole.jsonl')) {
+                    store.upsertRequests([{ ...rows[0], messageId: 'gone', parserVersion: PARSER_VERSION - 1 }]);
+                }
+            }
+        });
+        fs.writeFileSync(files[0], records('cut', [0]));
+        const replacement = path.join(tmp, 'replacement.jsonl');
+        fs.writeFileSync(replacement, records('replaced', [0]));
+        fs.renameSync(replacement, files[1]);
+        // As long as before: two records rewritten, the last one's bytes too.
+        fs.writeFileSync(files[2], records('rewritten', [0, 9]) + records('rewritten', [8], { version: '2.1.293' }));
+        assert.strictEqual(fs.statSync(files[2]).size, Buffer.byteLength(records('rewritten', [0, 1, 2])));
+
+        const summary = await importRoots(store, [tmp]);
+        assert.strictEqual(summary.restarted, 4);
+        const older = PARSER_VERSION - 1;
+        assert.deepStrictEqual(
+            [...store.requests()].map(r => [r.messageId, r.parserVersion]),
+            [
+                ['cut0', PARSER_VERSION], ['cut1', older], ['cut2', older],
+                ['replaced0', PARSER_VERSION], ['replaced1', older], ['replaced2', older],
+                ['rewritten0', PARSER_VERSION], ['rewritten1', older], ['rewritten2', older], ['rewritten8', PARSER_VERSION], ['rewritten9', PARSER_VERSION],
+                ['whole0', PARSER_VERSION], ['whole1', PARSER_VERSION], ['whole2', PARSER_VERSION],
+            ],
+        );
+    });
+
     test('an unchanged file is not even opened', async function () {
         if (process.platform === 'win32' || process.getuid?.() === 0) {
             this.skip();

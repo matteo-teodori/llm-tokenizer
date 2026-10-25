@@ -5,7 +5,7 @@ import * as path from 'path';
 
 import { HistoryFileError, createHistory, currentHistory, publishHistory, resolveHistory, type Pointer } from '../../src/usage/historyFiles';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
-import { UsageStore, loadSqlite } from '../../src/usage/store';
+import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
 import { WorkerHost } from '../../src/workerHost';
 
 const FIXTURE_ROOT = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'claude-config');
@@ -364,7 +364,7 @@ suite('usage history copies, where the folder cannot be listed for a moment', ()
         if (result.status === 'ready') {
             opened.push(result.store);
         }
-        assert.deepStrictEqual(seen, [2]);
+        assert.deepStrictEqual(seen, [SCHEMA_VERSION]);
         assert.deepStrictEqual(fs.readdirSync(tmp).filter(name => name.includes('.bak-v')), []);
     });
 });

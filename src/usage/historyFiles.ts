@@ -498,6 +498,30 @@ function transient(error: unknown): boolean {
 }
 
 /**
+ * Give `from`, a file just written whole, the name `to`, unless a file has it
+ * already: through a link, which fails where the name exists, tried again
+ * while Windows refuses the new file for a moment; on a file system without
+ * links, by a rename.
+ *
+ * @returns false when `to` was there already, and `from` is left as it is.
+ */
+export function linkWhole(from: string, to: string): boolean {
+    try {
+        retrying(() => fs.linkSync(from, to));
+        return true;
+    } catch (error) {
+        if (codeOf(error) === 'EEXIST') {
+            return false;
+        }
+        if (transient(error)) {
+            throw error;
+        }
+    }
+    renameRetrying(from, to);
+    return true;
+}
+
+/**
  * Remove one of this module's own small files: true once it is gone, false
  * when it could not be. Never throws: what it tidies has been decided.
  *
@@ -506,7 +530,7 @@ function transient(error: unknown): boolean {
  * "delete pending", while any other handle is open on it, and creating it
  * fails meanwhile; libuv's unlink removes the name at once where NTFS can.
  */
-function removeQuietly(file: string): boolean {
+export function removeQuietly(file: string): boolean {
     try {
         retrying(() => fs.unlinkSync(file));
         return true;
