@@ -1,4 +1,6 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as vm from 'vm';
 
 import { emptyTotals, type UsageTotals } from '../../src/usage/aggregate';
@@ -55,6 +57,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
 function view(overrides: Partial<PanelView> = {}): PanelView {
     return {
         status: 'ready',
+        reading: undefined,
         range: '7d',
         scope: 'all',
         zone: 'Europe/Rome',
@@ -197,10 +200,11 @@ suite('usage page', () => {
         assert.ok(off.includes('Claude Code usage is off'));
         assert.ok(off.includes('Nothing is sent anywhere'));
         assert.ok(off.includes('Never kept: prompts, responses, thinking, tool inputs or results'));
-        assert.ok(off.includes('data-action="openSettings"'));
+        assert.ok(off.includes('data-action="turnOn"') && off.includes('data-action="openSettings"'));
         assert.ok(!off.includes('Remote settings'));
         const remote = text(renderFragments(view({ status: 'off', report: undefined, remote: true, where: 'on box (ssh-remote)' })));
-        assert.ok(remote.includes('Remote settings'));
+        // Turn On writes a machine setting at the user level: in a remote window, VS Code writes it to the host's.
+        assert.ok(remote.includes('The setting is in Remote settings, for this host, and Turn On sets it there.'));
         // The host named once, not inside "this machine".
         assert.ok(remote.includes('session records on box (ssh-remote),') && !remote.includes('records on this machine'), remote);
         assert.ok(off.includes('session records on this machine,'));
@@ -241,11 +245,72 @@ suite('usage page', () => {
         assert.ok(!all.includes('≈'), '≈ is for estimates, and nothing here is one');
     });
 
+    test('the off page lists what turning it on reads and keeps, as the README does', () => {
+        // The T shows to everyone with Claude Code's extension: this page is
+        // where turning the feature on is decided.
+        const readme = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'README.md'), 'utf8');
+        const kept = /Tokenizer\) keeps:\r?\n([\s\S]*?)\r?\n\r?\n/.exec(readme)?.[1];
+        assert.ok(kept, "the README's list of what is kept was not found");
+        const items = kept.split(/^- /m).map(item => item.replace(/\s+/g, ' ').trim()).filter(Boolean);
+        assert.strictEqual(items.length, 5, kept);
+        const off = renderFragments(view({ status: 'off', report: undefined })).body.replace(/\s+/g, ' ');
+        for (const item of items) {
+            assert.ok(off.includes(item), `the off page does not say: ${item}`);
+        }
+    });
+
+    test('while the history is read, the page says how far, every total is a lower bound, and Refresh is busy', () => {
+        const reading = renderFragments(view({ reading: { by: 'this window', files: 1_200, of: 3_875 } }));
+        const all = text(reading);
+        assert.ok(
+            reading.body.includes('<p class="banner reading">Still reading Claude Code&#39;s records: 1,200 of 3,875 files. These totals grow until it is done.</p>'),
+            reading.body.slice(0, 400),
+        );
+        // The hero, the days, the projects and the sessions: each only what was read so far.
+        assert.ok(all.includes('class="hero-value">≥1.3K<'), 'the hero');
+        assert.ok(all.includes('2026-10-09: ≥1,278 processed'), 'a day');
+        assert.strictEqual((reading.body.match(/<td class="num">≥1,278<\/td>/g) ?? []).length, 2, 'a project and a session');
+        assert.ok(reading.controls.includes('<button type="button" data-action="refresh" aria-disabled="true">Reading…</button>'));
+
+        // A count of files not known yet, or none at all.
+        assert.ok(renderFragments(view({ reading: { by: 'this window', files: 40 } })).body.includes('records: 40 files so far.'));
+        assert.ok(renderFragments(view({ reading: { by: 'this window' } })).body.includes('Still reading Claude Code&#39;s records. These totals'));
+
+        const done = renderFragments(view());
+        assert.ok(!text(done).includes('≥') && !done.body.includes('Still reading') && done.controls.includes('>Refresh</button>'));
+    });
+
+    test("another window's reading is said too, with no count, and its totals are lower bounds", () => {
+        const elsewhere = renderFragments(view({ reading: { by: 'another window' } }));
+        assert.ok(elsewhere.body.includes('Another window is reading Claude Code&#39;s records; these totals grow as it goes.'));
+        assert.ok(elsewhere.body.includes('class="hero-value">≥1.3K<'));
+    });
+
+    test('a range the reading has not reached is never called one with no requests', () => {
+        const nothing = report({ totals: emptyTotals(), days: [], models: [], kinds: [], efforts: [], projects: [], sessions: [] });
+        const reading = renderFragments(view({ report: nothing, reading: { by: 'this window', files: 12, of: 77 } })).body;
+        assert.ok(reading.includes('Nothing has been read in this range yet.') && !reading.includes('No requests fall in this range.'), reading);
+        assert.ok(renderFragments(view({ report: nothing, scope: 'workspace', reading: { by: 'another window' } })).body.includes('Nothing has been read in this range yet.'));
+        assert.ok(renderFragments(view({ report: nothing })).body.includes('No requests fall in this range.'));
+    });
+
+    test("the total's line says how much of it is cache reads, cut rather than rounded up", () => {
+        const page = (cacheRead: number, rest: number) =>
+            renderFragments(view({ report: report({ totals: { ...totals(cacheRead + rest), input: rest, cacheRead } }) })).body;
+        // The maintainer's last 7 days: 98.0% of 12.2 billion was cache reads.
+        assert.ok(page(11_997_234_660, 239_749_843).includes('tokens processed · 98% cache reads, the conversation each request sends again · 3 requests'));
+        assert.ok(page(996, 4).includes('· 99% cache reads'), 'rounded up to all of it');
+        assert.ok(page(1, 999).includes('· under 1% cache reads'));
+        assert.ok(!page(0, 1_000).includes('cache reads,'));
+    });
+
     test('processed, never used, and cache reads explained', () => {
-        const all = text(renderFragments(view())).toLowerCase();
+        const all = text(renderFragments(view({ report: report({ totals: { ...totals(1_278), input: 278, cacheRead: 1_000 } }) }))).toLowerCase();
         assert.ok(all.includes('tokens processed'));
         assert.ok(!/tokens used|used tokens/.test(all));
-        assert.ok(all.includes('read from the cache'));
+        assert.ok(all.includes('78% cache reads, the conversation each request sends again'));
+        // One share of cache reads on the page, not a second of input alone.
+        assert.strictEqual(all.match(/% cache reads|read from the cache/g)?.length, 1, all);
     });
 
     test('the cap is disclosed on the page and in the export', () => {
@@ -490,6 +555,7 @@ suite('usage panel messages', () => {
         assert.deepStrictEqual(parsePanelMessage({ type: 'setRange', range: '30d' }), { type: 'setRange', range: '30d' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'setScope', scope: 'workspace' }), { type: 'setScope', scope: 'workspace' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'clear', extra: 1 }), { type: 'clear' });
+        assert.deepStrictEqual(parsePanelMessage({ type: 'turnOn' }), { type: 'turnOn' });
         for (const bad of [
             null,
             'clear',

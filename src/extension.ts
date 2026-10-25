@@ -116,7 +116,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
     void refreshFileStatusBar(vscode.window.activeTextEditor);
     const startupScan = refreshProjectCount();
-    // Off, this registers its three commands and a settings listener, nothing more.
+    // Off, this registers its three commands, a settings listener and the
+    // context key that shows the editor title's T, nothing more.
     registerClaudeCodeUsage(context, log, startupScan);
 
     // If the startup model needs a tokenizer and the user has opted into

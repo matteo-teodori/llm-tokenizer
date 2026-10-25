@@ -155,17 +155,21 @@ A leading `≈` means the count is an estimate rather than an exact tokenization
 ## Claude Code Usage
 
 How many tokens Claude Code processed, read from the session records Claude
-Code keeps on your machine. It is off by default: turn on
-**Enable Claude Code Usage** in Settings, then run **Show Claude Code Usage**,
-or, while it is on, click the LLM Tokenizer **T** at the top right of an
-editor.
+Code keeps on your machine. It is off by default, and reads nothing until you
+turn it on. The LLM Tokenizer **T** at the top right of an editor opens it: the
+T is there when Claude Code's VS Code extension is installed or the feature is
+on, and **Show Claude Code Usage** opens it from the Command Palette either
+way. While it is off, the page says what turning it on reads and keeps, with
+**Turn On**, and **Open Settings** for **Enable Claude Code Usage**. To hide
+the T, right-click the editor's title bar and choose
+**Hide 'Show Claude Code Usage'**.
 
 <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects and sessions, and the status item's tooltip shows the running session's context">
 
 **The panel** shows today, the last 7 or 30 days, or everything since the
 history starts, for all projects or for this workspace:
 - tokens processed, split into input, cache writes, cache reads and output,
-  with how much of the input was read from the cache;
+  with the share of it that was cache reads;
 - a column per day, in your time zone;
 - models, the main conversation against subagents and workflows, and effort;
 - projects and sessions, sortable, and the usage limits you reached;
@@ -177,9 +181,13 @@ history starts, for all projects or for this workspace:
 </picture>
 
 *Processed* is everything a request sent or received: input, cache writes,
-cache reads and output. Cache reads are most of it, because Claude Code sends
-the conversation again with every turn and the cache serves it. A total marked
-`≥` is a lower bound: some request did not report every counter.
+cache reads and output. Cache reads are most of it, and the total's line says
+how much: Claude Code sends the conversation again with every request and the
+cache serves it, so a single prompt that makes dozens of model calls on a
+large context processes tens of millions. A total marked `≥` is a lower bound:
+some request did not report every counter, or the records are still being
+read. While they are, the first time above all, the panel says so, with how
+many of the files it has gone through, and shows the totals as they grow.
 
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
 the context of the Claude Code session running in this workspace is, as a

@@ -19,6 +19,7 @@ import { isTimeZone, localMinute } from './aggregate';
 import { renderFragments, renderUsagePage, type PanelFragments, type PanelView } from './render';
 import { RANGE_KEYS, type RangeKey } from './report';
 import { sourceLabel, tildePath } from './roots';
+import { CONFIG_SECTION } from './settings';
 import type { UsageService } from './usageService';
 
 /** Remembered between sessions: the zone the page reported, the range and the scope. */
@@ -47,6 +48,25 @@ export async function openUsageSettings(remoteName: string | undefined = vscode.
     await vscode.commands.executeCommand(command, { query: 'llm-tokenizer.enableClaudeCodeUsage' });
 }
 
+/**
+ * Turn the feature on, from the off page's Turn On: the person's own click,
+ * so reading Claude Code's records stays something they chose. At the user
+ * level, which VS Code turns into the remote host's settings in a remote
+ * window, for a machine setting (`toEditableConfigurationTarget` in its
+ * configurationService.ts, 1.105 and since): where the setting applies.
+ */
+export async function turnOnUsage(): Promise<void> {
+    try {
+        await vscode.workspace.getConfiguration(CONFIG_SECTION).update('enableClaudeCodeUsage', true, vscode.ConfigurationTarget.Global);
+    } catch {
+        // A settings file VS Code will not write, one with errors in it say:
+        // its Settings editor says why, and turns it on there.
+        if (await vscode.window.showErrorMessage('LLM Tokenizer: Claude Code usage could not be turned on here.', 'Open Settings')) {
+            await openUsageSettings();
+        }
+    }
+}
+
 /** What the page may ask for. */
 export type PanelMessage =
     | { type: 'ready'; zone: string }
@@ -55,6 +75,7 @@ export type PanelMessage =
     | { type: 'setScope'; scope: 'all' | 'workspace' }
     | { type: 'copy'; text: string }
     | { type: 'export'; text: string }
+    | { type: 'turnOn' }
     | { type: 'openSettings' }
     | { type: 'chooseFolder' }
     | { type: 'clear' }
@@ -77,6 +98,7 @@ export function parsePanelMessage(raw: unknown): PanelMessage | undefined {
         case 'export':
             return typeof m.text === 'string' && m.text.length <= MAX_EXPORT_CHARS ? { type: m.type, text: m.text } : undefined;
         case 'refresh':
+        case 'turnOn':
         case 'openSettings':
         case 'chooseFolder':
         case 'clear':
@@ -117,7 +139,15 @@ export class UsagePanel implements vscode.Disposable {
             localResourceRoots: [],
         });
         panel.iconPath = logoIcon(context.extensionUri);
-        UsagePanel.current = new UsagePanel(panel, context, service, log);
+        try {
+            UsagePanel.current = new UsagePanel(panel, context, service, log);
+        } catch (error) {
+            // No empty tab left open, and no raw message shown: the name
+            // only, since what the feature had read could be in the message.
+            panel.dispose();
+            log.warn(`Claude Code usage panel: could not be opened (${error instanceof Error ? error.name : 'Error'})`);
+            void vscode.window.showErrorMessage('LLM Tokenizer: the Claude Code Usage panel could not be opened; see the log.');
+        }
     }
 
     private constructor(
@@ -193,7 +223,11 @@ export class UsagePanel implements vscode.Disposable {
                 await this.update(true);
                 return;
             case 'refresh':
-                await this.refresh();
+                // The button says a pass is reading: its end is what a
+                // Refresh would show, and the page is told of it.
+                if (!this.service.reading) {
+                    await this.refresh();
+                }
                 return;
             case 'setRange':
                 this.state.range = message.range;
@@ -211,6 +245,9 @@ export class UsagePanel implements vscode.Disposable {
                 void vscode.window.showInformationMessage(
                     message.type === 'export' ? 'LLM Tokenizer: usage CSV copied to the clipboard.' : 'LLM Tokenizer: sessions copied to the clipboard.',
                 );
+                return;
+            case 'turnOn':
+                await turnOnUsage();
                 return;
             case 'openSettings':
                 await openUsageSettings();
@@ -295,6 +332,7 @@ export class UsagePanel implements vscode.Disposable {
         const remote = vscode.env.remoteName;
         return {
             status: this.service.status,
+            reading: this.service.reading,
             range: this.state.range,
             scope: this.state.scope,
             zone,

@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 
-import { byDay, cacheReadShare, isTimeZone, localDate, localMinute, mergeTotals, totalsOf } from '../../src/usage/aggregate';
+import { byDay, isTimeZone, localDate, localMinute, mergeTotals, totalsOf } from '../../src/usage/aggregate';
 import type { UsageRequest } from '../../src/usage/types';
 
 function req(timestamp: number, overrides: Partial<UsageRequest> = {}): UsageRequest {
@@ -83,11 +83,6 @@ suite('usage rollups', () => {
         assert.deepStrictEqual(merged, whole);
         assert.strictEqual(merged.coverage.start, 1);
         assert.strictEqual(merged.coverage.newest, 3);
-    });
-
-    test('the cache read share is of input, and undefined without any', () => {
-        assert.strictEqual(cacheReadShare(totalsOf([req(1, { input: 10, cacheCreation: 10, cacheRead: 80 })])), 0.8);
-        assert.strictEqual(cacheReadShare(totalsOf([])), null);
     });
 
     test('a zone the runtime does not know is refused, not guessed', () => {

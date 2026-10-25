@@ -15,10 +15,14 @@ import {
     IDLE_MS,
     LEASE_RETRY_MS,
     MAX_HINT_PATHS,
+    READING_SHOWN_MS,
+    READING_UPDATE_MS,
+    RETRY_MS,
     UsageService,
     clearedMessage,
     readUsageSettings,
     refreshMessage,
+    statusItemShown,
     type Clock,
     type UsageHost,
     type UsageServiceDeps,
@@ -26,6 +30,7 @@ import {
 } from '../../src/usage/usageService';
 import { currentHistory } from '../../src/usage/historyFiles';
 import { USAGE_SETTINGS } from '../../src/usage/settings';
+import { loadSqlite } from '../../src/usage/store';
 import { WorkerHost } from '../../src/workerHost';
 
 const FIXTURE_ROOT = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'claude-config');
@@ -163,6 +168,11 @@ function defaultAnswer(request: UsageWorkerRequest): UsageWorkerResponse {
         case 'liveContext':
             return { type: 'liveContext', id: request.id, latest: null, compactions: [] };
     }
+}
+
+/** What the worker answers when another window holds the history's write lock past the busy timeout. */
+function busy(request: Pick<UsageWorkerRequest, 'id'>): UsageWorkerResponse {
+    return { type: 'failed', id: request.id, failure: 'store-busy', errorName: 'Error', sqlite: { code: 5, text: 'database is locked' } };
 }
 
 suite('usage service', () => {
@@ -592,7 +602,14 @@ suite('usage service', () => {
         await service.refresh();
         assert.ok(service.updatingElsewhere);
         await service.refresh();
-        assert.deepStrictEqual([service.updatingElsewhere, service.status], [false, 'failing']);
+        // Failed once: tried again soon, and not yet a warning.
+        assert.deepStrictEqual([service.updatingElsewhere, service.status, service.retrying], [false, 'ready', true]);
+        assert.deepStrictEqual(refreshMessage(undefined, service), {
+            kind: 'info',
+            text: 'LLM Tokenizer: Claude Code usage could not be refreshed just now; it is tried again in a few seconds.',
+        });
+        await service.refresh();
+        assert.deepStrictEqual([service.status, refreshMessage(undefined, service)?.kind], ['failing', 'warning']);
     });
 
     test('off, a held service still lets its worker go after a Clear', async () => {
@@ -660,21 +677,283 @@ suite('usage service', () => {
         assert.strictEqual(host.stopped, 1);
     });
 
-    test('no node:sqlite, a newer history and a dead worker each become a status', async () => {
+    test('no node:sqlite and a newer history each become a status, at once, and are not tried again before the hourly pass', async () => {
         for (const [answer, status] of [
             [{ type: 'unavailable', id: 0, node: '22.19.0', electron: '37.6.0' }, 'no-sqlite'],
             [{ type: 'failed', id: 0, failure: 'store-read-only', errorName: 'StoreError' }, 'read-only'],
-            [{ type: 'failed', id: 0, failure: 'import-failed', errorName: 'Error' }, 'failing'],
+            [{ type: 'failed', id: 0, failure: 'outdated', errorName: 'StoreError' }, 'read-only'],
         ] as const) {
-            const { service, host } = make();
+            const { service, clock, host } = make();
             host.answer = () => Promise.resolve(answer);
             await settle();
             assert.strictEqual(service.status, status, answer.type);
+            // Neither clears by itself: a reload, or another editor, does.
+            await clock.advance(RETRY_MS.reduce((sum, ms) => sum + ms, 0));
+            assert.deepStrictEqual([host.imports.length, service.retrying], [1, false], status);
         }
-        const { service, host } = make();
-        host.answer = () => Promise.reject(new Error('worker exited'));
+    });
+
+    test('an import that threw, or a worker that died, is tried again after 5 s, and shows as failing only once that fails too', async () => {
+        // T-2: what clears by itself must not stay "could not be read" for an hour.
+        for (const fail of [
+            (request: UsageWorkerRequest) => Promise.resolve<UsageWorkerResponse>({ type: 'failed', id: request.id, failure: 'import-failed', errorName: 'Error' }),
+            () => Promise.reject(new Error('worker exited')),
+        ]) {
+            const { service, clock, host } = make();
+            host.answer = request => (request.type === 'import' ? fail(request) : Promise.resolve(defaultAnswer(request)));
+            await settle();
+            assert.deepStrictEqual([host.imports.length, service.status, service.retrying], [1, 'ready', true]);
+            await clock.advance(RETRY_MS[0] - 1);
+            assert.strictEqual(host.imports.length, 1);
+            await clock.advance(1);
+            assert.deepStrictEqual([host.imports.length, service.status, service.retrying], [2, 'failing', false]);
+        }
+    });
+
+    test('a failed pass is tried again after 5 s, 30 s, 2 and 10 minutes, then by the hourly pass', async () => {
+        const { clock, host } = make();
+        host.answer = request => Promise.resolve(request.type === 'import' ? busy(request) : defaultAnswer(request));
         await settle();
+        for (const [i, wait] of [...RETRY_MS, HOURLY_MS].entries()) {
+            await clock.advance(wait - 1);
+            assert.strictEqual(host.imports.length, i + 1, `tried again before ${wait} ms`);
+            await clock.advance(1);
+            assert.strictEqual(host.imports.length, i + 2, `not tried again after ${wait} ms`);
+        }
+    });
+
+    test('once a pass goes through, the next failure is a first again: unshown, and tried again after 5 s', async () => {
+        const { service, clock, host } = make();
+        let failing = true;
+        host.answer = request => Promise.resolve(request.type === 'import' && failing ? busy(request) : defaultAnswer(request));
+        await settle();
+        await clock.advance(RETRY_MS[0]);
         assert.strictEqual(service.status, 'failing');
+        failing = false;
+        await clock.advance(RETRY_MS[1]);
+        assert.deepStrictEqual([service.status, service.retrying], ['ready', false]);
+        failing = true;
+        await service.refresh();
+        assert.deepStrictEqual([service.status, service.retrying], ['ready', true]);
+        const tries = host.imports.length;
+        await clock.advance(RETRY_MS[0]);
+        assert.strictEqual(host.imports.length, tries + 1, 'the backing off was not started over');
+    });
+
+    test("watcher hints wait for a failed pass's retry, and are read by it", async () => {
+        const { service, clock, host, hints } = make();
+        const held = service.hold();
+        let failing = true;
+        host.answer = request => Promise.resolve(request.type === 'import' && failing ? busy(request) : defaultAnswer(request));
+        await settle();
+        // Claude Code writes on: a pass a second would undo the backing off.
+        hints[0]('/r/projects/p/a.jsonl');
+        await clock.advance(HINT_DEBOUNCE_MS);
+        assert.strictEqual(host.imports.length, 1, 'a hint ran a pass while the failed one waited');
+        failing = false;
+        await clock.advance(RETRY_MS[0] - HINT_DEBOUNCE_MS);
+        assert.deepStrictEqual(host.imports, ['all', 'all']);
+        held.dispose();
+    });
+
+    test("the log names SQLite's result code and its own text for it, and when the pass is tried again", async () => {
+        const warnings: string[] = [];
+        const { host } = make({ log: { info: () => undefined, warn: m => warnings.push(m), debug: () => undefined } });
+        host.answer = request => Promise.resolve(request.type === 'import' ? busy(request) : defaultAnswer(request));
+        await settle();
+        assert.deepStrictEqual(warnings, ['Claude Code usage: store-busy (Error, SQLite 5: database is locked); tried again in 5 s']);
+    });
+
+    test('a look that fails is looked at again after 5 s, and shows as failing only if that fails too', async () => {
+        const { service, clock, host } = make();
+        await settle();
+        let changes = 0;
+        service.onDidChange(() => changes++);
+        host.answer = request =>
+            Promise.resolve(request.type === 'query' ? { type: 'failed', id: request.id, failure: 'store-io', errorName: 'StoreError' } : defaultAnswer(request));
+        assert.strictEqual(await service.report('today', 'UTC', null), undefined);
+        assert.deepStrictEqual([service.status, changes], ['ready', 0]);
+        // The panel and the status item look again when told something changed.
+        await clock.advance(RETRY_MS[0]);
+        assert.strictEqual(changes, 1, 'nothing was told to look again');
+        await service.report('today', 'UTC', null);
+        assert.strictEqual(service.status, 'failing');
+        host.answer = request => Promise.resolve(request.type === 'query' ? { type: 'report', id: request.id, report: {} as UsageReport } : defaultAnswer(request));
+        await service.report('today', 'UTC', null);
+        assert.strictEqual(service.status, 'ready');
+    });
+
+    test('a pass that runs past a second says it reads, tells the page every 2 s, and once when done; a shorter one says nothing', async () => {
+        const { service, clock, host } = make();
+        const answer = heldImport(host);
+        await settle();
+        let changes = 0;
+        service.onDidChange(() => changes++);
+        await clock.advance(READING_SHOWN_MS - 1);
+        assert.deepStrictEqual([service.reading, changes], [undefined, 0]);
+        await clock.advance(1);
+        assert.deepStrictEqual([service.reading, changes], [{ by: 'this window' }, 1]);
+        await clock.advance(READING_UPDATE_MS);
+        assert.strictEqual(changes, 2, 'not told again while it read');
+        answer();
+        await settle();
+        assert.deepStrictEqual([service.reading, changes], [undefined, 3], 'told more than once that it was done, or not at all');
+
+        // A hint's pass, or a full one over unchanged files: over before the page could say so.
+        const quick = heldImport(host);
+        void service.refresh();
+        await clock.advance(READING_SHOWN_MS - 1);
+        quick();
+        await settle();
+        await clock.advance(5 * READING_SHOWN_MS);
+        // Told once, of the file it read.
+        assert.deepStrictEqual([service.reading, changes], [undefined, 4]);
+    });
+
+    test('a long pass that fails goes on saying it reads until it is tried again, and stops if that fails too', async () => {
+        const { service, clock, host } = make();
+        let answer!: (response: UsageWorkerResponse) => void;
+        host.answer = request => (request.type === 'import' ? new Promise(resolve => (answer = resolve)) : Promise.resolve(defaultAnswer(request)));
+        await settle();
+        await clock.advance(READING_SHOWN_MS);
+        answer(busy({ id: 0 }));
+        await settle();
+        assert.deepStrictEqual([service.reading, service.status], [{ by: 'this window' }, 'ready'], 'it stopped saying it reads, though it is tried again');
+        await clock.advance(RETRY_MS[0]);
+        assert.ok(service.reading);
+        answer(busy({ id: 0 }));
+        await settle();
+        assert.deepStrictEqual([service.reading, service.status], [undefined, 'failing']);
+    });
+
+    test("another window's pass is said to be reading only once it still is, a retry later", async () => {
+        const { service, clock, host } = make();
+        let refusals = 2;
+        host.answer = request =>
+            Promise.resolve(
+                request.type === 'import' && refusals-- > 0 ? { type: 'imported', id: request.id, summary: null, leaseHeldElsewhere: true } : defaultAnswer(request),
+            );
+        await settle();
+        // Refused once: that window's pass can have been a hint's, over at once.
+        assert.deepStrictEqual([service.updatingElsewhere, service.reading], [true, undefined]);
+        await clock.advance(LEASE_RETRY_MS);
+        assert.deepStrictEqual(service.reading, { by: 'another window' });
+        let changes = 0;
+        service.onDidChange(() => changes++);
+        await clock.advance(READING_UPDATE_MS);
+        assert.strictEqual(changes, 1, 'what it writes was not shown as it goes');
+        await clock.advance(LEASE_RETRY_MS);
+        assert.deepStrictEqual([service.updatingElsewhere, service.reading], [false, undefined]);
+
+        // Refused once, and through at the retry: never said.
+        const quick = make();
+        let once = 1;
+        const seen: unknown[] = [];
+        quick.host.answer = request =>
+            Promise.resolve(request.type === 'import' && once-- > 0 ? { type: 'imported', id: request.id, summary: null, leaseHeldElsewhere: true } : defaultAnswer(request));
+        quick.service.onDidChange(() => seen.push(quick.service.reading));
+        await settle();
+        await quick.clock.advance(LEASE_RETRY_MS);
+        assert.ok(seen.length > 0 && seen.every(r => r === undefined), JSON.stringify(seen));
+    });
+
+    test('a report asks how many files the pass has only once its reading shows, and passes on how far it has gone', async () => {
+        const { service, clock, host } = make();
+        await settle();
+        const asked: (boolean | undefined)[] = [];
+        const answer = heldImport(host);
+        const imports = host.answer;
+        host.answer = request => {
+            if (request.type !== 'query') {
+                return imports(request);
+            }
+            asked.push(request.progress);
+            return Promise.resolve({ type: 'report', id: request.id, report: {} as UsageReport, reading: request.progress ? { files: 120, of: 3_880 } : { files: 3 } });
+        };
+        void service.refresh();
+        await settle();
+        // Asked as the panel opens, the pass a moment old: a walk of every root is not worth it yet.
+        await service.report('7d', 'UTC', null);
+        await clock.advance(READING_SHOWN_MS);
+        assert.deepStrictEqual(service.reading, { by: 'this window', files: 3 });
+        await service.report('7d', 'UTC', null);
+        assert.deepStrictEqual([asked, service.reading], [[undefined, true], { by: 'this window', files: 120, of: 3_880 }]);
+        answer();
+        await settle();
+        assert.strictEqual(service.reading, undefined);
+    });
+
+    test('before any pass has gone through, a report waits for the one under way, to its end or its first second', async () => {
+        // accounting-1: the panel opened as the feature turned on showed a
+        // first import's first files, 5.2M of 309.6M, as the whole history.
+        const { service, clock, host } = make();
+        let answer = heldImport(host);
+        const imports = host.answer;
+        const queried: number[] = [];
+        const reportsFrom = (pass: typeof host.answer) => (request: UsageWorkerRequest) =>
+            request.type === 'query'
+                ? (queried.push(clock.now()), Promise.resolve<UsageWorkerResponse>({ type: 'report', id: request.id, report: {} as UsageReport }))
+                : pass(request);
+        host.answer = reportsFrom(imports);
+        await settle();
+        const started = clock.now();
+        let answered = false;
+        void service.report('7d', 'UTC', null).then(() => (answered = true));
+        await clock.advance(READING_SHOWN_MS - 1);
+        assert.deepStrictEqual([queried, answered], [[], false], "a pass's first files were read as the whole history");
+        await clock.advance(1);
+        assert.deepStrictEqual([queried, answered], [[started + READING_SHOWN_MS], true]);
+        answer();
+        await settle();
+
+        // After a Clear, the next pass is a first import again: its end, sooner than a second, is waited for.
+        assert.ok(await service.clear());
+        answer = heldImport(host);
+        host.answer = reportsFrom(host.answer);
+        void service.refresh();
+        await settle();
+        answered = false;
+        void service.report('7d', 'UTC', null).then(() => (answered = true));
+        await clock.advance(READING_SHOWN_MS / 2);
+        assert.strictEqual(answered, false);
+        answer();
+        await settle();
+        assert.strictEqual(answered, true);
+        assert.strictEqual(queried.at(-1), started + READING_SHOWN_MS + READING_SHOWN_MS / 2);
+
+        // Once one has gone through, a report is answered at once, a pass under way or not.
+        answer = heldImport(host);
+        host.answer = reportsFrom(host.answer);
+        void service.refresh();
+        await settle();
+        const before = queried.length;
+        await service.report('7d', 'UTC', null);
+        assert.strictEqual(queried.length, before + 1);
+        answer();
+    });
+
+    test("a hint's pass that went through first does not count as the whole history read", async () => {
+        // The first full pass waits for the startup scan; a watcher hint does not.
+        const { service, clock, host, hints } = make({ startupSettled: new Promise<void>(() => undefined) });
+        const held = service.hold();
+        let answered = false;
+        hints[0]('/r/projects/p/a.jsonl');
+        await clock.advance(HINT_DEBOUNCE_MS);
+        assert.deepStrictEqual(host.imports, [['/r/projects/p/a.jsonl']]);
+        const answer = heldImport(host);
+        const imports = host.answer;
+        host.answer = request =>
+            request.type === 'query' ? Promise.resolve({ type: 'report', id: request.id, report: {} as UsageReport }) : imports(request);
+        // To the startup scan's ceiling, and the full pass's first moment.
+        await clock.advance(FIRST_IMPORT_MAX_WAIT_MS - HINT_DEBOUNCE_MS);
+        assert.deepStrictEqual(host.imports.at(-1), 'all');
+        void service.report('7d', 'UTC', null).then(() => (answered = true));
+        await settle();
+        assert.strictEqual(answered, false, "the first full pass's first files were read as the whole history");
+        answer();
+        await settle();
+        assert.strictEqual(answered, true);
+        held.dispose();
     });
 
     test('a history set aside is logged and kept on show, until Clear removes it', async () => {
@@ -712,8 +991,9 @@ suite('usage service', () => {
     });
 
     test('Refresh says what it read, that another window reads, or why it could not; with no data folder, that', () => {
-        const at = (status: Parameters<typeof refreshMessage>[1]['status'], updatingElsewhere = false) => refreshMessage(undefined, { status, updatingElsewhere });
-        assert.deepStrictEqual(refreshMessage(summaryOf(3), { status: 'ready', updatingElsewhere: false })?.kind, 'info');
+        const at = (status: Parameters<typeof refreshMessage>[1]['status'], updatingElsewhere = false) =>
+            refreshMessage(undefined, { status, updatingElsewhere, retrying: false });
+        assert.deepStrictEqual(refreshMessage(summaryOf(3), { status: 'ready', updatingElsewhere: false, retrying: false })?.kind, 'info');
         assert.deepStrictEqual(at('ready', true)?.text, 'LLM Tokenizer: another window is updating the Claude Code usage history; this one shows it as it goes.');
         // The log says this once, when the folder goes: Refresh says it each time.
         assert.deepStrictEqual(at('no-roots'), {
@@ -743,6 +1023,26 @@ suite('usage service', () => {
         await settle();
         assert.deepStrictEqual([service.status, host.sent], ['no-roots', []]);
         assert.ok(service.roots?.candidates.some(c => c.source === 'default' && !c.exists));
+    });
+
+    test('a hold whose watchers fail to start holds nothing, so the worker is still let go', async () => {
+        // T-5: a hold counted before its watchers threw kept the worker for
+        // good, and the next panel watched nothing.
+        let failing = true;
+        const { service, clock, host } = make({
+            watch: () => {
+                if (failing) {
+                    throw new TypeError('inputs.setting.trim is not a function');
+                }
+                return new vscode.Disposable(() => undefined);
+            },
+        });
+        await settle();
+        assert.throws(() => service.hold(), TypeError);
+        failing = false;
+        service.hold().dispose();
+        await clock.advance(IDLE_MS);
+        assert.strictEqual(host.sent.at(-1), 'close', 'the hold that threw kept the worker');
     });
 
     test('through the real worker: the fixtures imported, reported, cleared and read again', async () => {
@@ -799,6 +1099,50 @@ suite('usage settings', () => {
         assert.deepStrictEqual(readUsageSettings(configuration as never), { enabled: false, dataDirectory: '', editorEnvironment: 'user' });
     });
 
+    /** This extension's settings as settings.json holds them, of any type: get() checks none. */
+    const written = (values: Record<string, unknown>) => (section: string) => ({
+        get: <T>(key: string) => (section === 'llm-tokenizer' ? values[key] : undefined) as T,
+        inspect: () => undefined,
+    });
+
+    test('only true turns the feature on: "false" written as a string, or 1, does not', () => {
+        // T-4: "false" turned the reading of Claude Code's records on.
+        for (const value of ['false', 'true', 1, 'no', null]) {
+            assert.strictEqual(readUsageSettings(written({ enableClaudeCodeUsage: value }) as never).enabled, false, JSON.stringify(value));
+            const both = written({ enableClaudeCodeUsage: value, showClaudeCodeUsageInStatusBar: true })('llm-tokenizer');
+            assert.strictEqual(statusItemShown(both), false, JSON.stringify(value));
+            assert.strictEqual(statusItemShown(written({ enableClaudeCodeUsage: true, showClaudeCodeUsageInStatusBar: value })('llm-tokenizer')), false);
+        }
+        assert.strictEqual(readUsageSettings(written({ enableClaudeCodeUsage: true }) as never).enabled, true);
+        assert.strictEqual(statusItemShown(written({ enableClaudeCodeUsage: true, showClaudeCodeUsageInStatusBar: true })('llm-tokenizer')), true);
+    });
+
+    test('a data folder written as anything but a string reads as unset', () => {
+        // T-5: null, a number or a list made every look at the roots throw.
+        for (const value of [null, 42, ['/x'], { path: '/x' }]) {
+            assert.strictEqual(readUsageSettings(written({ claudeCodeDataDirectory: value }) as never).dataDirectory, '', JSON.stringify(value));
+        }
+        assert.strictEqual(readUsageSettings(written({ claudeCodeDataDirectory: '~/claude' }) as never).dataDirectory, '~/claude');
+    });
+
+    test('the settings say what is kept as the README does, and every place the data folder is looked for', () => {
+        const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'package.json'), 'utf8')) as {
+            contributes: { configuration: { properties: Record<string, { description?: string }> } };
+        };
+        const properties = manifest.contributes.configuration.properties;
+        // Where a person consents: each thing the history keeps, the window's process id included.
+        const enable = properties['llm-tokenizer.enableClaudeCodeUsage']?.description ?? '';
+        for (const kept of ['effort, speed, where it ran, time', "each transcript's path, size, file id and how far it was read", "the window's process id and this machine's name"]) {
+            assert.ok(enable.includes(kept), kept);
+        }
+        // resolveRoots' order, the organization's managed settings included.
+        assert.ok(
+            properties['llm-tokenizer.claudeCodeDataDirectory']?.description?.includes(
+                "CLAUDE_CONFIG_DIR, the one in the organization's managed settings, the one in ~/.claude/settings.json, then ~/.claude",
+            ),
+        );
+    });
+
     test('every setting of the feature is a machine setting, so no workspace can turn it on or point it elsewhere', () => {
         const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'package.json'), 'utf8')) as {
             contributes: { configuration: { properties: Record<string, { scope?: string }> } | { properties: Record<string, { scope?: string }> }[] };
@@ -807,6 +1151,91 @@ suite('usage settings', () => {
         const properties = Object.assign({}, ...sections.map(c => c.properties)) as Record<string, { scope?: string }>;
         for (const key of USAGE_SETTINGS) {
             assert.strictEqual(properties[`llm-tokenizer.${key}`]?.scope, 'machine', key);
+        }
+    });
+});
+
+suite('usage worker: what it says while it imports, and when SQLite is busy', () => {
+    let tmp: string;
+    const hosts: WorkerHost<UsageWorkerRequest, UsageWorkerResponse>[] = [];
+    const sqlite = loadSqlite();
+
+    setup(() => {
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-worker-'));
+    });
+
+    teardown(async () => {
+        await Promise.all(hosts.splice(0).map(h => h.dispose()));
+        // Windows lets a folder go only once nothing in it is open.
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    });
+
+    function worker(workerData?: unknown): WorkerHost<UsageWorkerRequest, UsageWorkerResponse> {
+        const host = new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(WORKER, {
+            name: 'usage',
+            fallback: 'nothing',
+            log: { error: () => undefined, warn: () => undefined },
+            workerData,
+        });
+        hosts.push(host);
+        return host;
+    }
+
+    /** A root of `n` sessions of one request each: a pass over it yields a dozen times. */
+    function manySessions(n: number): string {
+        const project = path.join(tmp, 'root', 'projects', '-repo');
+        fs.mkdirSync(project, { recursive: true });
+        for (let i = 0; i < n; i++) {
+            const record = (fields: object) => JSON.stringify({ sessionId: `sess-${i}`, timestamp: '2026-10-09T10:00:00.000Z', ...fields }) + '\n';
+            fs.writeFileSync(
+                path.join(project, `sess-${i}.jsonl`),
+                record({ type: 'user', uuid: `u${i}`, cwd: '/repo', message: { role: 'user', content: 'x' } }) +
+                    record({
+                        type: 'assistant',
+                        uuid: `a${i}`,
+                        message: { model: 'claude-opus-5-5', id: `m${i}`, usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 } },
+                    }),
+            );
+        }
+        return path.join(tmp, 'root');
+    }
+
+    test('a report read while a pass runs says how far it has gone, and of how many files once asked', async () => {
+        // T-3: a first import's totals showed as the whole history, unmarked, until it ended.
+        const host = worker();
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const root = manySessions(600);
+        const query = (progress?: boolean) =>
+            host.send({ type: 'query', id: 0, storeFile, range: 'coverage', zone: 'UTC', workspaceFolders: null, ...(progress ? { progress } : {}) });
+        const pass = host.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        const [first, asked] = await Promise.all([query(), query(true)]);
+        assert.ok(first.type === 'report' && asked.type === 'report', `${first.type}, ${asked.type}`);
+        assert.ok(first.reading && first.reading.files > 0 && first.reading.files < 600 && first.reading.of === undefined, JSON.stringify(first.reading));
+        assert.strictEqual(asked.reading?.of, 600);
+        assert.strictEqual((await pass).type, 'imported');
+        const after = await query(true);
+        assert.ok(after.type === 'report' && after.reading === undefined && after.report.coverage.requests === 600, JSON.stringify(after).slice(0, 300));
+    });
+
+    test("a write lock held past the busy timeout fails as store-busy, with SQLite's result code and its text", async () => {
+        // T-2: it was "import-failed (Error)", node:sqlite's errors all being named Error.
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const host = worker({ busyTimeoutMs: 50 });
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        assert.strictEqual((await host.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] })).type, 'imported');
+        // Another window, in the middle of a write.
+        const other = new sqlite.DatabaseSync(currentHistory(path.dirname(storeFile)) ?? storeFile);
+        other.exec('BEGIN IMMEDIATE');
+        try {
+            const refused = await host.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+            assert.deepStrictEqual(
+                refused.type === 'failed' && [refused.failure, (refused.sqlite?.code ?? 0) & 0xff, refused.sqlite?.text],
+                ['store-busy', 5, 'database is locked'],
+                JSON.stringify(refused),
+            );
+        } finally {
+            other.exec('ROLLBACK');
+            other.close();
         }
     });
 });

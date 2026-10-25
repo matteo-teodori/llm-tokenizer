@@ -277,11 +277,17 @@ suite('extension', () => {
             }
         }
         // The usage panel is one click from any editor's title, the panel's
-        // own included, while the feature is on: off, the button would be
-        // there for everyone, and say only that it is off.
+        // own included, for whoever has Claude Code's extension or the
+        // feature on: off, it opens the page that says what turning it on
+        // reads and keeps. Not for everyone, most of whom count tokens for
+        // other models.
         const title = manifest.contributes.menus['editor/title']?.find(item => item.command === 'llm-tokenizer.showClaudeCodeUsage');
         assert.ok(title?.group?.startsWith('navigation'), 'Show Claude Code Usage is not a button in the editor title');
-        assert.strictEqual(title?.when, 'config.llm-tokenizer.enableClaudeCodeUsage', 'the button shows while the feature is off, or hides somewhere while it is on');
+        assert.strictEqual(
+            title?.when,
+            'config.llm-tokenizer.enableClaudeCodeUsage || llm-tokenizer.claudeCodeInstalled',
+            "the button shows for everyone, or hides from someone with Claude Code's extension or the feature on",
+        );
         // The button and the tabs are one icon: the logo's T.
         const show = manifest.contributes.commands.find(c => c.command === 'llm-tokenizer.showClaudeCodeUsage');
         const tab = logoIcon(extension.extensionUri);
