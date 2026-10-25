@@ -5,7 +5,7 @@ import * as vm from 'vm';
 
 import { emptyTotals, type UsageTotals } from '../../src/usage/aggregate';
 import { parsePanelMessage } from '../../src/usage/panel';
-import { renderFragments, renderUsagePage, type PanelFragments, type PanelView } from '../../src/usage/render';
+import { cutPercent, renderFragments, renderUsagePage, type PanelFragments, type PanelView } from '../../src/usage/render';
 import type { UsageReport } from '../../src/usage/report';
 
 /** Every way a transcript string could carry markup, in one. */
@@ -302,6 +302,25 @@ suite('usage page', () => {
         assert.ok(page(996, 4).includes('· 99% cache reads'), 'rounded up to all of it');
         assert.ok(page(1, 999).includes('· under 1% cache reads'));
         assert.ok(!page(0, 1_000).includes('cache reads,'));
+    });
+
+    test("the cache reads' share is one figure, cut alike on the total's line and on its bar", () => {
+        // Found in the README's GIF: today's 95.94% was 95% on the line and
+        // 96% on the Cache read bar just below it.
+        const shown = (cacheRead: number, rest: number) => {
+            const body = renderFragments(view({ report: report({ totals: { ...totals(cacheRead + rest), input: rest, cacheRead } }) })).body;
+            const line = /· ([^ ]+) cache reads, the conversation/.exec(body)?.[1];
+            const bar = /title="Cache read">Cache read<\/div>[\s\S]*?class="row-share">([^<]*)</.exec(body)?.[1];
+            return [line, bar];
+        };
+        assert.deepStrictEqual(shown(95_938, 4_062), ['95%', '95%']);
+        assert.deepStrictEqual(shown(996, 4), ['99%', '99%'], '99.6% is not all of it');
+        assert.deepStrictEqual(shown(56, 944), ['5.6%', '5.6%']);
+        // 0.29 is a hair under 29 as a float: still 29%.
+        assert.deepStrictEqual(shown(29, 71), ['29%', '29%']);
+        assert.strictEqual(cutPercent(0.999_99), '99%');
+        assert.strictEqual(cutPercent(0.0999), '9.9%');
+        assert.strictEqual(cutPercent(0), '0.0%');
     });
 
     test('processed, never used, and cache reads explained', () => {

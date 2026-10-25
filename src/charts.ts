@@ -122,12 +122,16 @@ export function meter(
     </div>`;
 }
 
-/** One ranked-bar row, its width relative to the widest row's. */
-export function rankedBar(row: RankedValue, widest: number): string {
+/** A share as a bar shows it: whole percent from 10%, one decimal below. */
+export function roundedPercent(share: number): string {
+    return `${(share * 100).toFixed(share >= 0.1 ? 0 : 1)}%`;
+}
+
+/** One ranked-bar row, its width relative to the widest row's; `percent` writes its share. */
+export function rankedBar(row: RankedValue, widest: number, percent: (share: number) => string = roundedPercent): string {
     // Relative to the largest bar, so the longest row fills the track and the
     // rest stay comparable against it.
     const width = widest > 0 ? (row.tokens / widest) * 100 : 0;
-    const percent = (row.share * 100).toFixed(row.share >= 0.1 ? 0 : 1);
 
     return `
         <div class="row">
@@ -136,7 +140,7 @@ export function rankedBar(row: RankedValue, widest: number): string {
                 <div class="row-bar" style="width: ${width.toFixed(2)}%"></div>
             </div>
             <div class="row-value">${formatNumber(row.tokens)}</div>
-            <div class="row-share">${percent}%</div>
+            <div class="row-share">${percent(row.share)}</div>
         </div>`;
 }
 
@@ -145,11 +149,11 @@ export function rankedBar(row: RankedValue, widest: number): string {
  * accent colour: the categories have no natural order, and shading them by
  * size would encode length twice.
  */
-export function rankedBars(rows: RankedValue[]): string {
+export function rankedBars(rows: RankedValue[], percent?: (share: number) => string): string {
     // A loop, not a spread: a spread of a very long list overflows the stack.
     let widest = 0;
     for (const row of rows) {
         widest = Math.max(widest, row.tokens);
     }
-    return `<div class="chart">${rows.map(r => rankedBar(r, widest)).join('')}</div>`;
+    return `<div class="chart">${rows.map(r => rankedBar(r, widest, percent)).join('')}</div>`;
 }

@@ -215,6 +215,17 @@ function controls(view: PanelView): string {
         <span class="muted">${[refreshed, newest].filter(Boolean).join(' · ')}${view.where ? ` · ${escapeHtml(view.where)}` : ''}</span>`;
 }
 
+/**
+ * A share as this page shows it, on its bars and on the total's line alike:
+ * whole percent from 10%, one decimal below, cut, never rounded up. 99.6% is
+ * not all of it, and the line once said 95% of the cache reads its bar beside
+ * it called 96%. The nudge keeps a share a float puts a hair under its figure,
+ * as 0.29 is, on that figure.
+ */
+export function cutPercent(share: number): string {
+    return share >= 0.1 ? `${Math.floor(share * 100 + 1e-9)}%` : `${(Math.floor(share * 1000 + 1e-9) / 10).toFixed(1)}%`;
+}
+
 function categoryBars(t: UsageTotals): string {
     const rows: [string, number][] = [
         ['Cache read', t.cacheRead],
@@ -222,7 +233,7 @@ function categoryBars(t: UsageTotals): string {
         ['Input', t.input],
         ['Output', t.output],
     ];
-    return rankedBars(ranked(rows, t.processed));
+    return rankedBars(ranked(rows, t.processed), cutPercent);
 }
 
 function ranked(rows: [string, number][], total: number): RankedValue[] {
@@ -290,15 +301,15 @@ function modelName(view: PanelView, model: string, variant: string | null): stri
 /**
  * How much of the total is cache reads, beside it: the conversation each
  * request sends again, which is why one prompt making dozens of calls on a
- * large context processes tens of millions. Cut, never rounded up: 99.6% is
- * not all of it.
+ * large context processes tens of millions. As the Cache read bar below it
+ * writes it (see cutPercent).
  */
 function cacheReadPart(t: UsageTotals): string {
     if (t.processed <= 0 || t.cacheRead <= 0) {
         return '';
     }
-    const percent = Math.floor((t.cacheRead / t.processed) * 100);
-    return ` · ${percent < 1 ? 'under 1%' : `${percent}%`} cache reads, the conversation each request sends again`;
+    const share = t.cacheRead / t.processed;
+    return ` · ${share < 0.01 ? 'under 1%' : cutPercent(share)} cache reads, the conversation each request sends again`;
 }
 
 function overview(report: UsageReport, view: PanelView): string {
@@ -329,17 +340,18 @@ function overview(report: UsageReport, view: PanelView): string {
     <section class="panel"><h2>By day</h2>${dayColumns(report, view)}</section>
     <section class="panel">
         <h2>By model</h2>
-        ${rankedBars(report.models.map(m => ({ label: modelName(view, m.model, m.variant), tokens: m.totals.processed, share: share0(m.totals, t) })))}
+        ${rankedBars(report.models.map(m => ({ label: modelName(view, m.model, m.variant), tokens: m.totals.processed, share: share0(m.totals, t) })), cutPercent)}
         ${capNote(report.omitted.models, 'models')}
     </section>
     <section class="panel">
         <h2>Delegated work</h2>
-        ${rankedBars(report.kinds.map(k => ({ label: KIND_LABELS[k.kind] ?? k.kind, tokens: k.totals.processed, share: share0(k.totals, t) })))}
+        ${rankedBars(report.kinds.map(k => ({ label: KIND_LABELS[k.kind] ?? k.kind, tokens: k.totals.processed, share: share0(k.totals, t) })), cutPercent)}
     </section>
     ${
         report.efforts.length > 1 || report.efforts[0]?.effort
             ? `<section class="panel"><h2>By effort</h2>${rankedBars(
                   report.efforts.map(e => ({ label: e.effort ?? 'not recorded', tokens: e.totals.processed, share: share0(e.totals, t) })),
+                  cutPercent,
               )}${capNote(report.omitted.efforts, 'effort levels')}</section>`
             : ''
     }
