@@ -394,6 +394,43 @@ suite('tokenizer service', () => {
         );
     });
 
+    test('re-hydration reads the vocabulary from disk again, and never downloads it', async () => {
+        // The extension host no longer keeps a vocabulary once the worker has
+        // it, so a crash takes the only loaded copy with it and re-hydration
+        // reads the file again. One deleted in the meantime — "Clear
+        // Downloaded Tokenizers" in another window — must leave an estimate,
+        // not a download: nothing on the count path reads the setting that
+        // turns downloads off. Nor may it still be reported as downloaded, or
+        // the download command would refuse to fetch it.
+        const llama = seeded('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(path.join(CRASHING_WORKERS, 'crash-on-demand.js'), store, log);
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        assert.deepStrictEqual(await tokenizer.count('abc', llama), { count: 2, exact: true });
+
+        const dir = vscode.Uri.joinPath(storageUri, llama.encoder.repo.replace(/[/\\]/g, '--'));
+        await vscode.workspace.fs.delete(vscode.Uri.joinPath(dir, 'tokenizer.json'));
+        const asked: string[] = [];
+        const original = globalThis.fetch;
+        globalThis.fetch = (url: string | URL | Request) => {
+            asked.push(url instanceof Request ? url.url : url.toString());
+            return Promise.reject(new Error('the test is offline'));
+        };
+        try {
+            assert.strictEqual((await tokenizer.count('CRASH', model('gpt-5.6-sol'))).exact, false);
+
+            const after = await tokenizer.count('abc', llama);
+            assert.strictEqual(after.exact, false, 'counted exactly with a vocabulary no longer on disk');
+            assert.deepStrictEqual(asked, [], 're-hydration downloaded the vocabulary');
+            assert.strictEqual(await tokenizer.isExact(llama), false, 'a deleted vocabulary is still reported as downloaded');
+        } finally {
+            globalThis.fetch = original;
+        }
+    });
+
     test('a crash that trips the budget mid re-hydration does not shelve the vocabulary', async () => {
         // Re-hydration compares the crash epoch to tell a vocabulary that cannot
         // be used from a worker that is dying. It read the epoch after checking
@@ -657,6 +694,46 @@ suite('tokenizer service', () => {
         assert.strictEqual(await store.isDownloaded(pinned.encoder), true);
     });
 
+    test('the store hands over a vocabulary as text, and keeps none of it', async () => {
+        // Parsing is the worker's: done on the extension host, whose thread
+        // every extension in the window shares, it held that thread for up to a
+        // third of a second on Gemma 3's tokenizer.json, and the store then kept
+        // the parsed object for the rest of the session, beside the worker's own.
+        const llama = seeded('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+
+        const asset = await store.peek(llama.encoder);
+        assert.ok(asset?.kind === 'hf', 'the seeded vocabulary was not read');
+        assert.strictEqual(asset.tokenizerJSON, readFileSync(path.join(FIXTURES, 'tokenizer', 'tokenizer.json'), 'utf8'));
+        assert.strictEqual(asset.tokenizerConfig, readFileSync(path.join(FIXTURES, 'tokenizer', 'tokenizer_config.json'), 'utf8'));
+
+        // Read from disk every time, never from a copy: gone from disk, gone.
+        const dir = vscode.Uri.joinPath(storageUri, llama.encoder.repo.replace(/[/\\]/g, '--'));
+        await vscode.workspace.fs.delete(vscode.Uri.joinPath(dir, 'tokenizer.json'));
+        assert.strictEqual(await store.peek(llama.encoder), undefined, 'the store answered from a copy it kept');
+        assert.strictEqual(await store.isDownloaded(llama.encoder), false);
+    });
+
+    test('a tokenizer_config.json that is missing or does not parse costs the config, not the load', async () => {
+        // Counting does not need it, and some tokenizer-only mirrors publish
+        // none. The worker parses it now, so the leniency the store had when it
+        // parsed it has to hold there.
+        const llama = seeded('llama-3.3-70b');
+        assert.ok(llama.encoder.kind === 'hf');
+        await seedTokenizer(storageUri, llama.encoder.repo);
+        const config = vscode.Uri.joinPath(storageUri, llama.encoder.repo.replace(/[/\\]/g, '--'), 'tokenizer_config.json');
+
+        await vscode.workspace.fs.writeFile(config, new TextEncoder().encode('{ "unk_token": '));
+        // The fixture merges "a"+"b", so "abc" is exactly two tokens.
+        assert.deepStrictEqual(await tokenizer.count('abc', llama), { count: 2, exact: true }, 'a damaged config cost the load');
+
+        await vscode.workspace.fs.delete(config);
+        tokenizer.dispose();
+        tokenizer = new TokenizerService(WORKER, store, log);
+        assert.deepStrictEqual(await tokenizer.count('abc', llama), { count: 2, exact: true }, 'a missing config cost the load');
+    });
+
     test('a download is read at the commit the registry names, and refused when its file is not the one named', async () => {
         const llama = model('llama-3.3-70b');
         assert.ok(llama.encoder.kind === 'hf');
@@ -679,7 +756,11 @@ suite('tokenizer service', () => {
             );
             // Nothing of it was kept.
             assert.strictEqual(await store.isDownloaded(spec), false);
-            assert.strictEqual((await store.fetch(spec)).kind, 'hf');
+            const fetched = await store.fetch(spec);
+            assert.ok(fetched.kind === 'hf');
+            // Handed over as the text it kept, for the worker to parse, rather
+            // than as the object parsed here to work that text out.
+            assert.strictEqual(fetched.tokenizerJSON, JSON.stringify(JSON.parse(readFileSync(fixture, 'utf8'))));
             const at = `https://huggingface.co/${spec.repo}/resolve/${spec.revision}/`;
             assert.ok(asked.length > 0 && asked.every(u => u.startsWith(at)), asked.join(' '));
             // What it kept is what the hash is of: another window reads it back as the same file.
@@ -730,6 +811,26 @@ suite('tokenizer service', () => {
             await store.isDownloaded(kimi.encoder),
             false,
             'the store still reports a tokenizer after being cleared',
+        );
+    });
+
+    test('a check still reading when the cache is cleared does not undo the clear', async () => {
+        // The store remembers which files matched their pins, so that asking
+        // again reads nothing. A check that began before the clear finds the
+        // file; recorded after the clear, that would report it downloaded for
+        // the rest of the session.
+        const kimi = seeded('kimi-k3');
+        assert.ok(kimi.encoder.kind === 'tiktokenModel');
+        await seedRankTable(storageUri, kimi.encoder.repo);
+
+        const during = store.isDownloaded(kimi.encoder);
+        await store.clear();
+        await during; // Began before the clear, so whatever it answered is stale.
+
+        assert.strictEqual(
+            await store.isDownloaded(kimi.encoder),
+            false,
+            'a check begun before the clear restored what it cleared',
         );
     });
 

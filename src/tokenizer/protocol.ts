@@ -17,7 +17,9 @@ export interface CountRequest {
 
 /**
  * Hand the worker a downloaded tokenizer so subsequent `count` requests for the
- * same repo are exact. Sent once per repo; the extension host owns the download.
+ * same repo are exact. Sent once per repo, and again to a worker restarted
+ * after a crash; the extension host owns the download, and the worker parses
+ * the text it is sent.
  */
 export interface LoadTokenizerRequest {
     type: 'loadTokenizer';

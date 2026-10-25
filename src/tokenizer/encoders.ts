@@ -216,9 +216,13 @@ function tiktokenEncoder(encoding: TiktokenEncoding): Encoder {
  * yields `undefined`, which is exactly the kind of silently-wrong number this
  * release exists to remove. The count is `ids.length`.
  *
- * Special tokens are not added: this library ignores `add_special_tokens`, and
- * that is the behaviour we want. Special tokens belong to chat templating, not
- * to the contents of a file.
+ * Those ids include the special tokens the tokenizer's post-processor adds:
+ * `encode` adds them unless it is passed `add_special_tokens: false`, and this
+ * library honours the option. `hfEncoder` takes them off by subtracting what
+ * the empty string encodes to instead, which comes to the same count: every
+ * post-processor the library implements adds the same tokens whatever the
+ * input. Measured with the 17 Hugging Face vocabularies the registry named at
+ * 2.2.0, over this repository's own files, the two never differed.
  */
 interface HfEncoding {
     ids: number[];
@@ -242,11 +246,13 @@ function loadTokenizerLibrary(): TokenizerCtor {
     return Tokenizer;
 }
 
-/** Raw `tokenizer.json` + `tokenizer_config.json`, as fetched from the Hub. */
+/** `tokenizer.json` + `tokenizer_config.json`, as text. */
 export interface HfTokenizerFiles {
     kind: 'hf';
-    tokenizerJSON: unknown;
-    tokenizerConfig: unknown;
+    /** As the store keeps it: the text whose hash `keptSha256` is. */
+    tokenizerJSON: string;
+    /** `{}` where the repo publishes none, as some tokenizer-only mirrors do. */
+    tokenizerConfig: string;
 }
 
 /** A raw `tiktoken.model` rank table, as fetched from the Hub. */
@@ -261,6 +267,14 @@ export interface TiktokenModelFile {
  * One type so the store, the worker protocol and the service all have a single
  * path for "fetch this model's vocabulary and hand it to the worker", whatever
  * shape the provider happens to publish.
+ *
+ * Text in both shapes, parsed only in the worker. The store used to parse
+ * tokenizer.json on the extension host, whose thread every extension in the
+ * window shares, and then post the parsed object, which took about as long to
+ * copy across as to parse: measured with Gemma 3's in VS Code 1.105's runtime,
+ * loading it held that thread for 150 to 320 ms at a stretch, where reading
+ * and posting the text holds it for 34 to 41. The worker builds its tokenizer
+ * from its own copy either way.
  */
 export type TokenizerAsset = HfTokenizerFiles | TiktokenModelFile;
 
@@ -273,7 +287,10 @@ export function hfEncoder(repo: string, files: HfTokenizerFiles): Encoder {
     }
 
     const Ctor = loadTokenizerLibrary();
-    const tokenizer = new Ctor(files.tokenizerJSON, files.tokenizerConfig);
+    const tokenizer = new Ctor(
+        JSON.parse(files.tokenizerJSON) as unknown,
+        parseConfig(files.tokenizerConfig),
+    );
 
     /**
      * Tokens this tokenizer adds regardless of input.
@@ -297,6 +314,18 @@ export function hfEncoder(repo: string, files: HfTokenizerFiles): Encoder {
 
     hfCache.set(repo, encoder);
     return encoder;
+}
+
+/**
+ * `tokenizer_config.json`, or an empty one where it does not parse: counting
+ * does not need it, so a damaged one must not cost the load.
+ */
+function parseConfig(text: string): unknown {
+    try {
+        return JSON.parse(text) as unknown;
+    } catch {
+        return {};
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -390,25 +419,21 @@ export function heuristicEncoder(charsPerToken: number): Encoder {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Resolve a spec to an encoder.
+ * Resolve a spec to the encoder it has without a download.
  *
- * `hf` specs need their files supplied by the caller, which owns the download
- * and the on-disk cache; when they are absent we degrade to the spec's own
- * fallback rather than failing the count.
+ * A downloadable spec degrades to its own fallback rather than failing the
+ * count: its exact encoder is built by the worker from the vocabulary the
+ * host hands it, which owns the download and the on-disk cache, and kept
+ * there.
  */
-export function resolveEncoder(spec: EncoderSpec, asset?: TokenizerAsset): Encoder {
+export function resolveEncoder(spec: EncoderSpec): Encoder {
     switch (spec.kind) {
         case 'tiktoken':
             return tiktokenEncoder(spec.encoding);
         case 'heuristic':
             return heuristicEncoder(spec.charsPerToken);
         case 'hf':
-            return asset?.kind === 'hf'
-                ? hfEncoder(spec.repo, asset)
-                : heuristicEncoder(spec.fallback.charsPerToken);
         case 'tiktokenModel':
-            return asset?.kind === 'tiktokenModel' && supportsRankTables()
-                ? tiktokenModelEncoder(spec.repo, asset)
-                : heuristicEncoder(spec.fallback.charsPerToken);
+            return heuristicEncoder(spec.fallback.charsPerToken);
     }
 }
