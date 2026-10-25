@@ -33,7 +33,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/token-summary-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/token-summary-dark.png" alt="A folder's count: 2.4K tokens for GPT-5.6 Sol, exact, by folder and by language, with each file's tokens">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/token-summary-dark.png" alt="The workspace's files counted: 2.1K tokens for GPT-5.6 Sol, exact, in 16 files, by folder and by language, with each file's tokens">
 </picture>
 
 
@@ -175,7 +175,7 @@ history starts, for all projects or for this workspace:
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.1B tokens processed in 12,565 requests and 96 sessions, split into cache reads, cache writes, input and output, by day and by model">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.6B tokens processed, 95% of them cache reads, in 13,027 requests and 87 sessions, split into cache reads, cache writes, input and output, by day and by model">
 </picture>
 
 *Processed* is everything a request sent or received: input, cache writes,
