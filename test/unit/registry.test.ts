@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import * as path from 'path';
 
 import { accuracyOf, isDownloadable } from '../../src/tokenizer/encoders';
-import { MODELS, MODEL_ALIASES, findModel, defaultModel, providers } from '../../src/tokenizer/registry';
+import { MODELS, MODEL_ALIASES, findModel, defaultModel, modelById, providers } from '../../src/tokenizer/registry';
 
 /** The repository root, from .test-out/test/unit. */
 const ROOT = path.join(__dirname, '..', '..', '..');
@@ -106,6 +106,20 @@ suite('model registry', () => {
                 `${model.id} is not a valid Anthropic model id`,
             );
         }
+    });
+
+    test("a dated Claude id labels as its undated model, without following any alias", () => {
+        // Claude Code records the dated snapshot id for the models before 4.6,
+        // and Anthropic documents the undated id as that snapshot's alias.
+        assert.strictEqual(modelById('claude-haiku-4-5-20251001')?.label, 'Claude Haiku 4.5');
+        assert.strictEqual(modelById('claude-opus-4-5-20251101')?.label, 'Claude Opus 4.5');
+        assert.strictEqual(modelById('claude-opus-5-5')?.label, 'Claude Opus 5.5');
+        // A removed model is not credited to its replacement, dated or not.
+        assert.strictEqual(modelById('claude-sonnet-4-5-20250929'), undefined);
+        assert.strictEqual(modelById('claude-sonnet-4-5'), undefined);
+        // Only a Claude id, and only a whole eight-digit date.
+        assert.strictEqual(modelById('gpt-5.6-sol-20260101'), undefined);
+        assert.strictEqual(modelById('claude-haiku-4-5-2025100'), undefined);
     });
 
     test('findModel resolves live ids, aliases, and nothing else', () => {
