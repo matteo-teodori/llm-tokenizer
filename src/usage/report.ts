@@ -404,29 +404,31 @@ function noteActivity(activity: Map<string, Map<number, BucketActivity>>, sums: 
 
 /**
  * A session's active time in the range: the time between its requests, its
- * subagents' included, with every pause over ACTIVE_PAUSE_MS left out, and
- * each pause counted in the range of the request that ends it.
+ * subagents' included, inside the range, with every pause over
+ * ACTIVE_PAUSE_MS left out.
  *
  * Exact from each bucket's first and last request, because the pause is at
  * least a bucket long: two requests in one bucket are less than a bucket
  * apart, so every pause inside one counts, and those add up to its last
  * request less its first; a pause between two buckets runs from the last
- * request of one to the first of the next one that has any.
+ * request of one to the first of the next one that has any. A pause that
+ * starts before the range counts from the range's start: it can only end in
+ * the range's first bucket, which starts at its first day's midnight.
  */
 function activeTime(buckets: Map<number, BucketActivity> | undefined): number {
     if (!buckets) {
         return 0;
     }
     let active = 0;
-    let previousLast: number | null = null;
-    for (const [, bucket] of [...buckets].sort(([a], [b]) => a - b)) {
+    let previous: BucketActivity | null = null;
+    for (const [key, bucket] of [...buckets].sort(([a], [b]) => a - b)) {
         if (bucket.inRange) {
             active += bucket.last - bucket.first;
-            if (previousLast !== null && bucket.first - previousLast <= ACTIVE_PAUSE_MS) {
-                active += bucket.first - previousLast;
+            if (previous !== null && bucket.first - previous.last <= ACTIVE_PAUSE_MS) {
+                active += bucket.first - (previous.inRange ? previous.last : key * BUCKET_MS);
             }
         }
-        previousLast = bucket.last;
+        previous = bucket;
     }
     return active;
 }

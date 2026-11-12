@@ -329,10 +329,11 @@ suite('usage report', () => {
         assert.deepStrictEqual(active, { s: (5 + 15 + 4) * 60_000, other: 0 });
     });
 
-    test("a pause into the range counts in it where the range starts earliest, at +14's midnight", () => {
+    test("a pause into the range counts from the range's start, where the range starts earliest, at +14's midnight", () => {
         // In Kiritimati, today starts at 10:00 UTC the day before, exactly
         // where the store's bound for the first local day falls: the bucket
-        // before it, where the pause starts, is fetched too.
+        // before it, where the pause starts, is fetched too, and of the pause
+        // only what falls in the range counts.
         const midnight = Date.UTC(2026, 9, 9, 10);
         assert.strictEqual(localDate(midnight, 'Pacific/Kiritimati'), '2026-10-10');
         const store = freshStore();
@@ -355,7 +356,7 @@ suite('usage report', () => {
         );
         assert.deepStrictEqual(
             report.sessions.map(s => [s.sessionId, s.activeMs, s.totals.coverage.requests]),
-            [['s', 10 * 60_000, 1]],
+            [['s', 5 * 60_000, 1]],
         );
     });
 
@@ -403,11 +404,22 @@ suite('usage report', () => {
                         { sums: store.bucketSums(rangeSince(range, zone, now), until), sessions: [], compactions: [], limitHits: [], coverage: store.coverage(until) },
                         { range, zone, now, scope: 'all' },
                     );
-                    // Worked out from every request: each pause counted on the day of the request that ends it.
+                    // Worked out from every request: each pause of 15 minutes or
+                    // less, as far as it lies in the range, which starts at the
+                    // first local midnight of its first day.
+                    const inRange = (ts: number) => report.from === null || localDate(ts, zone) >= report.from;
+                    // Every zone's midnight falls on a whole minute: the first
+                    // minute in the range at or before `after`.
+                    const rangeStart = (after: number) => {
+                        let t = Math.floor(after / 60_000) * 60_000;
+                        while (inRange(t - 60_000)) {
+                            t -= 60_000;
+                        }
+                        return t;
+                    };
                     const expected: Record<string, number> = {};
                     for (const [id, times] of bySession) {
                         const sorted = times.filter(ts => ts < until).sort((a, b) => a - b);
-                        const inRange = (ts: number) => report.from === null || localDate(ts, zone) >= report.from;
                         if (!sorted.some(inRange)) {
                             continue;
                         }
@@ -415,7 +427,7 @@ suite('usage report', () => {
                         for (let i = 1; i < sorted.length; i++) {
                             const pause = sorted[i] - sorted[i - 1];
                             if (inRange(sorted[i]) && pause <= 15 * 60_000) {
-                                active += pause;
+                                active += sorted[i] - (inRange(sorted[i - 1]) ? sorted[i - 1] : rangeStart(sorted[i]));
                             }
                         }
                         expected[id] = active;
