@@ -113,10 +113,11 @@ suite('model registry', () => {
         // and Anthropic documents the undated id as that snapshot's alias.
         assert.strictEqual(modelById('claude-haiku-4-5-20251001')?.label, 'Claude Haiku 4.5');
         assert.strictEqual(modelById('claude-opus-4-5-20251101')?.label, 'Claude Opus 4.5');
+        assert.strictEqual(modelById('claude-sonnet-4-5-20250929')?.label, 'Claude Sonnet 4.5');
         assert.strictEqual(modelById('claude-opus-5-5')?.label, 'Claude Opus 5.5');
-        // A removed model is not credited to its replacement, dated or not.
-        assert.strictEqual(modelById('claude-sonnet-4-5-20250929'), undefined);
-        assert.strictEqual(modelById('claude-sonnet-4-5'), undefined);
+        // A retired model is not credited to its replacement, dated or not.
+        assert.strictEqual(modelById('claude-3-5-sonnet-20241022'), undefined);
+        assert.strictEqual(modelById('claude-3.5-sonnet'), undefined);
         // Only a Claude id, and only a whole eight-digit date.
         assert.strictEqual(modelById('gpt-5.6-sol-20260101'), undefined);
         assert.strictEqual(modelById('claude-haiku-4-5-2025100'), undefined);
@@ -234,67 +235,42 @@ suite('model registry', () => {
         }
     });
 
-    test('a retired or deprecated id migrates to the replacement its provider names', () => {
+    test('a retired id migrates to the replacement its provider names', () => {
         // Each provider's own deprecation page, read 2026-11-12. Following the
         // provider puts a saved choice on the model its user calls next, where
-        // a model of the registry's choosing need not be.
+        // a model of the registry's choosing need not be. A deprecated model,
+        // still served, stays listed until it is shut down.
         const replacements: [retired: string, replacement: string][] = [
-            // OpenAI shut these down on 2026-10-23, and deprecated the rest
-            // (api/docs/deprecations).
+            // OpenAI shut these down on 2026-10-23 (api/docs/deprecations).
             ['o4-mini', 'gpt-5.6-terra'],
             ['o3-mini', 'gpt-5.6-sol'],
             ['o1', 'gpt-5.6-sol'],
             ['gpt-4-turbo', 'gpt-5.6-sol'],
             ['gpt-4', 'gpt-5.6-sol'],
             ['gpt-3.5-turbo', 'gpt-5.6-terra'],
-            ['o3-pro', 'gpt-5.6-sol'],
-            ['o3', 'gpt-5.6-sol'],
-            ['gpt-5', 'gpt-5.6-sol'],
-            ['gpt-4o', 'gpt-6-luna'],
-            ['gpt-4o-mini', 'gpt-6-luna'],
-            ['gpt-4.1', 'gpt-6-luna'],
-            ['gpt-5.1', 'gpt-6-sol'],
-            ['gpt-5.3-codex', 'gpt-6-sol'],
             // Anthropic, the newest of each line (the Claude API models reference).
-            ['claude-sonnet-4-5', 'claude-sonnet-5-5'],
             ['claude-3-opus', 'claude-opus-5-5'],
             ['claude-3.7-sonnet', 'claude-sonnet-5-5'],
             ['claude-3.5-sonnet', 'claude-sonnet-5-5'],
             ['claude-3-haiku', 'claude-haiku-5-5'],
-            // Google shut 2.0 Flash down on 2026-06-01, and routes 2.5 Pro and
-            // 2.5 Flash from 2026-12-01 (aistudio.google.com/docs/deprecations).
+            // Google shut 2.0 Flash down on 2026-06-01 (aistudio.google.com/docs/deprecations).
             ['gemini-2.0-flash', 'gemini-3.6-flash'],
-            ['gemini-2.5-pro', 'gemini-3.8-flash'],
-            ['gemini-2.5-flash', 'gemini-3.5-flash-lite'],
             // xAI serves the retired fast families with Grok 4.3, and Grok Code
             // Fast with Grok Build (docs.x.ai, the May 15 retirement).
             ['grok-4-fast', 'grok-4.3'],
             ['grok-4-1-fast', 'grok-4.3'],
             ['grok-3', 'grok-4.3'],
             ['grok-code-fast-1', 'grok-build-0.1'],
-            // Mistral names Large 4 for both Large 3 and Medium 3.5.
-            ['mistral-large-2512', 'mistral-large-4-0'],
-            ['mistral-medium-3-5', 'mistral-large-4-0'],
-            // MiniMax serves the preview's name with M3.1 Flash, and routes its
-            // plans' requests for M2.7 and M2.5 there. It names no replacement
-            // for M2.1 and M2, which go the same way, and the lowercase ids
-            // follow.
+            // MiniMax serves the preview's name with M3.1 Flash. It names no
+            // replacement for M2.1 and M2, which go where it routes its plans'
+            // requests for M2.7 and M2.5, and the lowercase ids follow.
             ['MiniMax-M3.1-Flash-Preview', 'MiniMax-M3.1-Flash'],
-            ['MiniMax-M2.7', 'MiniMax-M3.1-Flash'],
-            ['MiniMax-M2.5', 'MiniMax-M3.1-Flash'],
-            ['minimax-m2.7', 'MiniMax-M3.1-Flash'],
-            ['minimax-m2.5', 'MiniMax-M3.1-Flash'],
             ['MiniMax-M2.1', 'MiniMax-M3.1-Flash'],
             ['MiniMax-M2', 'MiniMax-M3.1-Flash'],
             ['minimax-m2.1', 'MiniMax-M3.1-Flash'],
             ['minimax-m2', 'MiniMax-M3.1-Flash'],
-            // Moonshot named K3 for K2.5, and links the K2 series' migration to
-            // K3.1 Pro.
+            // Moonshot named K3 when it retired K2.5.
             ['kimi-k2.5', 'kimi-k3'],
-            ['kimi-k2.7-code', 'kimi-k3.1-pro'],
-            ['kimi-k2.6', 'kimi-k3.1-pro'],
-            // Tencent switches hy4-preview to hy4 on 2026-12-07.
-            ['hy4-preview', 'hy4'],
         ];
 
         const ids = new Set(MODELS.map(m => m.id));
