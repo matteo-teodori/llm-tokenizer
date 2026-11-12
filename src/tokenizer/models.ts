@@ -56,14 +56,14 @@ const CLAUDE_LEGACY = 3.3;
  */
 const GROK = 3.7;
 
-// GPT6_UNMAPPED and the five after it are measured, each on the published
+// GPT6_UNMAPPED and the four after it are measured, each on the published
 // vocabulary closest to the models it stands in for, with the bundled
 // gpt-tokenizer or @huggingface/tokenizers (each Hugging Face count less its
 // empty-string baseline, as hfEncoder does). The corpus is this repository's
 // own TypeScript, JSON, YAML, .mjs and Markdown at e706b82, test fixtures and
 // the lockfile excluded: 51 files and 433,335 UTF-16 units. Each ratio is
 // rounded down to one decimal, which puts the corpus total 0.1 to 1.5% high.
-// Single files still stray either way: on this corpus 12 to 23 of the 51 come
+// Single files still stray either way: on this corpus 13 to 23 of the 51 come
 // out low, the worst by up to a third.
 
 /**

@@ -182,9 +182,9 @@ export function resolveInitialModel(
         // had — permanently, and with no action on their part. Their setting
         // was then ignored on every later activation, and the live
         // settings-change handler, which is gated on global state being empty,
-        // went dead with it. 41 of the 69 ids the v1.3.0 dropdown offered are
-        // aliases today, so this fired on the first activation after upgrade
-        // for anyone who had set it. An aliased setting still resolves below;
+        // went dead with it. 41 of the 69 ids the v1.3.0 dropdown offered were
+        // aliases then (58 at 2.3.0), so this fired on the first activation
+        // after upgrade for anyone who had set it. An aliased setting still resolves below;
         // it just no longer fabricates a stored choice.
         if (model && model.id !== candidate && candidate === saved) {
             // A change of case alone is the same model under the id its

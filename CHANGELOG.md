@@ -60,6 +60,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   That makes 80 models across 13 providers, 44 of them counted with the
   model's own tokenizer.
 
+### Fixed
+- **A Claude model recorded under its dated id is named as that model.**
+  Claude Code records Haiku 4.5 and Opus 4.5 as `claude-haiku-4-5-20251001`
+  and `claude-opus-4-5-20251101`, which the usage panel showed as such, and
+  the status item with no share of their window.
+
 ## [2.2.1] - 2026-10-25
 
 ### Changed
