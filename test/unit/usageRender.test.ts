@@ -86,20 +86,25 @@ interface FakeRow {
     getAttribute(name: string): string | null;
 }
 
+interface FakePage {
+    classList: { contains(name: string): boolean };
+    tBodies: { rows: FakeRow[]; appendChild(row: FakeRow): void }[];
+    inert: boolean;
+    parentElement: unknown;
+    headers: { key: string; attributes: Record<string, string>; querySelector(): unknown; setAttribute(name: string, value: string): void }[];
+    contains(element: unknown): boolean;
+    querySelector(selector: string): unknown;
+}
+
 /**
  * A list's strip as the page's script sees it: pages side by side, a table
  * each, whose rows carry their sort keys and whose headers have the buttons;
  * a list without `initial` is not sortable, as Usage limits reached is not.
+ * Each double answers only the selectors the script should ask, as the DOM
+ * would, and focus does nothing on an inert page, as in the DOM.
  */
 function fakeStrip(id: string, initial: string | undefined, keys: string[], rows: Record<string, string>[], perPage = 10) {
-    const pages: {
-        classList: { contains(name: string): boolean };
-        tBodies: { rows: FakeRow[]; appendChild(row: FakeRow): void }[];
-        inert: boolean;
-        headers: { key: string; attributes: Record<string, string>; querySelector(): unknown; setAttribute(name: string, value: string): void }[];
-        contains(element: unknown): boolean;
-        querySelector(selector: string): unknown;
-    }[] = [];
+    const pages: FakePage[] = [];
     const count = Math.max(1, Math.ceil(rows.length / perPage));
     for (let p = 0; p < count; p++) {
         const headers = keys.map(key => {
@@ -124,9 +129,14 @@ function fakeStrip(id: string, initial: string | undefined, keys: string[], rows
                 },
             ],
             inert: p > 0,
+            parentElement: null,
             headers,
             contains: element => (element as { page?: number } | null)?.page === p,
-            querySelector: selector => ({ page: p, selector, focus: () => strip.focusedOn.push(`page ${p} ${selector}`) }),
+            querySelector: selector => ({
+                page: p,
+                selector,
+                focus: () => (pages[p].inert ? undefined : strip.focusedOn.push(`page ${p} ${selector}`)),
+            }),
         });
     }
     rows.forEach((values, i) =>
@@ -147,44 +157,72 @@ function fakeStrip(id: string, initial: string | undefined, keys: string[], rows
             }
             this.scrollLeft = options.left;
         },
-        querySelectorAll: () => pages.flatMap(page => page.headers),
+        querySelectorAll: (selector: string) => (selector === 'th' ? pages.flatMap(page => page.headers) : []),
         /** Row labels, page by page, in the order shown. */
         pages: () => pages.map(page => page.tBodies[0].rows.map(r => r.values.label)),
         order: () => pages.flatMap(page => page.tBodies[0].rows.map(r => r.values.label)),
         /** The pages that can be reached. */
         reachable: () => pages.flatMap((page, i) => (page.inert ? [] : [i])),
-        sortOf: (key: string) => pages[0].headers.find(h => h.key === key)?.attributes['aria-sort'],
+        /** A column's aria-sort, as every page's header says it: two different ones joined with |. */
+        sortOf: (key: string) => [...new Set(pages.map(page => page.headers.find(h => h.key === key)?.attributes['aria-sort']))].join(' | '),
         /** A click on a header's sort button, on page `page`. */
-        button: (key: string, page = 0) => ({ page, dataset: { sortKey: key }, getAttribute: (name: string) => (name === 'data-sort-key' ? key : null), closest: () => strip }),
+        button: (key: string, page = 0) => ({
+            page,
+            dataset: { sortKey: key },
+            getAttribute: (name: string) => (name === 'data-sort-key' ? key : null),
+            closest: (selector: string) => (selector === '.pages' ? strip : null),
+        }),
+        /** Something focusable on page `page`, as focus finds it. */
+        on: (page: number) => ({ closest: (selector: string) => (selector === '.pages > .page' ? pages[page] : null) }),
     };
+    for (const page of pages) {
+        page.parentElement = strip;
+    }
     return strip;
 }
 
 type FakeStrip = ReturnType<typeof fakeStrip>;
 
-/** A list's pager as the page's script sees it. */
+/** A list's pager as the page's script sees it; its line counts the times it is written. */
 function fakePager(id: string) {
     const attributes: Record<string, Record<string, string>> = { previous: {}, next: {} };
+    const output = {
+        writes: 0,
+        line: '',
+        get textContent() {
+            return this.line;
+        },
+        set textContent(value: string) {
+            this.line = value;
+            this.writes++;
+        },
+    };
     const pager = {
         dataset: { pages: id },
-        output: { textContent: '' },
+        output,
         querySelector: (selector: string) =>
             selector === 'output'
-                ? pager.output
+                ? output
                 : { setAttribute: (name: string, value: string) => (attributes[/previous/.test(selector) ? 'previous' : 'next'][name] = value) },
         disabled: (which: 'previous' | 'next') => attributes[which]['aria-disabled'],
         /** A click on its previous or next button, as rendered: enabled, or not. */
         button: (which: 'previous' | 'next') => ({
             dataset: { page: which },
             getAttribute: (name: string) => (name === 'aria-disabled' ? (attributes[which]['aria-disabled'] ?? null) : null),
-            closest: () => pager,
+            closest: (selector: string) => (selector === 'nav[data-pages]' ? pager : null),
         }),
     };
     return pager;
 }
 
+/** What the webview tells the page of motion: VS Code's Reduce Motion as a class on the body, the system's as a media query. */
+interface Motion {
+    vscodeReduced?: boolean;
+    systemReduced?: boolean;
+}
+
 /** The page's script over a DOM that holds `strips`, swapped for new ones by each update. */
-function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: ReturnType<typeof fakePager>[] = []) {
+function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: ReturnType<typeof fakePager>[] = [], motion: Motion = {}) {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
     const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
     assert.ok(script);
@@ -197,6 +235,7 @@ function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: R
     const written: string[] = [];
     const document = {
         activeElement: null as unknown,
+        body: { classList: { contains: (name: string) => name === 'vscode-reduce-motion' && motion.vscodeReduced === true } },
         getElementById: (id: string) =>
             id === 'diagnostics'
                 ? details.current
@@ -215,12 +254,18 @@ function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: R
             const pager = /^nav\[data-pages="([^"]+)"\]$/.exec(selector);
             return pager ? (pagers.find(p => p.dataset.pages === pager[1]) ?? null) : { focus: () => focused.push(selector) };
         },
-        addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
+        // Kept apart by phase: scrollend does not bubble, so only a listener
+        // that captures it hears it from a strip.
+        addEventListener: (name: string, fn: (e: unknown) => void, capture?: boolean) => (listeners[capture === true ? `${name} capture` : name] = fn),
     };
     vm.runInNewContext(script, {
         acquireVsCodeApi: () => ({ postMessage: (m: { type: string }) => posted.push(m) }),
         document,
-        window: { origin: ORIGIN, addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
+        window: {
+            origin: ORIGIN,
+            addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn),
+            matchMedia: (query: string) => ({ matches: query === '(prefers-reduced-motion: reduce)' && motion.systemReduced === true }),
+        },
         Intl,
     });
     return {
@@ -230,8 +275,10 @@ function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: R
         details,
         document,
         click: (target: unknown) => listeners.click({ target: { closest: () => target } }),
-        /** A strip coming to rest after a swipe or a glide. */
-        rest: (strip: FakeStrip) => listeners.scrollend({ target: strip }),
+        /** A strip coming to rest after a swipe or a glide: scrollend, fired at the strip. */
+        rest: (strip: FakeStrip) => listeners['scrollend capture']?.({ target: strip }),
+        /** Focus landing on `target`: focusin, which bubbles. */
+        focusIn: (target: unknown) => listeners.focusin?.({ target }),
         update: (next: PanelFragments, newStrips: FakeStrip[]) => {
             nextStrips = newStrips;
             listeners['window:message']({ origin: ORIGIN, data: { type: 'data', fragments: next } });
@@ -638,7 +685,11 @@ suite('usage page', () => {
         // match in the page was the Projects table's, so Enter sorted the wrong one.
         const page = livePage(renderFragments(view()), [fakeStrip('sessions', 'processed', ['label', 'processed'], [])]);
         const sessions = { id: 'sessions' };
-        page.document.activeElement = { matches: (s: string) => s === 'button', closest: () => sessions, getAttribute: (name: string) => (name === 'data-sort-key' ? 'processed' : null) };
+        page.document.activeElement = {
+            matches: (s: string) => s === 'button',
+            closest: (s: string) => (s === '.pages[id]' ? sessions : null),
+            getAttribute: (name: string) => (name === 'data-sort-key' ? 'processed' : null),
+        };
         page.update(renderFragments(view({ zone: 'UTC' })), [fakeStrip('sessions', 'processed', ['label', 'processed'], [])]);
         assert.deepStrictEqual(page.focused, ['#sessions > .page:nth-child(1) button[data-sort-key="processed"]']);
         // The diagnostics' own header, which is no button, keeps its focus too.
@@ -677,7 +728,7 @@ suite('usage page', () => {
         assert.strictEqual((body.match(/data-sort-key="active"/g) ?? []).length, 3);
         assert.strictEqual((body.match(/<table class="page" inert>/g) ?? []).length, 2, 'a page out of view can be reached as rendered');
         assert.strictEqual((body.match(/<tr data-k-started/g) ?? []).length, 23);
-        assert.ok(body.includes('<div class="pages" id="sessions" data-rows="23" data-page-rows="10" data-sort="processed" data-ascending="false">'));
+        assert.ok(body.includes('<div class="pages" id="sessions" role="region" aria-label="Sessions" data-rows="23" data-page-rows="10" data-sort="processed" data-ascending="false">'));
         assert.ok(body.includes('<nav class="pager" data-pages="sessions" aria-label="Sessions, by page">'));
         assert.ok(body.includes('<output aria-live="polite">1–10 of 23</output>'));
         assert.ok(/data-page="previous"[^>]*aria-disabled="true"/.test(body) && !/data-page="next"[^>]*aria-disabled/.test(body));
@@ -712,8 +763,9 @@ suite('usage page', () => {
 
         page.click(pager.button('next'));
         assert.deepStrictEqual(sessions.glides, [600]);
-        // The page it glides to can be clicked as it comes; the one it leaves until it rests.
-        assert.deepStrictEqual(sessions.reachable(), [0, 1]);
+        // Only the page it glides to can be reached, from the start: Tab after
+        // the button goes into it, never back into the page it leaves.
+        assert.deepStrictEqual(sessions.reachable(), [1]);
         page.rest(sessions);
         assert.deepStrictEqual(state(), ['11–20 of 23', 'false', 'false', [1]]);
 
@@ -734,7 +786,116 @@ suite('usage page', () => {
         const page = livePage(renderFragments(view()), [sessions], [pager]);
         sessions.scrollLeft = 1199.5;
         page.rest(sessions);
-        assert.deepStrictEqual([pager.output.textContent, sessions.reachable()], ['21–30 of 30', [2]]);
+        // Within a pixel of the edge, as a fractional scroll position is, it is left where it rests.
+        assert.deepStrictEqual([pager.output.textContent, sessions.reachable(), sessions.scrollLeft], ['21–30 of 30', [2], 1199.5]);
+    });
+
+    test('a glide cut short between two pages is put back on the page it comes to rest nearest', () => {
+        // Focus during a glide stops it, and a resize lets it end off a
+        // page's edge; scroll snapping moves it no further.
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], Array.from({ length: 30 }, (_, i) => ({ label: `r${i}`, processed: String(i) })));
+        const pager = fakePager('sessions');
+        const page = livePage(renderFragments(view()), [sessions], [pager]);
+        sessions.scrollLeft = 700;
+        page.rest(sessions);
+        assert.deepStrictEqual([sessions.scrollLeft, sessions.reachable(), pager.output.textContent], [600, [1], '11–20 of 30']);
+    });
+
+    test('focus that lands on a page turns its strip there, where a glide it cut short left no scrollend', () => {
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], Array.from({ length: 30 }, (_, i) => ({ label: `r${i}`, processed: String(i) })));
+        const pager = fakePager('sessions');
+        const page = livePage(renderFragments(view()), [sessions], [pager]);
+        page.click(pager.button('next'));
+        // Tab into the page it glides to stops the glide 250 px in, and no scrollend comes.
+        sessions.scrollLeft = 250;
+        page.focusIn(sessions.on(1));
+        assert.deepStrictEqual([sessions.scrollLeft, sessions.reachable(), pager.output.textContent], [600, [1], '11–20 of 30']);
+        // Focus on another page, by a script say, turns there too.
+        page.focusIn(sessions.on(2));
+        assert.deepStrictEqual([sessions.scrollLeft, sessions.reachable(), pager.output.textContent], [1200, [2], '21–30 of 30']);
+        // Focus already on the page in view, and at rest, moves nothing.
+        const before = pager.output.writes;
+        page.focusIn(sessions.on(2));
+        assert.deepStrictEqual([sessions.scrollLeft, pager.output.writes], [1200, before]);
+        // Nor does focus anywhere else.
+        page.focusIn({ closest: () => null });
+        assert.strictEqual(sessions.scrollLeft, 1200);
+    });
+
+    test("the pager's line, a live region, is written only when it changes", () => {
+        const rows = Array.from({ length: 25 }, (_, i) => ({ label: `r${i}`, processed: String(i) }));
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], rows);
+        const pager = fakePager('sessions');
+        const page = livePage(renderFragments(view()), [sessions], [pager]);
+        assert.deepStrictEqual([pager.output.textContent, pager.output.writes], ['1–10 of 25', 1]);
+        // An update that leaves the list as it was, a refresh's time say, reads nothing out again.
+        page.update(renderFragments(view({ refreshedAt: Date.UTC(2026, 9, 9, 13) })), [sessions]);
+        const again = fakeStrip('sessions', 'processed', ['label', 'processed'], rows);
+        page.update(renderFragments(view({ zone: 'UTC' })), [again]);
+        assert.strictEqual(pager.output.writes, 1);
+        page.click(pager.button('next'));
+        page.rest(again);
+        assert.deepStrictEqual([pager.output.textContent, pager.output.writes], ['11–20 of 25', 2]);
+    });
+
+    test("Reduce Motion, VS Code's or the system's, turns a page at once", () => {
+        for (const motion of [{ vscodeReduced: true }, { systemReduced: true }]) {
+            const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], Array.from({ length: 25 }, (_, i) => ({ label: `r${i}`, processed: String(i) })));
+            const pager = fakePager('sessions');
+            const page = livePage(renderFragments(view()), [sessions], [pager], motion);
+            page.click(pager.button('next'));
+            assert.deepStrictEqual([sessions.glides, sessions.scrollLeft, sessions.reachable(), pager.output.textContent], [[], 600, [1], '11–20 of 25'], JSON.stringify(motion));
+        }
+        // And without it, the turn glides.
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], Array.from({ length: 25 }, (_, i) => ({ label: `r${i}`, processed: String(i) })));
+        const pager = fakePager('sessions');
+        livePage(renderFragments(view()), [sessions], [pager]).click(pager.button('next'));
+        assert.deepStrictEqual(sessions.glides, [600]);
+    });
+
+    test("a header's focus after an update returns to the page in view, or the last there is", () => {
+        const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ label: `r${i}`, processed: String(100 - i) }));
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], rows(25));
+        const pager = fakePager('sessions');
+        const page = livePage(renderFragments(view()), [sessions], [pager]);
+        page.click(pager.button('next'));
+        page.rest(sessions);
+        page.click(pager.button('next'));
+        page.rest(sessions);
+        const header = {
+            matches: (s: string) => s === 'button',
+            closest: (s: string) => (s === '.pages[id]' ? { id: 'sessions' } : null),
+            getAttribute: (name: string) => (name === 'data-sort-key' ? 'processed' : null),
+        };
+        page.document.activeElement = header;
+        page.update(renderFragments(view({ zone: 'UTC' })), [fakeStrip('sessions', 'processed', ['label', 'processed'], rows(25))]);
+        assert.strictEqual(page.focused.at(-1), '#sessions > .page:nth-child(3) button[data-sort-key="processed"]');
+        page.document.activeElement = header;
+        page.update(renderFragments(view({ zone: 'Europe/Rome' })), [fakeStrip('sessions', 'processed', ['label', 'processed'], rows(15))]);
+        assert.strictEqual(page.focused.at(-1), '#sessions > .page:nth-child(2) button[data-sort-key="processed"]');
+    });
+
+    test('a list with nothing to focus in it, Usage limits reached, keeps its focus across an update', () => {
+        // Its strip is then itself a stop on Tab, and the arrow keys turn its pages.
+        const page = livePage(renderFragments(view()), []);
+        page.document.activeElement = { matches: (s: string) => s === '.pages[id]', id: 'limits', closest: () => null, getAttribute: () => null };
+        page.update(renderFragments(view({ zone: 'UTC' })), []);
+        assert.deepStrictEqual(page.focused, ['#limits']);
+    });
+
+    test("in a narrow panel only a project's name is cut, its title whole; every figure wraps", () => {
+        const fragments = renderFragments(view({ report: report({ sessions: manySessions(12) }) }));
+        const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
+        assert.ok(html.includes('table.page td.label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }'));
+        assert.ok(html.includes('table.page td, table.page th button { overflow-wrap: anywhere; }'));
+        assert.ok(!/table\.page td,[^{]*\{[^}]*nowrap/.test(html), 'a figure can be cut');
+        // The project's cell is the one cut, and its title holds the whole name.
+        assert.ok(fragments.body.includes(`<td class="label"><span title="${'p0'}">p0</span></td>`));
+        assert.strictEqual((fragments.body.match(/<td class="label">/g) ?? []).length, 12 + 1, 'every project cell, of the sessions and of the projects');
+        // Each list's strip is named, so that one with nothing focusable in it is named when Tab reaches it.
+        for (const [id, name] of [['sessions', 'Sessions'], ['projects', 'Projects'], ['limits', 'Usage limits reached']]) {
+            assert.ok(fragments.body.includes(`<div class="pages" id="${id}" role="region" aria-label="${name}"`), id);
+        }
     });
 
     test('a sort orders every row on every page, and shows the new order from its first page', () => {

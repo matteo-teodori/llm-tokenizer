@@ -294,10 +294,13 @@ suite('usage panel', () => {
             page.send({ type: 'clear' });
             page.send({ type: 'showLog' });
             page.send({ type: 'openFile', path: '/etc/passwd' });
+            // Run by the recorder above: nothing reloads.
+            page.send({ type: 'reloadWindow' });
             await settle();
             assert.deepStrictEqual(ran, [
                 ['workbench.action.openSettings', { query: 'llm-tokenizer.enableClaudeCodeUsage' }],
                 ['llm-tokenizer.clearClaudeCodeUsageHistory'],
+                ['workbench.action.reloadWindow'],
             ]);
             assert.strictEqual(logShown, 1);
         } finally {

@@ -409,8 +409,8 @@ function sectionHead(title: string, id: string, rows: number): string {
  * a sort orders every row, not one page's; only the page in view can be
  * reached, the others are inert until the strip comes to rest on one.
  */
-function strip(id: string, rows: number, pages: string[], attributes = ''): string {
-    return `<div class="pages" id="${id}" data-rows="${rows}" data-page-rows="${PAGE_ROWS}"${attributes}>${pages.join('')}</div>`;
+function strip(id: string, title: string, rows: number, pages: string[], attributes = ''): string {
+    return `<div class="pages" id="${id}" role="region" aria-label="${escapeHtml(title)}" data-rows="${rows}" data-page-rows="${PAGE_ROWS}"${attributes}>${pages.join('')}</div>`;
 }
 
 function limitWindows(report: UsageReport, view: PanelView): string {
@@ -435,7 +435,7 @@ function limitWindows(report: UsageReport, view: PanelView): string {
     return `
     <section class="panel">
         ${sectionHead('Usage limits reached', 'limits', windows.length)}
-        ${strip('limits', windows.length, pages)}
+        ${strip('limits', 'Usage limits reached', windows.length, pages)}
         ${report.omitted.limitWindows > 0 ? `<p class="truncation">…and ${report.omitted.limitWindows.toLocaleString('en-US')} earlier ones, not listed.</p>` : ''}
         <p class="note">For the whole account, whichever project hit them, newest first.</p>
     </section>`;
@@ -476,13 +476,13 @@ function table(
                     `<tr ${Object.entries(r.keys)
                         .map(([k, v]) => `data-k-${k}="${escapeHtml(String(v))}"`)
                         .join(' ')}>${r.cells
-                        .map((cell, c) => `<td${columns[c]?.numeric ? ' class="num"' : ''}>${cell}</td>`)
+                        .map((cell, c) => `<td${columns[c]?.numeric ? ' class="num"' : columns[c]?.key === 'label' ? ' class="label"' : ''}>${cell}</td>`)
                         .join('')}</tr>`,
             )
             .join('')}</tbody></table>`,
     );
     return `${sectionHead(title, id, rows.length)}
-        ${strip(id, rows.length, pages, ` data-sort="${initial}" data-ascending="false"`)}`;
+        ${strip(id, title, rows.length, pages, ` data-sort="${initial}" data-ascending="false"`)}`;
 }
 
 function projects(report: UsageReport, view: PanelView): string {
@@ -865,14 +865,17 @@ thead th.num, td.num { text-align: right; }
 thead th button { font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; background: none; border: 0; padding: 0; }
 tbody td { padding: 3px 8px; font-variant-numeric: tabular-nums; }
 tbody tr:hover { background: var(--vscode-list-hoverBackground); }
-/* Columns are as wide on every page; in a narrow panel a cell is cut, its title whole. */
-table.page td, table.page th button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Columns are as wide on every page. In a narrow panel a project's name is
+   cut, its title whole; every other cell wraps, so no figure is lost. */
+table.page td, table.page th button { overflow-wrap: anywhere; }
 table.page th button { max-width: 100%; }
+table.page td.label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 0 12px; }
 .section-head h2 { margin: 0; }
 .pager { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-muted); font-size: 0.9em; font-variant-numeric: tabular-nums; }
 .pager button { padding: 0 9px; }
-/* A page at a time: a swipe stops at the next page, never past it. */
+/* Pages snap: a swipe comes to rest on a page's edge, the next one, or past
+   it if long or fast, and the pager follows wherever it rests. */
 .pages {
     display: flex;
     align-items: flex-start;
@@ -949,6 +952,12 @@ ${PAGE_TEXT_HELPERS}
         const width = strip.clientWidth;
         const index = width > 0 ? Math.max(0, Math.min(pages.length - 1, Math.round(strip.scrollLeft / width))) : at[strip.id] || 0;
         at[strip.id] = index;
+        // Back onto that page's edge: a glide cut short by focus, or outlived
+        // by a resize of the panel, can stop between two pages, and scroll
+        // snapping does not move it again.
+        if (width > 0 && Math.abs(strip.scrollLeft - index * width) >= 1) {
+            strip.scrollLeft = index * width;
+        }
         pages.forEach((page, i) => {
             const away = i !== index;
             // Focus on a page about to go inert follows to the same button on the page in view.
@@ -966,23 +975,32 @@ ${PAGE_TEXT_HELPERS}
             const per = Number(strip.dataset.pageRows);
             const rows = Number(strip.dataset.rows);
             const count = n => n.toLocaleString('en-US');
-            pager.querySelector('output').textContent = count(index * per + 1) + '–' + count(Math.min(rows, (index + 1) * per)) + ' of ' + count(rows);
+            const line = count(index * per + 1) + '–' + count(Math.min(rows, (index + 1) * per)) + ' of ' + count(rows);
+            // Written only when it changes: it is a live region, which a
+            // screen reader would read out again on every update.
+            const output = pager.querySelector('output');
+            if (output.textContent !== line) { output.textContent = line; }
             pager.querySelector('[data-page="previous"]').setAttribute('aria-disabled', String(index === 0));
             pager.querySelector('[data-page="next"]').setAttribute('aria-disabled', String(index >= pages.length - 1));
         }
     }
 
     // Turn a strip to a page: gliding there from a pager's button, unless
-    // motion is to be reduced; at once after an update or a sort.
+    // motion is to be reduced, in VS Code (a class on the body) or in the
+    // system; at once after an update or a sort.
     function turn(strip, index, glide) {
         const pages = pagesIn(strip);
         const to = Math.max(0, Math.min(pages.length - 1, index));
         at[strip.id] = to;
         const left = to * strip.clientWidth;
-        const still = !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-        if (glide && still && Math.abs(strip.scrollLeft - left) >= 1) {
-            // The page it glides to can be clicked as it comes; settle() makes the rest inert when it stops.
-            pages[to].inert = false;
+        const reduced =
+            !!(document.body && document.body.classList && document.body.classList.contains('vscode-reduce-motion')) ||
+            !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+        if (glide && !reduced && Math.abs(strip.scrollLeft - left) >= 1) {
+            // Only the page it glides to can be reached from the start: Tab
+            // after the pager's button goes into it, never back into the page
+            // it leaves, where focus would stop the glide halfway.
+            pages.forEach((page, i) => { page.inert = i !== to; });
             strip.scrollTo({ left, behavior: 'smooth' });
         } else {
             strip.scrollLeft = left;
@@ -996,6 +1014,16 @@ ${PAGE_TEXT_HELPERS}
         const strip = e.target;
         if (strip && strip.classList && strip.classList.contains('pages')) { settle(strip); }
     }, true);
+
+    // Focus that lands on a page turns its strip there, if it is not there
+    // already: one that cuts a glide short can leave no scrollend behind.
+    document.addEventListener('focusin', e => {
+        const page = e.target && e.target.closest && e.target.closest('.pages > .page');
+        if (!page) { return; }
+        const strip = page.parentElement;
+        const index = pagesIn(strip).indexOf(page);
+        if (index !== at[strip.id] || Math.abs(strip.scrollLeft - index * strip.clientWidth) >= 1) { turn(strip, index, false); }
+    });
 
     function arrange() {
         document.querySelectorAll('.pages').forEach(strip => {
@@ -1032,6 +1060,11 @@ ${PAGE_TEXT_HELPERS}
                 : strip ? '#' + strip.id + ' > .page:nth-child(' + ((at[strip.id] || 0) + 1) + ') ' + button
                 : pager ? 'nav[data-pages="' + pager.dataset.pages + '"] ' + button
                 : button;
+        } else if (focused && focused.matches('.pages[id]')) {
+            // Usage limits reached holds nothing focusable, so its strip is
+            // itself a stop on Tab, and the arrow keys turn its pages.
+            const id = focused.id;
+            selector = () => '#' + id;
         } else if (focused && focused.matches('#diagnostics > summary')) {
             selector = () => '#diagnostics > summary';
         }
