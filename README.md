@@ -163,7 +163,7 @@ way. While it is off, the page says what turning it on reads and keeps, with
 the T, right-click the editor's title bar and choose
 **Hide 'Show Claude Code Usage'**.
 
-<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects and sessions, and the status item's tooltip shows the running session's context">
+<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects, turns to the second page of its sessions, each with its active time, and the status item's tooltip shows the running session's context">
 
 **The panel** shows today, the last 7 or 30 days, or everything since the
 history starts, for all projects or for this workspace:
@@ -171,7 +171,9 @@ history starts, for all projects or for this workspace:
   with the share of it that was cache reads;
 - a column per day, in your time zone;
 - models, the main conversation against subagents and workflows, and effort;
-- projects and sessions, sortable, and the usage limits you reached;
+- projects and sessions, sortable, each session with its active time, and
+  the usage limits you reached, newest first; a long list shows ten rows a
+  page, and a swipe or the ‹ › beside its heading turns the page;
 - diagnostics: what was read, what was skipped and why, and where from.
 
 <picture>
@@ -187,6 +189,11 @@ large context processes tens of millions. A total marked `≥` is a lower bound:
 some request did not report every counter, or the records are still being
 read. While they are, the first time above all, the panel says so, with how
 many of the files it has gone through, and shows the totals as they grow.
+
+*Active* is a session's time between requests in the range, its subagents'
+included, leaving out every pause of over 15 minutes: Claude and its tools at
+work, and your replies within that, rather than how long the session stayed
+open.
 
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
 the context of the Claude Code session running in this workspace is, as a
@@ -214,7 +221,8 @@ by what a request's price depends on besides its model: its speed (`fast` is
 billed higher), where it ran (`us` is billed higher), and its prompt size (up to
 100,000 tokens, up to 200,000, or more: Claude Haiku 5.5 prices a request over
 100,000 higher). Its notes say how to read each of those. It gives no prices.
-**Copy** copies the sessions, for a spreadsheet.
+**Copy** copies the sessions, with each one's active minutes, for a
+spreadsheet.
 
 **What is kept, and where.** A database in this extension's own storage
 (the `claude-code-usage` folder in VS Code's global storage for LLM
