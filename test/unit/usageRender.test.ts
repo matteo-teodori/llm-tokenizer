@@ -81,42 +81,117 @@ function view(overrides: Partial<PanelView> = {}): PanelView {
 
 const text = (f: PanelFragments) => f.controls + f.body + f.diagnostics;
 
-/** A sortable table as the page's script sees it: rows carry their sort keys, headers their buttons. */
-function fakeTable(id: string, initial: string, keys: string[], rows: Record<string, string>[]) {
-    const tbody = {
-        rows: rows.map(values => ({ values, getAttribute: (name: string) => values[name.replace(/^data-k-/, '')] ?? null })),
-        appendChild(row: unknown) {
-            this.rows.splice(this.rows.indexOf(row as (typeof this.rows)[number]), 1);
-            this.rows.push(row as (typeof this.rows)[number]);
-        },
-    };
-    const headers = keys.map(key => {
-        const attributes: Record<string, string> = {};
-        return { key, attributes, querySelector: () => ({ dataset: { sortKey: key } }), setAttribute: (name: string, value: string) => (attributes[name] = value) };
-    });
-    const table = {
-        id,
-        dataset: { sort: initial },
-        tBodies: [tbody],
-        querySelectorAll: () => headers,
-        /** Row labels, in the order shown. */
-        order: () => tbody.rows.map(r => r.values.label),
-        sortOf: (key: string) => headers.find(h => h.key === key)?.attributes['aria-sort'],
-        /** A click on a header's sort button. */
-        button: (key: string) => ({ dataset: { sortKey: key }, closest: () => table }),
-    };
-    return table;
+interface FakeRow {
+    values: Record<string, string>;
+    getAttribute(name: string): string | null;
 }
 
-/** The page's script over a DOM that holds `tables`, swapped for new ones by each update. */
-function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fakeTable>[]) {
+/**
+ * A list's strip as the page's script sees it: pages side by side, a table
+ * each, whose rows carry their sort keys and whose headers have the buttons;
+ * a list without `initial` is not sortable, as Usage limits reached is not.
+ */
+function fakeStrip(id: string, initial: string | undefined, keys: string[], rows: Record<string, string>[], perPage = 10) {
+    const pages: {
+        classList: { contains(name: string): boolean };
+        tBodies: { rows: FakeRow[]; appendChild(row: FakeRow): void }[];
+        inert: boolean;
+        headers: { key: string; attributes: Record<string, string>; querySelector(): unknown; setAttribute(name: string, value: string): void }[];
+        contains(element: unknown): boolean;
+        querySelector(selector: string): unknown;
+    }[] = [];
+    const count = Math.max(1, Math.ceil(rows.length / perPage));
+    for (let p = 0; p < count; p++) {
+        const headers = keys.map(key => {
+            const attributes: Record<string, string> = {};
+            return { key, attributes, querySelector: () => ({ dataset: { sortKey: key } }), setAttribute: (name: string, value: string) => (attributes[name] = value) };
+        });
+        pages.push({
+            classList: { contains: name => name === 'page' },
+            tBodies: [
+                {
+                    rows: [],
+                    appendChild(row) {
+                        // Moved, as the DOM moves a node: out of whichever page held it.
+                        for (const page of pages) {
+                            const at = page.tBodies[0].rows.indexOf(row);
+                            if (at !== -1) {
+                                page.tBodies[0].rows.splice(at, 1);
+                            }
+                        }
+                        this.rows.push(row);
+                    },
+                },
+            ],
+            inert: p > 0,
+            headers,
+            contains: element => (element as { page?: number } | null)?.page === p,
+            querySelector: selector => ({ page: p, selector, focus: () => strip.focusedOn.push(`page ${p} ${selector}`) }),
+        });
+    }
+    rows.forEach((values, i) =>
+        pages[Math.floor(i / perPage)].tBodies[0].rows.push({ values, getAttribute: name => values[name.replace(/^data-k-/, '')] ?? null }),
+    );
+    const strip = {
+        id,
+        dataset: { sort: initial, pageRows: String(perPage), rows: String(rows.length) },
+        classList: { contains: (name: string) => name === 'pages' },
+        children: pages,
+        clientWidth: 600,
+        scrollLeft: 0,
+        glides: [] as number[],
+        focusedOn: [] as string[],
+        scrollTo(options: { left: number; behavior?: string }) {
+            if (options.behavior === 'smooth') {
+                this.glides.push(options.left);
+            }
+            this.scrollLeft = options.left;
+        },
+        querySelectorAll: () => pages.flatMap(page => page.headers),
+        /** Row labels, page by page, in the order shown. */
+        pages: () => pages.map(page => page.tBodies[0].rows.map(r => r.values.label)),
+        order: () => pages.flatMap(page => page.tBodies[0].rows.map(r => r.values.label)),
+        /** The pages that can be reached. */
+        reachable: () => pages.flatMap((page, i) => (page.inert ? [] : [i])),
+        sortOf: (key: string) => pages[0].headers.find(h => h.key === key)?.attributes['aria-sort'],
+        /** A click on a header's sort button, on page `page`. */
+        button: (key: string, page = 0) => ({ page, dataset: { sortKey: key }, getAttribute: (name: string) => (name === 'data-sort-key' ? key : null), closest: () => strip }),
+    };
+    return strip;
+}
+
+type FakeStrip = ReturnType<typeof fakeStrip>;
+
+/** A list's pager as the page's script sees it. */
+function fakePager(id: string) {
+    const attributes: Record<string, Record<string, string>> = { previous: {}, next: {} };
+    const pager = {
+        dataset: { pages: id },
+        output: { textContent: '' },
+        querySelector: (selector: string) =>
+            selector === 'output'
+                ? pager.output
+                : { setAttribute: (name: string, value: string) => (attributes[/previous/.test(selector) ? 'previous' : 'next'][name] = value) },
+        disabled: (which: 'previous' | 'next') => attributes[which]['aria-disabled'],
+        /** A click on its previous or next button, as rendered: enabled, or not. */
+        button: (which: 'previous' | 'next') => ({
+            dataset: { page: which },
+            getAttribute: (name: string) => (name === 'aria-disabled' ? (attributes[which]['aria-disabled'] ?? null) : null),
+            closest: () => pager,
+        }),
+    };
+    return pager;
+}
+
+/** The page's script over a DOM that holds `strips`, swapped for new ones by each update. */
+function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: ReturnType<typeof fakePager>[] = []) {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
     const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
     assert.ok(script);
     const posted: { type: string; text?: string }[] = [];
     const listeners: Record<string, (e: unknown) => void> = {};
-    let tables = firstTables;
-    let nextTables = firstTables;
+    let strips = firstStrips;
+    let nextStrips = firstStrips;
     const details = { current: { open: false } as { open: boolean } | null };
     const focused: string[] = [];
     const written: string[] = [];
@@ -125,18 +200,21 @@ function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fake
         getElementById: (id: string) =>
             id === 'diagnostics'
                 ? details.current
-                : {
+                : (strips.find(s => s.id === id) ?? {
                       set innerHTML(_html: string) {
                           // The update writes the slots; what it wrote is the new DOM.
                           written.push(id);
                           if (id === 'diagnostics-slot') {
                               details.current = { open: false };
                           }
-                          tables = nextTables;
+                          strips = nextStrips;
                       },
-                  },
-        querySelectorAll: (selector: string) => (selector === 'table[data-sort]' ? tables : []),
-        querySelector: (selector: string) => ({ focus: () => focused.push(selector) }),
+                  }),
+        querySelectorAll: (selector: string) => (selector === '.pages' ? strips : []),
+        querySelector: (selector: string) => {
+            const pager = /^nav\[data-pages="([^"]+)"\]$/.exec(selector);
+            return pager ? (pagers.find(p => p.dataset.pages === pager[1]) ?? null) : { focus: () => focused.push(selector) };
+        },
         addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
     };
     vm.runInNewContext(script, {
@@ -152,8 +230,10 @@ function livePage(fragments: PanelFragments, firstTables: ReturnType<typeof fake
         details,
         document,
         click: (target: unknown) => listeners.click({ target: { closest: () => target } }),
-        update: (next: PanelFragments, newTables: ReturnType<typeof fakeTable>[]) => {
-            nextTables = newTables;
+        /** A strip coming to rest after a swipe or a glide. */
+        rest: (strip: FakeStrip) => listeners.scrollend({ target: strip }),
+        update: (next: PanelFragments, newStrips: FakeStrip[]) => {
+            nextStrips = newStrips;
             listeners['window:message']({ origin: ORIGIN, data: { type: 'data', fragments: next } });
         },
     };
@@ -468,7 +548,7 @@ suite('usage page', () => {
         assert.ok(csv.includes(`"'=cmd|""/c calc""!A1"`), 'a model id was left able to run as a formula');
 
         const copied = page.click('copy');
-        assert.ok(copied.split('\n').some(l => l.split('\t').length === 5 && l.includes(HOSTILE)), 'a session row lost its columns');
+        assert.ok(copied.split('\n').some(l => l.split('\t').length === 6 && l.includes(HOSTILE)), 'a session row lost its columns');
     });
 
     test('Copy guards formulas as the CSV does: pasted, a cell is read the same way', () => {
@@ -515,7 +595,7 @@ suite('usage page', () => {
     });
 
     test("a header's button sorts its table, numbers as numbers, and says which way", () => {
-        const sessions = fakeTable('sessions', 'processed', ['label', 'processed'], [
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], [
             { label: 'b', processed: '9' },
             { label: 'a', processed: '100' },
             { label: 'c', processed: '20' },
@@ -536,13 +616,13 @@ suite('usage page', () => {
             { label: 'b', processed: '9' },
             { label: 'a', processed: '100' },
         ];
-        const before = fakeTable('sessions', 'processed', ['label', 'processed'], rows);
+        const before = fakeStrip('sessions', 'processed', ['label', 'processed'], rows);
         const page = livePage(renderFragments(view()), [before]);
         page.click(before.button('label'));
         page.details.current = { open: true };
         page.document.activeElement = { matches: () => true, closest: () => null, getAttribute: (name: string) => (name === 'data-range' ? '30d' : null) };
 
-        const after = fakeTable('sessions', 'processed', ['label', 'processed'], [...rows, { label: 'c', processed: '50' }]);
+        const after = fakeStrip('sessions', 'processed', ['label', 'processed'], [...rows, { label: 'c', processed: '50' }]);
         const next = renderFragments(view({ report: report({ sessions: [{ ...report().sessions[0], label: 'moved', sessionId: 'next' }] }) }));
         page.update(next, [after]);
         assert.deepStrictEqual([after.order(), after.sortOf('label')], [['a', 'b', 'c'], 'ascending']);
@@ -556,11 +636,11 @@ suite('usage page', () => {
     test("focus on a table's header returns to that table's, not to the first one with the same key", () => {
         // Projects and Sessions both sort by label and processed: the first
         // match in the page was the Projects table's, so Enter sorted the wrong one.
-        const page = livePage(renderFragments(view()), [fakeTable('sessions', 'processed', ['label', 'processed'], [])]);
+        const page = livePage(renderFragments(view()), [fakeStrip('sessions', 'processed', ['label', 'processed'], [])]);
         const sessions = { id: 'sessions' };
         page.document.activeElement = { matches: (s: string) => s === 'button', closest: () => sessions, getAttribute: (name: string) => (name === 'data-sort-key' ? 'processed' : null) };
-        page.update(renderFragments(view({ zone: 'UTC' })), [fakeTable('sessions', 'processed', ['label', 'processed'], [])]);
-        assert.deepStrictEqual(page.focused, ['#sessions button[data-sort-key="processed"]']);
+        page.update(renderFragments(view({ zone: 'UTC' })), [fakeStrip('sessions', 'processed', ['label', 'processed'], [])]);
+        assert.deepStrictEqual(page.focused, ['#sessions > .page:nth-child(1) button[data-sort-key="processed"]']);
         // The diagnostics' own header, which is no button, keeps its focus too.
         page.document.activeElement = { matches: (s: string) => s === '#diagnostics > summary', closest: () => null, getAttribute: () => null };
         page.update(renderFragments(view({ zone: 'Europe/Rome' })), []);
@@ -585,6 +665,164 @@ suite('usage page', () => {
             assert.ok(all.includes(`<button type="button" data-action="${action}"`), action);
         }
         assert.ok(all.includes('aria-pressed="true">7 days'));
+    });
+
+    /** `n` sessions, labelled p0, p1, … */
+    const manySessions = (n: number) => Array.from({ length: n }, (_, i) => ({ ...report().sessions[0], sessionId: `s${i}`, label: `p${i}` }));
+
+    test('a long list pages sideways, ten rows a page, the first in view, with a pager that says which rows those are', () => {
+        const body = renderFragments(view({ report: report({ sessions: manySessions(23) }) })).body;
+        // Three pages of sessions and the one of projects, each with its own header.
+        assert.strictEqual((body.match(/<table class="page"/g) ?? []).length, 4);
+        assert.strictEqual((body.match(/data-sort-key="active"/g) ?? []).length, 3);
+        assert.strictEqual((body.match(/<table class="page" inert>/g) ?? []).length, 2, 'a page out of view can be reached as rendered');
+        assert.strictEqual((body.match(/<tr data-k-started/g) ?? []).length, 23);
+        assert.ok(body.includes('<div class="pages" id="sessions" data-rows="23" data-page-rows="10" data-sort="processed" data-ascending="false">'));
+        assert.ok(body.includes('<nav class="pager" data-pages="sessions" aria-label="Sessions, by page">'));
+        assert.ok(body.includes('<output aria-live="polite">1–10 of 23</output>'));
+        assert.ok(/data-page="previous"[^>]*aria-disabled="true"/.test(body) && !/data-page="next"[^>]*aria-disabled/.test(body));
+        // Ten or fewer: one page, and no pager.
+        const few = renderFragments(view({ report: report({ sessions: manySessions(10) }) })).body;
+        assert.ok(!few.includes('<nav class="pager"'));
+        assert.strictEqual((few.match(/<table class="page"/g) ?? []).length, 2);
+        assert.ok(!few.includes(' inert'));
+    });
+
+    test('Usage limits reached lists the newest first, a page at a time', () => {
+        const windows = Array.from({ length: 12 }, (_, i) => ({ limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, i), date: '2026-10-09' }));
+        const body = renderFragments(view({ report: report({ limitWindows: windows }) })).body;
+        const newest = body.indexOf('refused from 2026-10-09 11:00');
+        const oldest = body.indexOf('refused from 2026-10-09 00:00');
+        assert.ok(newest !== -1 && oldest !== -1 && newest < oldest, 'not the newest first');
+        assert.strictEqual((body.match(/<ul class="page plain-list"/g) ?? []).length, 2);
+        assert.ok(body.includes('<ul class="page plain-list" inert>'));
+        assert.ok(body.includes('<nav class="pager" data-pages="limits" aria-label="Usage limits reached, by page">'));
+        assert.ok(body.includes('<output aria-live="polite">1–10 of 12</output>'));
+    });
+
+    test('the pager turns a list a page at a time, says which rows are in view, and stops at either end', () => {
+        const rows = Array.from({ length: 23 }, (_, i) => ({ label: `r${i}`, processed: String(100 - i) }));
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], rows);
+        const pager = fakePager('sessions');
+        const page = livePage(renderFragments(view()), [sessions], [pager]);
+        const state = () => [pager.output.textContent, pager.disabled('previous'), pager.disabled('next'), sessions.reachable()];
+        assert.deepStrictEqual(state(), ['1–10 of 23', 'true', 'false', [0]]);
+        page.click(pager.button('previous'));
+        assert.deepStrictEqual(sessions.glides, [], 'turned back from the first page');
+
+        page.click(pager.button('next'));
+        assert.deepStrictEqual(sessions.glides, [600]);
+        // The page it glides to can be clicked as it comes; the one it leaves until it rests.
+        assert.deepStrictEqual(sessions.reachable(), [0, 1]);
+        page.rest(sessions);
+        assert.deepStrictEqual(state(), ['11–20 of 23', 'false', 'false', [1]]);
+
+        page.click(pager.button('next'));
+        page.rest(sessions);
+        assert.deepStrictEqual(state(), ['21–23 of 23', 'false', 'true', [2]]);
+        page.click(pager.button('next'));
+        assert.deepStrictEqual(sessions.glides, [600, 1200], 'went past the last page');
+
+        page.click(pager.button('previous'));
+        page.rest(sessions);
+        assert.deepStrictEqual(state(), ['11–20 of 23', 'false', 'false', [1]]);
+    });
+
+    test('a swipe is a turn too: the page the strip rests on is the one in view', () => {
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], Array.from({ length: 30 }, (_, i) => ({ label: `r${i}`, processed: String(i) })));
+        const pager = fakePager('sessions');
+        const page = livePage(renderFragments(view()), [sessions], [pager]);
+        sessions.scrollLeft = 1199.5;
+        page.rest(sessions);
+        assert.deepStrictEqual([pager.output.textContent, sessions.reachable()], ['21–30 of 30', [2]]);
+    });
+
+    test('a sort orders every row on every page, and shows the new order from its first page', () => {
+        const rows = Array.from({ length: 12 }, (_, i) => ({ label: `r${String(i).padStart(2, '0')}`, processed: String(i) }));
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], rows);
+        const pager = fakePager('sessions');
+        const page = livePage(renderFragments(view()), [sessions], [pager]);
+        // Largest first, across both pages, not page by page.
+        assert.deepStrictEqual(sessions.pages(), [['r11', 'r10', 'r09', 'r08', 'r07', 'r06', 'r05', 'r04', 'r03', 'r02'], ['r01', 'r00']]);
+        page.click(pager.button('next'));
+        page.rest(sessions);
+        page.click(sessions.button('label', 1));
+        assert.deepStrictEqual(sessions.pages(), [['r00', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06', 'r07', 'r08', 'r09'], ['r10', 'r11']]);
+        assert.deepStrictEqual([sessions.scrollLeft, sessions.reachable(), pager.output.textContent], [0, [0], '1–10 of 12']);
+        assert.deepStrictEqual([sessions.sortOf('label'), sessions.sortOf('processed')], ['ascending', 'none']);
+    });
+
+    test('an update keeps the page in view, or the last one there is when the list has grown shorter', () => {
+        const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ label: `r${i}`, processed: String(100 - i) }));
+        const before = fakeStrip('sessions', 'processed', ['label', 'processed'], rows(25));
+        const pager = fakePager('sessions');
+        const page = livePage(renderFragments(view()), [before], [pager]);
+        page.click(pager.button('next'));
+        page.rest(before);
+        page.click(pager.button('next'));
+        page.rest(before);
+
+        const longer = fakeStrip('sessions', 'processed', ['label', 'processed'], rows(26));
+        page.update(renderFragments(view({ zone: 'UTC' })), [longer]);
+        assert.deepStrictEqual([longer.scrollLeft, longer.reachable(), pager.output.textContent], [1200, [2], '21–26 of 26']);
+        const shorter = fakeStrip('sessions', 'processed', ['label', 'processed'], rows(15));
+        page.update(renderFragments(view({ zone: 'Europe/Rome' })), [shorter]);
+        assert.deepStrictEqual([shorter.scrollLeft, shorter.reachable(), pager.output.textContent], [600, [1], '11–15 of 15']);
+    });
+
+    test('focus on a header that slides out of view follows to the same header on the page in view', () => {
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], Array.from({ length: 15 }, (_, i) => ({ label: `r${i}`, processed: String(i) })));
+        const page = livePage(renderFragments(view()), [sessions], [fakePager('sessions')]);
+        page.document.activeElement = sessions.button('processed', 0);
+        sessions.scrollLeft = 600;
+        page.rest(sessions);
+        assert.deepStrictEqual([sessions.focusedOn, sessions.reachable()], [['page 1 button[data-sort-key="processed"]'], [1]]);
+    });
+
+    test("focus on a pager's button returns to that pager's after an update", () => {
+        const sessions = fakeStrip('sessions', 'processed', ['label', 'processed'], []);
+        const page = livePage(renderFragments(view()), [sessions]);
+        page.document.activeElement = {
+            matches: (s: string) => s === 'button',
+            closest: (s: string) => (s === 'nav[data-pages]' ? { dataset: { pages: 'sessions' } } : null),
+            getAttribute: (name: string) => (name === 'data-page' ? 'next' : null),
+        };
+        page.update(renderFragments(view({ zone: 'UTC' })), [sessions]);
+        assert.deepStrictEqual(page.focused, ['nav[data-pages="sessions"] button[data-page="next"]']);
+    });
+
+    test("a session's or a project's tokens name their models on hover, each with its share, cut", () => {
+        const models = (shares: number[]) => shares.map((n, i) => ({ model: i === 0 ? HOSTILE : `claude-model-${i}`, variant: i === 0 ? '1m' : null, totals: totals(n) }));
+        const session = { ...report().sessions[0], totals: totals(1_000), models: models([996, 4]) };
+        const project = { ...report().projects[0], totals: totals(1_000), models: models([500, ...Array.from({ length: 9 }, () => 50)]) };
+        const body = renderFragments(view({ report: report({ sessions: [session], projects: [project] }), modelLabel: id => (id === HOSTILE ? HOSTILE : id.toUpperCase()) })).body;
+        // 99.6% is not all of it, and a transcript's model id is escaped.
+        assert.ok(body.includes('title="&lt;img src=x onerror=alert(1)&gt;&quot;&#39;&amp; (1m) 99%, CLAUDE-MODEL-1 0.4%">1,000</span>'), body);
+        // Eight named, the rest counted.
+        assert.ok(body.includes('CLAUDE-MODEL-7 5.0%, and 2 more">1,000</span>'), body);
+        // A row with nothing to name has no title.
+        const bare = renderFragments(view()).body;
+        assert.ok(bare.includes('<td class="num">1,278</td>'));
+    });
+
+    test("a session's active time is shown, sorts as a number, is explained, and is copied", () => {
+        const s = report().sessions[0];
+        const quick = { ...s, sessionId: 'quick', activeMs: 20_000 };
+        const long = { ...s, sessionId: 'long', activeMs: (2 * 60 + 5) * 60_000 + 20_000 };
+        const fragments = renderFragments(view({ report: report({ sessions: [quick, long] }) }));
+        const body = fragments.body;
+        assert.ok(body.includes('<button type="button" data-sort-key="active">Active</button>'));
+        assert.ok(body.includes('data-k-active="20000"') && body.includes('data-k-active="7520000"'));
+        // Under a minute is said so, never 0 min.
+        assert.ok(body.includes('>&lt; 1 min</span>') && !body.includes('>0 min<'));
+        assert.ok(body.includes('>2 h 5 min</span>'));
+        // From first to last stays at hand, on the cell.
+        assert.ok(body.includes('title="Requests from 2026-10-09 10:00 to 2026-10-09 11:30"'));
+        assert.ok(body.includes("Active is a session's time between requests in this range, its subagents' included, leaving out every pause of over 15 minutes"));
+        assert.ok(!/>Span</.test(body) && !body.includes('first request to its last'));
+        assert.strictEqual(fragments.copy.header.at(-1), 'active_minutes');
+        assert.deepStrictEqual(fragments.copy.rows.map(r => r.at(-1)), ['0', '125']);
+        assert.ok(fragments.copy.notes.some(n => n.startsWith('active_minutes is the time between')));
     });
 });
 
