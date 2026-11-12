@@ -178,7 +178,7 @@ history starts, for all projects or for this workspace:
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.6B tokens processed, 95% of them cache reads, in 13,027 requests and 87 sessions, split into cache reads, cache writes, input and output, by day and by model">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.7B tokens processed, 95% of them cache reads, in 12,455 requests and 85 sessions, split into cache reads, cache writes, input and output, by day and by model">
 </picture>
 
 *Processed* is everything a request sent or received: input, cache writes,
