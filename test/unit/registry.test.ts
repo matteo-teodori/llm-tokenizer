@@ -86,9 +86,10 @@ suite('model registry', () => {
     });
 
     test('models that never existed are not in the registry', () => {
-        // Verified absent from xAI's published catalogue. `grok-4.2` in
-        // particular looks like a mis-transcription of `grok-4.20`.
-        const fabricated = ['grok-4.2', 'grok-4.1-fast', 'grok-4-fast'];
+        // Not ids xAI ever used: `grok-4.2` looks like a mis-transcription of
+        // `grok-4.20`, and `grok-4.1-fast` of `grok-4-1-fast`. (`grok-4-fast`,
+        // listed here once too, was a real id: see the retired ids below.)
+        const fabricated = ['grok-4.2', 'grok-4.1-fast'];
         const ids = new Set(MODELS.map(m => m.id));
         for (const id of fabricated) {
             assert.ok(!ids.has(id), `"${id}" does not exist and must not be offered`);
@@ -157,7 +158,7 @@ suite('model registry', () => {
         // model still fails the build, and when tiktoken publishes a gpt-6
         // mapping the entries move to `tiktoken` and this list goes back to
         // empty.
-        const noPublishedEncoding = new Set(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna']);
+        const noPublishedEncoding = new Set(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna']);
 
         for (const model of MODELS.filter(m => m.provider === 'OpenAI')) {
             if (noPublishedEncoding.has(model.id)) {
@@ -219,33 +220,67 @@ suite('model registry', () => {
         }
     });
 
-    test('a retired id migrates to the replacement its provider names', () => {
-        // Each provider's own deprecation page, read 2026-10-25. Following the
+    test('a retired or deprecated id migrates to the replacement its provider names', () => {
+        // Each provider's own deprecation page, read 2026-11-12. Following the
         // provider puts a saved choice on the model its user calls next, where
         // a model of the registry's choosing need not be.
         const replacements: [retired: string, replacement: string][] = [
-            // OpenAI shut these down on 2026-10-23 (api/docs/deprecations).
+            // OpenAI shut these down on 2026-10-23, and deprecated the rest
+            // (api/docs/deprecations).
             ['o4-mini', 'gpt-5.6-terra'],
             ['o3-mini', 'gpt-5.6-sol'],
             ['o1', 'gpt-5.6-sol'],
             ['gpt-4-turbo', 'gpt-5.6-sol'],
             ['gpt-4', 'gpt-5.6-sol'],
             ['gpt-3.5-turbo', 'gpt-5.6-terra'],
+            ['o3-pro', 'gpt-5.6-sol'],
+            ['o3', 'gpt-5.6-sol'],
+            ['gpt-5', 'gpt-5.6-sol'],
+            ['gpt-4o', 'gpt-6-luna'],
+            ['gpt-4o-mini', 'gpt-6-luna'],
+            ['gpt-4.1', 'gpt-6-luna'],
+            ['gpt-5.1', 'gpt-6-sol'],
+            ['gpt-5.3-codex', 'gpt-6-sol'],
             // Anthropic, the newest of each line (the Claude API models reference).
+            ['claude-sonnet-4-5', 'claude-sonnet-5-5'],
             ['claude-3-opus', 'claude-opus-5-5'],
             ['claude-3.7-sonnet', 'claude-sonnet-5-5'],
             ['claude-3.5-sonnet', 'claude-sonnet-5-5'],
             ['claude-3-haiku', 'claude-haiku-5-5'],
-            // Google shut 2.0 Flash down on 2026-06-01 (gemini-api/docs/deprecations).
+            // Google shut 2.0 Flash down on 2026-06-01, and routes 2.5 Pro and
+            // 2.5 Flash from 2026-12-01 (aistudio.google.com/docs/deprecations).
             ['gemini-2.0-flash', 'gemini-3.6-flash'],
-            // MiniMax serves the preview's name with M3.1 Flash. It names no
-            // replacement for M2.1 and M2, which go where it routes its plans'
-            // requests for M2.7 and M2.5, and the lowercase ids follow.
+            ['gemini-2.5-pro', 'gemini-3.8-flash'],
+            ['gemini-2.5-flash', 'gemini-3.5-flash-lite'],
+            // xAI serves the retired fast families with Grok 4.3, and Grok Code
+            // Fast with Grok Build (docs.x.ai, the May 15 retirement).
+            ['grok-4-fast', 'grok-4.3'],
+            ['grok-4-1-fast', 'grok-4.3'],
+            ['grok-3', 'grok-4.3'],
+            ['grok-code-fast-1', 'grok-build-0.1'],
+            // Mistral names Large 4 for both Large 3 and Medium 3.5.
+            ['mistral-large-2512', 'mistral-large-4-0'],
+            ['mistral-medium-3-5', 'mistral-large-4-0'],
+            // MiniMax serves the preview's name with M3.1 Flash, and routes its
+            // plans' requests for M2.7 and M2.5 there. It names no replacement
+            // for M2.1 and M2, which go the same way, and the lowercase ids
+            // follow.
             ['MiniMax-M3.1-Flash-Preview', 'MiniMax-M3.1-Flash'],
+            ['MiniMax-M2.7', 'MiniMax-M3.1-Flash'],
+            ['MiniMax-M2.5', 'MiniMax-M3.1-Flash'],
+            ['minimax-m2.7', 'MiniMax-M3.1-Flash'],
+            ['minimax-m2.5', 'MiniMax-M3.1-Flash'],
             ['MiniMax-M2.1', 'MiniMax-M3.1-Flash'],
             ['MiniMax-M2', 'MiniMax-M3.1-Flash'],
             ['minimax-m2.1', 'MiniMax-M3.1-Flash'],
             ['minimax-m2', 'MiniMax-M3.1-Flash'],
+            // Moonshot named K3 for K2.5, and links the K2 series' migration to
+            // K3.1 Pro.
+            ['kimi-k2.5', 'kimi-k3'],
+            ['kimi-k2.7-code', 'kimi-k3.1-pro'],
+            ['kimi-k2.6', 'kimi-k3.1-pro'],
+            // Tencent switches hy4-preview to hy4 on 2026-12-07.
+            ['hy4-preview', 'hy4'],
         ];
 
         const ids = new Set(MODELS.map(m => m.id));
@@ -272,6 +307,14 @@ suite('model registry', () => {
 
         assert.ok(repoOf('muse-spark-open-816b-a42b'), 'Muse Spark Open downloads no vocabulary');
         assert.notStrictEqual(repoOf('muse-spark-open-816b-a42b'), repoOf('muse-glimmer-30b'));
+
+        // Google's SDK counts Gemini 3.1 with E4B's file, which lost its glitch
+        // tokens' merges on 2026-11-03; 31B and 26B-A4B serve the file before.
+        for (const [model, owner] of [['gemini-3.1-pro-preview', 'gemma-4-e4b-it'], ['gemini-3.1-flash-lite', 'gemma-4-e4b-it'], ['gemma-4-26b-a4b-it', 'gemma-4-31b-it']]) {
+            assert.ok(repoOf(model), `${model} downloads no vocabulary`);
+            assert.strictEqual(repoOf(model), repoOf(owner), `${model} should share ${owner}'s vocabulary`);
+        }
+        assert.notStrictEqual(repoOf('gemma-4-e4b-it'), repoOf('gemma-4-31b-it'));
     });
 
     test('providers() lists each provider once, in registry order', () => {

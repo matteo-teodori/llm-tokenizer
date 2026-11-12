@@ -635,8 +635,8 @@ suite('tokenizer service', () => {
 
     test('every Kimi model shares one downloaded rank table', async () => {
         // The rank file is byte-identical across the family, so the registry
-        // points them all at one repo: downloading once must serve all four.
-        const repos = ['kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'].map(id => {
+        // points them all at one repo: downloading once must serve them all.
+        const repos = ['kimi-k3.1-pro', 'kimi-k3'].map(id => {
             const m = model(id);
             assert.strictEqual(m.encoder.kind, 'tiktokenModel');
             return m.encoder.kind === 'tiktokenModel' ? m.encoder.repo : '';
@@ -644,7 +644,7 @@ suite('tokenizer service', () => {
         assert.strictEqual(new Set(repos).size, 1, `expected one repo, got ${repos.join(', ')}`);
 
         await seedRankTable(storageUri, repos[0]);
-        for (const id of ['kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']) {
+        for (const id of ['kimi-k3.1-pro', 'kimi-k3']) {
             const result = await tokenizer.count('Hello', seeded(id));
             assert.strictEqual(result.exact, true, `${id} should be exact`);
             assert.strictEqual(result.count, 3, id);

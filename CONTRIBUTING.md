@@ -92,7 +92,9 @@ releases.
 
 1. Add the entry to `src/tokenizer/models.ts`.
 2. If you removed or renamed an id, add a `MODEL_ALIASES` entry pointing at the
-   nearest live model. Users should be migrated, never silently reset.
+   nearest live model. Users should be migrated, never silently reset. A model
+   goes once its provider deprecates it, with a date it shuts down, rather than
+   on that date, and its alias points at the replacement the provider names.
 3. Run `npm run sync-manifest` to regenerate `package.json`. CI fails if the two
    disagree.
 4. `contextLimit` is the **usable input** limit, not the advertised window.
