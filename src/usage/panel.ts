@@ -79,7 +79,8 @@ export type PanelMessage =
     | { type: 'openSettings' }
     | { type: 'chooseFolder' }
     | { type: 'clear' }
-    | { type: 'showLog' };
+    | { type: 'showLog' }
+    | { type: 'reloadWindow' };
 
 /** The message, checked field by field, or undefined for anything else. */
 export function parsePanelMessage(raw: unknown): PanelMessage | undefined {
@@ -103,6 +104,7 @@ export function parsePanelMessage(raw: unknown): PanelMessage | undefined {
         case 'chooseFolder':
         case 'clear':
         case 'showLog':
+        case 'reloadWindow':
             return { type: m.type };
         default:
             return undefined;
@@ -260,6 +262,9 @@ export class UsagePanel implements vscode.Disposable {
                 return;
             case 'showLog':
                 this.log.show();
+                return;
+            case 'reloadWindow':
+                await vscode.commands.executeCommand('workbench.action.reloadWindow');
                 return;
         }
     }

@@ -731,7 +731,9 @@ export class UsageService implements vscode.Disposable {
                     return { type: 'unanswered', transient: false };
                 case 'failed':
                     if (response.failure === 'store-read-only') {
-                        this.deps.log.warn('Claude Code usage: the history was created by a newer LLM Tokenizer, so it is read-only here');
+                        this.deps.log.warn(
+                            'Claude Code usage: the history was written by a newer LLM Tokenizer, so it is read-only here; reload this window to run that version, or update LLM Tokenizer',
+                        );
                         this.statusWhileOn('read-only');
                     } else if (response.failure === 'outdated') {
                         if (this.currentStatus !== 'read-only') {

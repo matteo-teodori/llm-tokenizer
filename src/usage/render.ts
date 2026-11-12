@@ -160,7 +160,11 @@ function banner(view: PanelView): string {
         );
     }
     if (view.status === 'read-only') {
-        lines.push('This history was written by a newer LLM Tokenizer: it is shown, but not updated.');
+        // Another window runs the newer version, or ran it: installed, it
+        // only waits for this window to reload.
+        lines.push(
+            'This history was written by a newer version of LLM Tokenizer, so this window shows it without updating it. Reload the window to run that version here, or update LLM Tokenizer if it is not installed. <button type="button" data-action="reloadWindow">Reload Window</button>',
+        );
     }
     if (view.status === 'failing') {
         lines.push('The history could not be read or updated just now; what is shown may be out of date. <button type="button" data-action="showLog">Show Log</button>');

@@ -220,7 +220,12 @@ suite('usage page', () => {
 
         const failing = text(renderFragments(view({ status: 'failing' })));
         assert.ok(failing.includes('could not be read or updated just now') && failing.includes('data-action="showLog"'));
-        assert.ok(text(renderFragments(view({ status: 'read-only' }))).includes('written by a newer LLM Tokenizer'));
+        // What to do, not only what is wrong: the newer version is installed, or only to be.
+        const readOnly = text(renderFragments(view({ status: 'read-only' })));
+        assert.ok(readOnly.includes('written by a newer version of LLM Tokenizer, so this window shows it without updating it'));
+        assert.ok(readOnly.includes('Reload the window to run that version here, or update LLM Tokenizer if it is not installed.'));
+        assert.ok(readOnly.includes('<button type="button" data-action="reloadWindow">Reload Window</button>'));
+        assert.ok(!text(renderFragments(view())).includes('reloadWindow'));
         assert.ok(text(renderFragments(view({ historyDisabled: true }))).includes('CLAUDE_CODE_SKIP_PROMPT_HISTORY'));
 
         const nothing = report({ totals: emptyTotals(), days: [], models: [], kinds: [], efforts: [], projects: [], sessions: [] });
@@ -590,6 +595,7 @@ suite('usage panel messages', () => {
         assert.deepStrictEqual(parsePanelMessage({ type: 'setScope', scope: 'workspace' }), { type: 'setScope', scope: 'workspace' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'clear', extra: 1 }), { type: 'clear' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'turnOn' }), { type: 'turnOn' });
+        assert.deepStrictEqual(parsePanelMessage({ type: 'reloadWindow', command: 'x' }), { type: 'reloadWindow' });
         for (const bad of [
             null,
             'clear',
