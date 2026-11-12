@@ -231,6 +231,7 @@ suite('usage panel', () => {
             label: 'repo',
             firstTs: 9e15,
             lastTs: 9e15,
+            activeMs: 0,
             totals: emptyTotals(),
             models: [],
             compactions: [],

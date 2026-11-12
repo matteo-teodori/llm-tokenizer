@@ -41,6 +41,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
                 label: HOSTILE,
                 firstTs: Date.UTC(2026, 9, 9, 10),
                 lastTs: Date.UTC(2026, 9, 9, 11, 30),
+                activeMs: 47 * 60_000,
                 totals: t,
                 models: [],
                 compactions: [{ uuid: 'c', sessionId: HOSTILE, kind: 'main', timestamp: 0, trigger: HOSTILE, preTokens: 160_000, postTokens: 12_000 }],

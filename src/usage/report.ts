@@ -68,6 +68,8 @@ export interface SessionRow {
     label: string;
     firstTs: number | null;
     lastTs: number | null;
+    /** Its time between requests in the range, pauses over ACTIVE_PAUSE_MS left out: see `activeTime`. */
+    activeMs: number;
     totals: UsageTotals;
     models: ModelRow[];
     compactions: Compaction[];
@@ -135,6 +137,19 @@ const KIND_ORDER: readonly TranscriptKind[] = ['main', 'task', 'workflow', 'othe
 const MAX_OFFSET_MS = 14 * 60 * 60 * 1000;
 
 /**
+ * The longest pause between two of a session's requests that its active time
+ * still counts: one bucket. Measured on 18 real sessions of 400,000 requests,
+ * their time between requests, longer pauses left out, came to 1.02 times
+ * their working time: from each prompt to the last response of its turn,
+ * tools and subagents at work included, and a pause of over 30 minutes inside
+ * a turn left out. With 5 minutes it came to 0.91, with 10 to 0.98, and the
+ * span from each session's first request to its last to 10.4. Any pause of a
+ * bucket or more also makes the active time exact from the buckets alone (see
+ * `activeTime`), where a shorter one would need every request.
+ */
+export const ACTIVE_PAUSE_MS = BUCKET_MS;
+
+/**
  * How far ahead of this clock a request still counts: written on a machine
  * whose clock runs ahead. Records are written as they happen, so one dated
  * later, from a wrong clock, would count in every range until its day came;
@@ -164,8 +179,9 @@ export function rangeStart(range: RangeKey, today: string): string | null {
 
 /**
  * The earliest request time the store must return for `range`: bucket
- * aligned, and early enough for the first local day in any zone. The report
- * then keeps a bucket by its local day, exactly.
+ * aligned, and early enough for the first local day in any zone, and for the
+ * bucket before it, where a pause that ends in the range can start (see
+ * `activeTime`). The report then keeps a bucket by its local day, exactly.
  */
 export function rangeSince(range: RangeKey, zone: string, now: number): number {
     const from = rangeStart(range, localDate(now, zone));
@@ -173,7 +189,7 @@ export function rangeSince(range: RangeKey, zone: string, now: number): number {
         return 0;
     }
     const [y, m, d] = from.split('-').map(Number);
-    const since = Date.UTC(y, m - 1, d) - MAX_OFFSET_MS;
+    const since = Date.UTC(y, m - 1, d) - MAX_OFFSET_MS - ACTIVE_PAUSE_MS;
     return Math.floor(since / BUCKET_MS) * BUCKET_MS;
 }
 
@@ -199,11 +215,18 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     const dayModels = new Map<string, DayModelRow>();
     const projects = new Map<string, { row: ProjectRow; sessionIds: Set<string>; models: Map<string, ModelRow> }>();
     const sessions = new Map<string, { row: SessionRow; models: Map<string, ModelRow> }>();
+    // Each session's first and last request by bucket, the buckets fetched
+    // before the range included, for its active time.
+    const activity = new Map<string, Map<number, BucketActivity>>();
 
     for (const sums of input.sums) {
         const date = localDate(sums.bucket * BUCKET_MS, zone);
         const session = sessionsById.get(sums.sessionId);
-        if (!inRange(date) || !inScope(session)) {
+        if (!inScope(session)) {
+            continue;
+        }
+        noteActivity(activity, sums, inRange(date));
+        if (!inRange(date)) {
             continue;
         }
         const t = totalsOfSums(sums);
@@ -253,6 +276,7 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
                     label: projectLabel(project),
                     firstTs: session?.firstTs ?? null,
                     lastTs: session?.lastTs ?? null,
+                    activeMs: 0,
                     totals: emptyTotals(),
                     models: [],
                     compactions: [],
@@ -278,7 +302,11 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         sessions: sessionIds.size,
         models: byProcessed([...m.values()]),
     }));
-    const sessionRows = [...sessions.values()].map(({ row, models: m }) => ({ ...row, models: byProcessed([...m.values()]) }));
+    const sessionRows = [...sessions.values()].map(({ row, models: m }) => ({
+        ...row,
+        activeMs: activeTime(activity.get(row.sessionId)),
+        models: byProcessed([...m.values()]),
+    }));
     const maxProjects = options.maxProjects ?? DEFAULT_MAX_PROJECTS;
     const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
     const modelRows = byProcessed([...models.values()]);
@@ -350,6 +378,57 @@ export function totalsOfSums(sums: BucketSums): UsageTotals {
             incompleteRequests: sums.requests - sums.completeRequests,
         },
     };
+}
+
+/** A session's requests in one bucket: its first and last, and whether the bucket is in the range. */
+interface BucketActivity {
+    first: number;
+    last: number;
+    inRange: boolean;
+}
+
+function noteActivity(activity: Map<string, Map<number, BucketActivity>>, sums: BucketSums, inRange: boolean): void {
+    let buckets = activity.get(sums.sessionId);
+    if (!buckets) {
+        buckets = new Map();
+        activity.set(sums.sessionId, buckets);
+    }
+    const bucket = buckets.get(sums.bucket);
+    if (!bucket) {
+        buckets.set(sums.bucket, { first: sums.firstTs, last: sums.lastTs, inRange });
+    } else {
+        bucket.first = Math.min(bucket.first, sums.firstTs);
+        bucket.last = Math.max(bucket.last, sums.lastTs);
+    }
+}
+
+/**
+ * A session's active time in the range: the time between its requests, its
+ * subagents' included, with every pause over ACTIVE_PAUSE_MS left out, and
+ * each pause counted in the range of the request that ends it.
+ *
+ * Exact from each bucket's first and last request, because the pause is at
+ * least a bucket long: two requests in one bucket are less than a bucket
+ * apart, so every pause inside one counts, and those add up to its last
+ * request less its first; a pause between two buckets runs from the last
+ * request of one to the first of the next one that has any.
+ */
+function activeTime(buckets: Map<number, BucketActivity> | undefined): number {
+    if (!buckets) {
+        return 0;
+    }
+    let active = 0;
+    let previousLast: number | null = null;
+    for (const [, bucket] of [...buckets].sort(([a], [b]) => a - b)) {
+        if (bucket.inRange) {
+            active += bucket.last - bucket.first;
+            if (previousLast !== null && bucket.first - previousLast <= ACTIVE_PAUSE_MS) {
+                active += bucket.first - previousLast;
+            }
+        }
+        previousLast = bucket.last;
+    }
+    return active;
 }
 
 /** Limit hits in the range, one row per window: a limit type and its reset time. */

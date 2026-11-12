@@ -8,7 +8,7 @@ import { importRoots } from '../../src/usage/importer';
 import { comparablePath, isWithin, projectLabel, sessionRoot } from '../../src/usage/projects';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import { inFolders, queryReport, reportSessions, type ReportQuery } from '../../src/usage/queries';
-import { buildReport, rangeSince, type RangeKey } from '../../src/usage/report';
+import { buildReport, rangeSince, rangeUntil, type RangeKey } from '../../src/usage/report';
 import { createHistory, currentHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
 import type { UsageRequest } from '../../src/usage/types';
@@ -307,6 +307,127 @@ suite('usage report', () => {
             }
         }
         assert.strictEqual(localDate(windows[0], 'Pacific/Kiritimati'), '2026-03-20');
+    });
+
+    test("a session's active time is its time between requests, subagents' included once, with every pause of over 15 minutes left out", () => {
+        const at = (h: number, m: number, s = 0) => Date.UTC(2026, 9, 9, h, m, s);
+        const requests = [
+            // The main conversation: 5 minutes, then a pause of exactly 15, which counts, then one of 15 and a second, which does not.
+            ...[at(10, 0), at(10, 5), at(10, 20), at(10, 35, 1), at(10, 39, 1)].map((timestamp, i) => request({ messageId: `m${i}`, timestamp })),
+            // A subagent at work inside the first five minutes adds nothing to them.
+            ...[at(10, 1), at(10, 4)].map((timestamp, i) => request({ messageId: `t${i}`, kind: 'task', isMain: false, agentId: 'a', timestamp })),
+            // Another session's request never closes this one's pause.
+            request({ messageId: 'o', sessionId: 'other', timestamp: at(10, 28) }),
+        ];
+        const store = freshStore();
+        store.transaction(() => store.upsertRequests(requests));
+        const report = buildReport(
+            { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
+            { range: 'coverage', zone: 'UTC', now: at(12, 0), scope: 'all' },
+        );
+        const active = Object.fromEntries(report.sessions.map(s => [s.sessionId, s.activeMs]));
+        assert.deepStrictEqual(active, { s: (5 + 15 + 4) * 60_000, other: 0 });
+    });
+
+    test("a pause into the range counts in it where the range starts earliest, at +14's midnight", () => {
+        // In Kiritimati, today starts at 10:00 UTC the day before, exactly
+        // where the store's bound for the first local day falls: the bucket
+        // before it, where the pause starts, is fetched too.
+        const midnight = Date.UTC(2026, 9, 9, 10);
+        assert.strictEqual(localDate(midnight, 'Pacific/Kiritimati'), '2026-10-10');
+        const store = freshStore();
+        store.transaction(() =>
+            store.upsertRequests([
+                request({ messageId: 'before', timestamp: midnight - 5 * 60_000 }),
+                request({ messageId: 'after', timestamp: midnight + 5 * 60_000 }),
+            ]),
+        );
+        const now = midnight + 3_600_000;
+        const report = buildReport(
+            {
+                sums: store.bucketSums(rangeSince('today', 'Pacific/Kiritimati', now), rangeUntil(now)),
+                sessions: [],
+                compactions: [],
+                limitHits: [],
+                coverage: store.coverage(),
+            },
+            { range: 'today', zone: 'Pacific/Kiritimati', now, scope: 'all' },
+        );
+        assert.deepStrictEqual(
+            report.sessions.map(s => [s.sessionId, s.activeMs, s.totals.coverage.requests]),
+            [['s', 10 * 60_000, 1]],
+        );
+    });
+
+    test('the active time is exact from 15-minute buckets, in every zone and range, a pause into the range counted in it', () => {
+        // Bursts seconds to minutes apart, pauses of hours, and pauses on
+        // either side of 15 minutes, across several local midnights.
+        const random = seeded(77);
+        const requests: UsageRequest[] = [];
+        for (let s = 0; s < 5; s++) {
+            let t = Date.UTC(2026, 9, 1) + Math.floor(random() * 86_400_000);
+            for (let i = 0; i < 160; i++) {
+                const roll = random();
+                t +=
+                    roll < 0.6
+                        ? Math.floor(random() * 180_000)
+                        : roll < 0.8
+                          ? 14 * 60_000 + Math.floor(random() * 2 * 60_000)
+                          : roll < 0.85
+                            ? 15 * 60_000
+                            : Math.floor(random() * 10 * 3_600_000);
+                // Kinds and models apart, so that one bucket holds several groups of sums.
+                requests.push(
+                    request({
+                        messageId: `m${s}-${i}`,
+                        sessionId: `s${s}`,
+                        kind: (['main', 'task', 'workflow'] as const)[Math.floor(random() * 3)],
+                        model: random() < 0.3 ? 'claude-sonnet-5-5' : 'claude-opus-5-5',
+                        timestamp: t,
+                    }),
+                );
+            }
+        }
+        const store = freshStore();
+        store.transaction(() => store.upsertRequests(requests));
+        const bySession = new Map<string, number[]>();
+        for (const r of requests) {
+            bySession.set(r.sessionId, [...(bySession.get(r.sessionId) ?? []), r.timestamp]);
+        }
+        const last = Math.max(...requests.map(r => r.timestamp));
+        for (const zone of ['UTC', 'Europe/Rome', 'Asia/Kathmandu', 'Pacific/Kiritimati', 'Pacific/Pago_Pago']) {
+            for (const range of ['coverage', 'today', '7d', '30d'] as const) {
+                for (const now of [last, last - 3 * 86_400_000, last - 9 * 86_400_000]) {
+                    const until = rangeUntil(now);
+                    const report = buildReport(
+                        { sums: store.bucketSums(rangeSince(range, zone, now), until), sessions: [], compactions: [], limitHits: [], coverage: store.coverage(until) },
+                        { range, zone, now, scope: 'all' },
+                    );
+                    // Worked out from every request: each pause counted on the day of the request that ends it.
+                    const expected: Record<string, number> = {};
+                    for (const [id, times] of bySession) {
+                        const sorted = times.filter(ts => ts < until).sort((a, b) => a - b);
+                        const inRange = (ts: number) => report.from === null || localDate(ts, zone) >= report.from;
+                        if (!sorted.some(inRange)) {
+                            continue;
+                        }
+                        let active = 0;
+                        for (let i = 1; i < sorted.length; i++) {
+                            const pause = sorted[i] - sorted[i - 1];
+                            if (inRange(sorted[i]) && pause <= 15 * 60_000) {
+                                active += pause;
+                            }
+                        }
+                        expected[id] = active;
+                    }
+                    assert.deepStrictEqual(
+                        Object.fromEntries(report.sessions.map(s => [s.sessionId, s.activeMs])),
+                        expected,
+                        `${zone}, ${range}, now ${new Date(now).toISOString()}`,
+                    );
+                }
+            }
+        }
     });
 
     test('This workspace holds the sessions whose root is in one of its folders, each once', async () => {
