@@ -4,7 +4,7 @@
   <h1>LLM Tokenizer</h1>
 
   <p><b>The ultimate AI token counter for your IDE.</b><br>
-  Token counting for 93 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
+  Token counting for 97 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
 
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
@@ -41,7 +41,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 ## Features
 
 ### 🎯 Core Features
-- **Exact counts, not guesses**: 59 of the 93 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
+- **Exact counts, not guesses**: 60 of the 97 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
 - **Real-time Token Count**: The active file's token count in the Status Bar
 - **Context Limit Warnings**: Indicators at 80% and 100% of the model's *usable input* limit
 - **Project-wide Counting**: Workspace totals with caching, cancellation, and multi-root support
@@ -73,14 +73,15 @@ anywhere.
 
 ## Supported Models
 
-93 models across 13 providers. Every id is checked against the provider's own
-documentation, and models that a provider has retired are removed. A model you
-picked from the status bar is migrated automatically; an old id in the
-`defaultModel` setting keeps working, though VS Code flags it until you update
-it.
+97 models across 13 providers. Every id is checked against the provider's own
+documentation, and a model its provider has retired is removed; one it has
+only deprecated stays until the date it is shut down. A model you picked from
+the status bar is migrated automatically, to the replacement its provider
+names; an old id in the `defaultModel` setting keeps working, though VS Code
+flags it until you update it.
 
 Where a provider serves the model, the id is the string its API accepts, which
-is not always the marketing name — Mistral Large 3 is `mistral-large-2512`,
+is not always the marketing name — Mistral Small 4 is `mistral-small-2603`,
 MiniMax M3 is `MiniMax-M3`, capitals included, and Tencent's Hy3 is `hy3`, never
 `hunyuan-hy3`. Open-weight models with no first-party API (Llama, Muse Spark
 Open, Muse Glimmer, Gemma 4 E4B) use a lowercase form of their Hugging Face
@@ -89,15 +90,14 @@ name, shortened for Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 | Provider   | Models | Accuracy |
 |------------|--------|----------|
 | OpenAI     | GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 (+mini), GPT-5.3 Codex, GPT-5.2, GPT-5.1, GPT-5, GPT-4.1, GPT-4o (+mini), o3, gpt-oss 120b/20b | Exact |
-| OpenAI     | GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, GPT-6 Astra | Estimated³ |
-| Anthropic  | Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1, Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
+| OpenAI     | GPT-6.1 Sol, GPT-6.1 Terra, GPT-6 Sol, GPT-6 Luna, GPT-6 Astra | Estimated³ |
+| Anthropic  | Claude Fable 5.2, Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1, Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Estimated |
 | Google     | Gemini 3.1 Pro, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash, Gemma 4 | Exact¹ |
-| Google     | Gemini 4 Argon, 3.8 Flash, 3.6 Flash, 3.5 Flash-Lite | Estimated² |
+| Google     | Gemini 4 Carbon, 4 Argon, 3.8 Flash, 3.6 Flash, 3.5 Flash-Lite | Estimated² |
 | xAI        | Grok 4.7, 4.6, 4.5, 4.3, 4.20, Grok Build 0.1 | Estimated |
 | DeepSeek   | DeepSeek V4.1 Flash, V4 Pro | Exact¹ |
 | Meta       | Muse Spark Open 816B-A42B, Muse Glimmer 30B, Llama 4 Scout, Llama 4 Maverick, Llama 3.3 70B, Llama 3.1 8B | Exact¹ |
-| Mistral    | Mistral Large 3, Medium 3.5, Small 4 | Exact¹ |
-| Mistral    | Mistral Large 4 (preview) | Estimated⁴ |
+| Mistral    | Mistral Large 4, Large 3, Medium 3.5, Small 4 | Exact¹ |
 | Alibaba    | Qwen3.8 Max/Flash/27B/2.4T-A95B, Qwen3.6 27B, Qwen3.6 35B-A3B | Exact¹ |
 | Alibaba    | Qwen3.7 Max/Plus/Flash, Qwen3.6 Plus | Estimated |
 | Zhipu      | GLM-5.3, GLM-5.3-Flash, GLM-5.3-FlashX, GLM-5.2, GLM-5.1, GLM-5 | Exact¹ |
@@ -106,6 +106,7 @@ name, shortened for Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 | Moonshot   | Kimi K3.1 Pro, K3, K2.7 Code, K2.6 | Exact¹ |
 | Xiaomi     | MiMo V2.6 Pro, V2.6 Flash | Exact¹ |
 | Tencent    | Hy4 preview, Hy3 | Exact¹ |
+| Tencent    | Hy4 | Estimated⁴ |
 
 ¹ After a one-time tokenizer download, from the commit of the vocabulary's
 repository that this version names, and checked against its hash: a later
@@ -119,8 +120,8 @@ own model table stops at `gpt-5` — so they are estimated rather than counted
 with an encoding they may not use. They move to exact as soon as that mapping
 ships.
 
-⁴ A preview whose tokenizer is not published yet: Mistral has announced Large
-4's open weights but not released them.
+⁴ Its tokenizer is not published yet: Tencent has promised Hy4's weights but
+not released them.
 
 ⁵ Zhipu publishes no tokenizer for GLM-5-Turbo and does not say which
 vocabulary it shares with the rest of GLM-5.
@@ -162,7 +163,7 @@ way. While it is off, the page says what turning it on reads and keeps, with
 the T, right-click the editor's title bar and choose
 **Hide 'Show Claude Code Usage'**.
 
-<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects and sessions, and the status item's tooltip shows the running session's context">
+<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects, turns to the second page of its sessions, each with its active time, and the status item's tooltip shows the running session's context">
 
 **The panel** shows today, the last 7 or 30 days, or everything since the
 history starts, for all projects or for this workspace:
@@ -170,12 +171,14 @@ history starts, for all projects or for this workspace:
   with the share of it that was cache reads;
 - a column per day, in your time zone;
 - models, the main conversation against subagents and workflows, and effort;
-- projects and sessions, sortable, and the usage limits you reached;
+- projects and sessions, sortable, each session with its active time, and
+  the usage limits you reached, newest first; a long list shows ten rows a
+  page, and a swipe or the ‹ › beside its heading turns the page;
 - diagnostics: what was read, what was skipped and why, and where from.
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.6B tokens processed, 95% of them cache reads, in 13,027 requests and 87 sessions, split into cache reads, cache writes, input and output, by day and by model">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.7B tokens processed, 95% of them cache reads, in 12,455 requests and 85 sessions, split into cache reads, cache writes, input and output, by day and by model">
 </picture>
 
 *Processed* is everything a request sent or received: input, cache writes,
@@ -186,6 +189,11 @@ large context processes tens of millions. A total marked `≥` is a lower bound:
 some request did not report every counter, or the records are still being
 read. While they are, the first time above all, the panel says so, with how
 many of the files it has gone through, and shows the totals as they grow.
+
+*Active* is a session's time between requests in the range, its subagents'
+included, leaving out every pause of over 15 minutes: Claude and its tools at
+work, and your replies within that, rather than how long the session stayed
+open.
 
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
 the context of the Claude Code session running in this workspace is, as a
@@ -213,7 +221,8 @@ by what a request's price depends on besides its model: its speed (`fast` is
 billed higher), where it ran (`us` is billed higher), and its prompt size (up to
 100,000 tokens, up to 200,000, or more: Claude Haiku 5.5 prices a request over
 100,000 higher). Its notes say how to read each of those. It gives no prices.
-**Copy** copies the sessions, for a spreadsheet.
+**Copy** copies the sessions, with each one's active minutes, for a
+spreadsheet.
 
 **What is kept, and where.** A database in this extension's own storage
 (the `claude-code-usage` folder in VS Code's global storage for LLM
@@ -280,7 +289,7 @@ and both are read.
 |------|----------|--------|--------|
 | **Exact, offline** | `12,340` | OpenAI's own BPE, bundled | Every OpenAI model tiktoken maps (all but GPT-6) |
 | **Exact after one download** | `≈` → `12,340` | The model's published vocabulary (~3–35 MB, cached) | Llama, Muse Spark Open, Muse Glimmer, Gemma/Gemini, DeepSeek, Qwen, Mistral, GLM, MiniMax, MiMo, Hy, Kimi |
-| **Estimated** | `≈12,340` | A per-family characters-per-token ratio | Claude, Grok, GPT-6, closed Qwen, recent Gemini, GLM-5-Turbo, the Mistral Large 4 preview |
+| **Estimated** | `≈12,340` | A per-family characters-per-token ratio | Claude, Grok, GPT-6, closed Qwen, recent Gemini, GLM-5-Turbo, Hy4 |
 
 **Why some models are only estimated.** Anthropic and xAI do not publish a
 tokenizer for any current model, and Anthropic's own guidance is not to
@@ -293,8 +302,8 @@ so those models are marked rather than dressed up.
 Where a close relative publishes a vocabulary, the ratio is measured on it,
 over this repository's own code and docs, and rounded down: o200k_base for
 GPT-6, Gemma's vocabulary for recent Gemini, the open Qwen3.6 vocabulary for
-closed Qwen, and the family's published vocabulary for GLM-5-Turbo and the
-Mistral Large 4 preview. That puts the total for the measured files slightly
+closed Qwen, and the family's published vocabulary for GLM-5-Turbo, and Hy4
+preview's for Hy4. That puts the total for the measured files slightly
 high, but a single file can still read well below its real count, by up to
 a third.
 Claude's two ratios come from Anthropic's own figures for its two tokenizers.

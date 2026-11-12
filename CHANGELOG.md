@@ -4,6 +4,66 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.3.0] - 2026-11-12
+
+### Changed
+- **A session shows its active time, not its span.** The Sessions table's
+  Span ran from a session's first request to its last, so a session left
+  open overnight counted the night: on real sessions, ten times the time
+  spent working. Its **Active** column is the time between the session's
+  requests in the range, its subagents' included, leaving out every pause of
+  over 15 minutes; on the same sessions, in all, it came within 2% of the
+  time from each prompt to the last response of its turn. A session's first
+  and last request show on hover, and **Copy Sessions** adds
+  `active_minutes`.
+- **Long lists page sideways.** Sessions, Projects and Usage limits reached
+  show ten rows at a time, and a swipe, or the ‹ › beside a list's heading,
+  turns a page; the pager says which rows are shown. A sort orders every
+  row, not one page's, and starts the new order on its first page, and an
+  update keeps the page you are on. Copy Sessions and Export CSV still hold
+  every row. Usage limits reached lists the newest first.
+- **A session's or a project's tokens name their models on hover**, each
+  with its share of them.
+- **A history written by a newer version says what to do**: reload the
+  window to run that version, or update LLM Tokenizer if it is not
+  installed, with a **Reload Window** button, where it only said the history
+  was shown but not updated.
+- **The model registry, checked again against each provider's documentation
+  on 2026-11-12.**
+  - Added: Claude Fable 5.2, GPT-6.1 Terra, Gemini 4 Carbon and Tencent's Hy4,
+    which are estimated: Hy4's weights are promised but not out.
+  - Mistral Large 4 is out of preview, with its open weights, and counts
+    exactly with its own tokenizer, checked against Hugging Face's own
+    implementation.
+  - Deprecated by their providers, and kept until they are shut down: GPT-5
+    and o3 (11 December), GPT-4o, GPT-4o mini and GPT-4.1 (14 January),
+    GPT-5.1 and GPT-5.3 Codex (1 April), Claude Sonnet 4.5 (30 November),
+    Gemini 2.5 Pro and 2.5 Flash (routed elsewhere from 1 December), Mistral
+    Large 3 and Medium 3.5 (30 April), MiniMax M2.7 and M2.5 (18 November),
+    Kimi K2.7 Code and K2.6 (by the end of December), and Hy4 preview (7
+    December). Each goes at the first release after its date, a saved choice
+    moving to the replacement its provider names.
+  - Gemma 4's checkpoints no longer share one tokenizer: Google took each
+    small one's glitch tokens out of its own file. Gemma 4 E4B, and Gemini
+    3.1 Pro and Flash-Lite, which Google's SDK counts with E4B's, now count
+    with the new file; 31B and 26B-A4B keep theirs. Only text holding one
+    of those tokens counts differently, and the first count with either
+    downloads it again.
+  - Kimi K3.1 Pro's weights are out, and its tokenizer is K3's byte for
+    byte, as Moonshot said.
+  - A saved `grok-4-fast` or `grok-4.1-fast`, which an earlier version
+    called invented (`grok-4-fast` is a real xAI id), moves to Grok 4.3,
+    which serves both families since xAI retired them in May.
+
+  That makes 97 models across 13 providers, 60 of them counted with the
+  model's own tokenizer.
+
+### Fixed
+- **A Claude model recorded under its dated id is named as that model.**
+  Claude Code records Haiku 4.5 and Opus 4.5 as `claude-haiku-4-5-20251001`
+  and `claude-opus-4-5-20251101`, which the usage panel showed as such, and
+  the status item with no share of their window.
+
 ## [2.2.1] - 2026-10-25
 
 ### Changed

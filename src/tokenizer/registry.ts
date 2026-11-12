@@ -52,10 +52,18 @@ export function findModel(id: string): ModelInfo | undefined {
  * an alias maps a retired id onto a different, live model, so following one
  * would credit a retired model's usage to its replacement. An id the registry
  * does not list stays unresolved, and is shown as recorded.
+ *
+ * A Claude id with its snapshot's date is the same model as the id without
+ * it, which Anthropic documents as that snapshot's alias, and Claude Code
+ * records the dated one for the models before 4.6: `claude-haiku-4-5-20251001`
+ * is Claude Haiku 4.5.
  */
 export function modelById(id: string): ModelInfo | undefined {
-    return BY_ID.get(id);
+    return BY_ID.get(id) ?? BY_ID.get(id.replace(DATED_CLAUDE_ID, '$1'));
 }
+
+/** A Claude id with a snapshot date, as `claude-opus-4-5-20251101`. */
+const DATED_CLAUDE_ID = /^(claude-[a-z0-9-]+?)-\d{8}$/;
 
 /**
  * The model used when nothing has been chosen, or the choice no longer exists.

@@ -67,7 +67,7 @@ suite('counting a file', () => {
         // with no published tokenizer, every rescan read every file again and
         // sent it to the worker to divide its length: measured on 10,000
         // files, 1.6-1.9 s of each warm rescan against 0.5 s.
-        assert.strictEqual(await threeScans('hf.ts', 'gemini-2.5-pro', false, false), 1);
+        assert.strictEqual(await threeScans('hf.ts', 'gemini-3-flash-preview', false, false), 1);
         assert.strictEqual(await threeScans('rank.ts', 'kimi-k3', false, false), 1);
     });
 
@@ -76,7 +76,7 @@ suite('counting a file', () => {
         // event that would clear the guess, and a downloadable one whose
         // vocabulary is there has nothing to wait for either.
         assert.strictEqual(await threeScans('tiktoken.ts', 'gpt-5.6-sol', true, false), 3);
-        assert.strictEqual(await threeScans('loaded.ts', 'gemini-2.5-pro', true, false), 3);
+        assert.strictEqual(await threeScans('loaded.ts', 'gemini-3-flash-preview', true, false), 3);
     });
 
     test('an exact count, and an estimate from a model with no published tokenizer, are kept', async () => {

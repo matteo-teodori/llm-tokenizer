@@ -108,11 +108,11 @@ suite('count cache', () => {
         // when a second model counts it.
         cache.set('gpt-5.6-sol', A, 100, { count: 1, exact: true });
         cache.set('claude-opus-5', A, 100, { count: 2, exact: false });
-        cache.set('gemini-2.5-pro', A, 100, { binary: true });
+        cache.set('gemini-3-flash-preview', A, 100, { binary: true });
 
         assert.deepStrictEqual(cache.get('gpt-5.6-sol', A, 100), { count: 1, exact: true });
         assert.deepStrictEqual(cache.get('claude-opus-5', A, 100), { count: 2, exact: false });
-        assert.deepStrictEqual(cache.get('gemini-2.5-pro', A, 100), { binary: true });
+        assert.deepStrictEqual(cache.get('gemini-3-flash-preview', A, 100), { binary: true });
         assert.strictEqual(cache.get('kimi-k3', A, 100), undefined);
 
         cache.set('claude-opus-5', A, 200, { count: 3, exact: false });
@@ -289,7 +289,7 @@ suite('document counts', () => {
         // until the next edit.
         const { asked, counts } = counter(false);
         const doc = document('text');
-        for (const id of ['gpt-5.6-sol', 'gemini-2.5-pro', 'claude-opus-5']) {
+        for (const id of ['gpt-5.6-sol', 'gemini-3-flash-preview', 'claude-opus-5']) {
             await counts.count(doc, model(id));
             await counts.count(doc, model(id));
         }
@@ -297,7 +297,7 @@ suite('document counts', () => {
             'gpt-5.6-sol', 'gpt-5.6-sol',
             // Downloadable: whether its vocabulary is there would cost a read
             // to find out, so it is asked again too.
-            'gemini-2.5-pro', 'gemini-2.5-pro',
+            'gemini-3-flash-preview', 'gemini-3-flash-preview',
             // No tokenizer is published: the estimate is all there is.
             'claude-opus-5',
         ]);

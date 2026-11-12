@@ -1,9 +1,9 @@
 /**
- * The model registry (October 2026).
+ * The model registry (November 2026).
  *
  * Every id here was checked against a live first-party source. v1.3.0 shipped
- * several models that never existed — `grok-4.2`, `grok-4.1-fast`,
- * `grok-4-fast` are absent from xAI's catalogue, and the whole Anthropic block
+ * ids its providers never used — `grok-4.2` and `grok-4.1-fast` are not xAI's
+ * (its are `grok-4.20` and `grok-4-1-fast-*`), and the whole Anthropic block
  * used a `claude-4.7-opus` id format that Anthropic does not use — so ids are
  * no longer written from memory.
  *
@@ -13,7 +13,8 @@
  * number would be worse than not warning at all.
  *
  * Anything removed needs an entry in MODEL_ALIASES so existing users are
- * migrated rather than silently reset.
+ * migrated rather than silently reset. A model its provider deprecates stays
+ * until the date it shuts down, and goes at the first refresh after it.
  */
 
 import type { PinnedSource } from './encoders';
@@ -55,14 +56,14 @@ const CLAUDE_LEGACY = 3.3;
  */
 const GROK = 3.7;
 
-// GPT6_UNMAPPED and the five after it are measured, each on the published
+// GPT6_UNMAPPED and the four after it are measured, each on the published
 // vocabulary closest to the models it stands in for, with the bundled
 // gpt-tokenizer or @huggingface/tokenizers (each Hugging Face count less its
 // empty-string baseline, as hfEncoder does). The corpus is this repository's
 // own TypeScript, JSON, YAML, .mjs and Markdown at e706b82, test fixtures and
 // the lockfile excluded: 51 files and 433,335 UTF-16 units. Each ratio is
 // rounded down to one decimal, which puts the corpus total 0.1 to 1.5% high.
-// Single files still stray either way: on this corpus 12 to 23 of the 51 come
+// Single files still stray either way: on this corpus 13 to 23 of the 51 come
 // out low, the worst by up to a third.
 
 /**
@@ -101,10 +102,10 @@ const QWEN_CLOSED = 3.8;
 const GLM_UNPUBLISHED = 4.1;
 
 /**
- * Mistral Large 4, until its weights ship: Tekken measures 3.855 with Large
- * 3's file and 3.856 with Medium 3.5's.
+ * Tencent's Hy4, until its weights ship: Hy4 preview's vocabulary, its
+ * published relative, measures 3.9496.
  */
-const MISTRAL_UNPUBLISHED = 3.8;
+const HY4_UNPUBLISHED = 3.9;
 
 /**
  * Only used until Kimi's rank table has been downloaded. A placeholder, like
@@ -118,12 +119,13 @@ const KIMI = 3.6;
 // Meta's Llama repos (meta-llama/), its Muse Spark Open repos and Google's
 // Gemma 3 repos are gated (HTTP 401 without an account), so ungated mirrors are
 // used. Muse Glimmer's repo and Google's Gemma 4 repos are not gated, which is
-// why HF.museGlimmer and HF.gemma4 point at them directly. Every repo below was
-// checked to serve its vocabulary anonymously: tokenizer.json, or
-// tiktoken.model for Kimi.
+// why HF.museGlimmer, HF.gemma4 and HF.gemma4Large point at them directly.
+// Every repo below was checked to serve its vocabulary anonymously:
+// tokenizer.json, or tiktoken.model for Kimi.
 //
 // Each is read at the commit its main branch was at on 2026-10-20
-// (HF.museSparkOpen: on 2026-10-25), and checked by hash (see PinnedSource).
+// (HF.museSparkOpen: on 2026-10-25; HF.gemma4, HF.gemma4Large and
+// HF.mistralLarge4: on 2026-11-12), and checked by hash (see PinnedSource).
 // The hashes quoted in the notes below are of the files as published, which
 // is how files were compared; `keptSha256` is not.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,9 +146,32 @@ const HF = {
         revision: 'bf46152c47f5dd20b896357cb51abc4c03b8ee8c',
         keptSha256: '8ef59ebecae680b6ab1ebc65c3855238032d55dea31d27968a6eacf458144ee9',
     },
+    /**
+     * Gemma 4's checkpoints no longer share one file. On 30 October and 3
+     * November Google took out the merges of each small checkpoint's glitch
+     * tokens, those its training hardly saw, each its own: 210 for 12B, 219
+     * for E4B, 233 for E2B ("Remediate … glitch tokens in tokenizer.json").
+     * The vocabulary and the added tokens are unchanged, so only text that
+     * holds one of those tokens counts otherwise: 'AWSJavaScriptSDK' is one
+     * token in the old file and three in E4B's.
+     *
+     * This is E4B's file (sha256 91d9cf86…), and the one Google's SDK counts
+     * Gemini 3.1 Pro and Flash-Lite with: it maps both to `gemma4`, which it
+     * loads from google/gemma-4-E4B-it at its main branch
+     * (googleapis/python-genai, google/genai/_local_tokenizer_loader.py).
+     */
     gemma4: {
         repo: 'google/gemma-4-E4B-it',
-        revision: 'ee0ef6023621cff504d758262d4e04895a5af4a2',
+        revision: '4ecc2ba63bcac23ba4a767fc87025b1450f84c9c',
+        keptSha256: '44d47cc526abfbd2ab10cde993bd0a76cf4857c99ef99bc886f3a4b607a293ca',
+    },
+    /**
+     * 31B and 26B-A4B, the Gemma 4 models the Gemini API serves, keep the file
+     * all five checkpoints shared before (sha256 cc8d3a0c…), byte for byte.
+     */
+    gemma4Large: {
+        repo: 'google/gemma-4-31B-it',
+        revision: '842da3794eaa0b77d5f08bae87a17459d91ff475',
         keptSha256: '4453a86456cdf02b3c8f79091ffda7ca017619ff5da495b9eda12141d5793962',
     },
     /**
@@ -194,6 +219,18 @@ const HF = {
         repo: 'Qwen/Qwen3.8-27B',
         revision: '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0',
         keptSha256: 'ae50d65939a34a089eaf1e541c15c8a7d866079a5fe9a1d35454e0aa88577753',
+    },
+    /**
+     * Large 4's open weights, published on 2026-10-29 (sha256 23a44435…). Its
+     * split pattern groups digits in threes from the right, by a lookahead:
+     * checked against Hugging Face's Rust tokenizers on 117 files and 30
+     * strings of digits, scripts and whitespace, the bundled library counts
+     * every one alike.
+     */
+    mistralLarge4: {
+        repo: 'mistralai/Mistral-Large-4-1T-A52B',
+        revision: 'af26e7869af601441d5cdf75a1272469ddc3d059',
+        keptSha256: '5f250790d1267bee988378a7645f4753d2717615f8082964222197517083c6fd',
     },
     mistral: {
         repo: 'mistralai/Mistral-Large-3-675B-Instruct-2512',
@@ -279,13 +316,9 @@ const HF = {
      * Moonshot publishes `tiktoken.model` rather than a `tokenizer.json`.
      *
      * One repo serves the whole family: the rank file is byte-identical across
-     * K3, K2.7-Code, K2.6 and K2.5 (verified by hash), so pointing them all at
-     * one repo means a single download covers every Kimi model.
-     *
-     * K3.1 Pro shares it on Moonshot's word rather than by hash: its weights
-     * are not published yet ("released by Nov 4"), and Moonshot calls it "a
-     * post-trained version of Kimi K3". Hash its own file against this one
-     * once they are, and give it a pin of its own if the two differ.
+     * K3, K3.1 Pro (published on 2026-11-02), K2.7-Code, K2.6 and K2.5
+     * (verified by hash), so pointing them all at one repo means a single
+     * download covers every Kimi model.
      */
     kimi: {
         repo: 'moonshotai/Kimi-K3',
@@ -305,8 +338,9 @@ function rankTable(source: PinnedSource, charsPerToken: number): ModelInfo['enco
  * Where that estimate is a bare figure, it is a placeholder rather than a
  * calibration. Each sits below what its family's vocabulary measures on the
  * corpus above (Llama 3.3 4.137, Llama 4, Muse Glimmer and Muse Spark Open
- * 4.155, DeepSeek 3.931, Tekken 3.855, GLM-5 4.128, MiniMax 4.114, MiMo 4.058,
- * Hy 3.950 and 3.993), so a count shown before the download leans high.
+ * 4.155, DeepSeek 3.931, Mistral Large 4 4.049, Tekken 3.855, GLM-5 4.128,
+ * MiniMax 4.114, MiMo 4.058, Hy 3.950 and 3.993), so a count shown before the
+ * download leans high.
  */
 function hf(source: PinnedSource, charsPerToken: number): ModelInfo['encoder'] {
     return { kind: 'hf', ...source, fallback: { kind: 'heuristic', charsPerToken } };
@@ -330,6 +364,7 @@ export const MODELS: ModelInfo[] = [
     // The GPT-6 models are the OpenAI entries that are *not* exact — see
     // GPT6_UNMAPPED.
     { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
+    { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
     { id: 'gpt-6-sol', label: 'GPT-6 Sol', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
     { id: 'gpt-6-luna', label: 'GPT-6 Luna', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
     { id: 'gpt-6-astra', label: 'GPT-6 Astra', provider: 'OpenAI', contextLimit: 922_000, encoder: { kind: 'heuristic', charsPerToken: GPT6_UNMAPPED } },
@@ -348,15 +383,15 @@ export const MODELS: ModelInfo[] = [
     { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.2', label: 'GPT-5.2', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
     { id: 'gpt-5.1', label: 'GPT-5.1', provider: 'OpenAI', contextLimit: 272_000, encoder: { kind: 'tiktoken', encoding: 'o200k_base' } },
-    // Scheduled shutdowns, still live today (api/docs/deprecations, read
-    // 2026-10-25): gpt-5 and o3 on 2026-12-11 (OpenAI's replacement is
-    // gpt-5.6-sol), gpt-4o, gpt-4o-mini and gpt-4.1 on 2027-01-14
-    // (gpt-6-luna), gpt-5.1 and gpt-5.3-codex on 2027-04-01 (gpt-6-sol).
-    // Remove each, with an alias to its replacement, at the first refresh
-    // after its date, and re-point every alias that names it: `o3-pro` names
-    // o3, and OpenAI names gpt-5.6-sol for both. The models OpenAI shut down
-    // on 2026-10-23, o4-mini, GPT-4 Turbo and GPT-3.5 Turbo among them, alias
-    // to the substitutes it names.
+    // Deprecated, and still served until (api/docs/deprecations, read
+    // 2026-11-12): gpt-5 and o3 2026-12-11 (OpenAI's replacement is
+    // gpt-5.6-sol), gpt-4o, gpt-4o-mini and gpt-4.1 2027-01-14 (gpt-6-luna),
+    // gpt-5.1 and gpt-5.3-codex 2027-04-01 (gpt-6-sol). Each stays until then,
+    // and goes, with an alias to its replacement, at the first refresh after
+    // its date, every alias that names it re-pointed: `o3-pro` names o3, and
+    // OpenAI names gpt-5.6-sol for both. The models OpenAI shut down on
+    // 2026-10-23, o4-mini, GPT-4 Turbo and GPT-3.5 Turbo among them, alias to
+    // the substitutes it names.
     //
     // gpt-4.1, gpt-4o, gpt-4o-mini and o3 publish no input cap either, yet keep
     // their whole window. The rule above carries the caps OpenAI publishes for
@@ -388,9 +423,12 @@ export const MODELS: ModelInfo[] = [
     // exact route is their /v1/messages/count_tokens endpoint, which needs an
     // API key.
     // ─────────────────────────────────────────────────────────────────────────
-    // Haiku 5.5 moved to the current tokenizer — Anthropic's model page says the
-    // same text counts ~30% more than on Haiku 4.5 — so it shares CLAUDE_CURRENT
-    // with the 4.7-and-later models rather than Haiku 4.5's ratio.
+    // Fable 5.2 has "the same tokenizer as Opus 4.8" (the Claude API's models
+    // reference, read 2026-11-12). Haiku 5.5 moved to the current tokenizer —
+    // Anthropic's model page says the same text counts ~30% more than on Haiku
+    // 4.5 — so it shares CLAUDE_CURRENT with the 4.7-and-later models rather
+    // than Haiku 4.5's ratio.
+    { id: 'claude-fable-5-2', label: 'Claude Fable 5.2', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
     { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', provider: 'Anthropic', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: CLAUDE_CURRENT } },
@@ -421,11 +459,17 @@ export const MODELS: ModelInfo[] = [
     // account for image or audio input.
     // ─────────────────────────────────────────────────────────────────────────
     // gemini-3.5-flash and gemini-3.7-flash are not shut down, but Google
-    // routes their requests to gemini-3.6-flash and gemini-3.8-flash
-    // (gemini-api/docs/deprecations, read 2026-10-20), so they are aliased to
-    // those below. Gemini 4 Argon's window is input and output together, with
-    // no separate input cap (models/gemini-4-argon), and the SDK maps it to no
-    // vocabulary.
+    // routes their requests to gemini-3.6-flash and gemini-3.8-flash, so they
+    // are aliased to those below. 2.5 Pro and 2.5 Flash, deprecated on
+    // 2026-11-02, are routed to 3.8 Flash and 3.5 Flash-Lite from 2026-12-01
+    // (aistudio.google.com/docs/deprecations, read 2026-11-12): each stays
+    // until then, and goes, aliased there, at the first refresh after. Gemini 4
+    // Carbon's and Argon's windows are input and output together, with no
+    // separate input cap (aistudio.google.com/docs/models), and the SDK maps
+    // neither to a vocabulary. These are the Gemini API's dates: Google Cloud
+    // retires some sooner (3.6 Flash on 2026-11-19, the 2.5 models on
+    // 2026-10-20).
+    { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
     { id: 'gemini-4-argon', label: 'Gemini 4 Argon', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
     { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
     { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash', provider: 'Google', contextLimit: 1_048_576, encoder: { kind: 'heuristic', charsPerToken: GEMINI_UNMAPPED } },
@@ -435,11 +479,10 @@ export const MODELS: ModelInfo[] = [
     { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (preview)', provider: 'Google', contextLimit: 1_048_576, encoder: hf(HF.gemma3, GEMINI_UNMAPPED) },
     { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', provider: 'Google', contextLimit: 1_048_576, encoder: hf(HF.gemma3, GEMINI_UNMAPPED) },
     { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', provider: 'Google', contextLimit: 1_048_576, encoder: hf(HF.gemma3, GEMINI_UNMAPPED) },
-    { id: 'gemma-4-31b-it', label: 'Gemma 4 31B Instruct', provider: 'Google', contextLimit: 262_144, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
-    // Served by the Gemini API alongside 31B since 2026-04-02. All five Gemma 4
-    // checkpoints serve a byte-identical tokenizer.json (sha256 cc8d3a0c…), so
-    // it shares HF.gemma4.
-    { id: 'gemma-4-26b-a4b-it', label: 'Gemma 4 26B A4B Instruct', provider: 'Google', contextLimit: 262_144, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
+    { id: 'gemma-4-31b-it', label: 'Gemma 4 31B Instruct', provider: 'Google', contextLimit: 262_144, encoder: hf(HF.gemma4Large, GEMINI_UNMAPPED) },
+    // Served by the Gemini API alongside 31B since 2026-04-02, with 31B's
+    // tokenizer.json byte for byte (see HF.gemma4Large).
+    { id: 'gemma-4-26b-a4b-it', label: 'Gemma 4 26B A4B Instruct', provider: 'Google', contextLimit: 262_144, encoder: hf(HF.gemma4Large, GEMINI_UNMAPPED) },
     { id: 'gemma-4-e4b-it', label: 'Gemma 4 E4B Instruct', provider: 'Google', contextLimit: 131_072, encoder: hf(HF.gemma4, GEMINI_UNMAPPED) },
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -467,10 +510,10 @@ export const MODELS: ModelInfo[] = [
     // Meta — exact. Llama 3+ uses a tiktoken-style BPE, which is why the old
     // cl100k proxy happened to be accurate here (measured: +0.2%).
     // ─────────────────────────────────────────────────────────────────────────
-    // Meta's hosted models (Muse Spark 1.1 to 1.3, and the Muse Wonder
-    // preview) publish no tokenizer, and Meta's token-counting guide says to
-    // count through its API since "Tokenizers differ per model", so they are
-    // deliberately absent. Muse Spark Open, released on 2026-10-15, is Muse
+    // Meta's hosted models (Muse Spark 1.1 to 1.3, Muse Ember, and the Muse
+    // Wonder preview) publish no tokenizer, and Meta's token-counting guide
+    // says to count through its API since "Tokenizers differ per model", so
+    // they are deliberately absent. Muse Spark Open, released on 2026-10-15, is Muse
     // Spark's open weights with "additional safety post-training": no Meta API
     // serves it, and nothing says the hosted versions share its file, so it
     // does not stand in for them. It and Muse Glimmer count exactly.
@@ -482,22 +525,23 @@ export const MODELS: ModelInfo[] = [
     { id: 'llama-3.1-8b', label: 'Llama 3.1 8B Instruct', provider: 'Meta', contextLimit: 131_072, encoder: hf(HF.llama3, 3.8) },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Mistral — exact, except Large 4 until its weights ship. Tekken is denser
-    // than cl100k on code: the old cl100k proxy undercounted the TypeScript in
-    // the ratio corpus by 7.5%, and one file by 21%.
+    // Mistral — exact. Tekken is denser than cl100k on code: the old cl100k
+    // proxy undercounted the TypeScript in the ratio corpus by 7.5%, and one
+    // file by 21%.
     // ─────────────────────────────────────────────────────────────────────────
     // The ids are the strings Mistral's API actually accepts, which are not the
     // marketing names: Large 3 predates the major-minor convention and kept a
     // date suffix, Medium 3.5 and Large 4 use the hyphenated major-minor form
     // (never a dot), and Small 4 is date-suffixed too. "256k" on the docs means
     // 262,144 — the model cards serve with `--max-model-len 262144` — not
-    // 256,000.
+    // 256,000, and Large 4's "1M" is 1,048,576, its own config's
+    // max_position_embeddings.
     //
-    // Large 4 is a public preview whose open weights are announced but not yet
-    // published (its Hugging Face repo is a placeholder that returns 401), so
-    // it is estimated with Tekken's measured ratio, MISTRAL_UNPUBLISHED, and its
-    // "1M" is taken literally until a config says otherwise. Revisit both when
-    // the weights ship.
+    // Large 4 left preview on 2026-11-05, its open weights out since 10-29,
+    // and counts with its own file. Large 3 and Medium 3.5 were deprecated on
+    // 2026-10-31 and retire on 2027-04-30, Large 4 the replacement Mistral
+    // names for both (docs.mistral.ai/models, read 2026-11-12): they stay until
+    // then.
     //
     // Large 3 has its own file; Medium 3.5 and Small 4 share another. The two
     // vocabularies differ only in reserved slots 36 and 37, so ordinary text
@@ -505,7 +549,7 @@ export const MODELS: ModelInfo[] = [
     // `[MODEL_SETTINGS]` is 1 token under Medium 3.5's own file and 6 under
     // Large 3's. Large 3's tokenizer also prepends a BOS token, which
     // `hfEncoder` already measures and subtracts.
-    { id: 'mistral-large-4-0', label: 'Mistral Large 4 (preview)', provider: 'Mistral', contextLimit: 1_000_000, encoder: { kind: 'heuristic', charsPerToken: MISTRAL_UNPUBLISHED } },
+    { id: 'mistral-large-4-0', label: 'Mistral Large 4', provider: 'Mistral', contextLimit: 1_048_576, encoder: hf(HF.mistralLarge4, 3.0) },
     { id: 'mistral-large-2512', label: 'Mistral Large 3', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistral, 3.0) },
     { id: 'mistral-medium-3-5', label: 'Mistral Medium 3.5', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistralMedium35, 3.0) },
     { id: 'mistral-small-2603', label: 'Mistral Small 4', provider: 'Mistral', contextLimit: 262_144, encoder: hf(HF.mistralMedium35, 3.0) },
@@ -574,9 +618,9 @@ export const MODELS: ModelInfo[] = [
     // M2.1 and M2 are retired. M2.7 and M2.5 closed to new users on
     // 2026-10-19, when MiniMax began routing its plans' requests for them to
     // M3.1 Flash, and retire on 2026-11-18 (platform.minimax.io/docs/faq/
-    // models, whose table of retired models lists them already). Remove both
-    // after that, with aliases to MiniMax-M3.1-Flash, re-point `minimax-m2.7`
-    // and `minimax-m2.5`, and drop HF.minimaxLegacy.
+    // models, read 2026-11-12). Remove both after that, with aliases to
+    // MiniMax-M3.1-Flash, re-point `minimax-m2.7` and `minimax-m2.5`, and drop
+    // HF.minimaxLegacy.
     { id: 'MiniMax-M3.1-Flash', label: 'MiniMax M3.1 Flash', provider: 'MiniMax', contextLimit: 1_000_000, encoder: hf(HF.minimax, 3.6) },
     { id: 'MiniMax-M3', label: 'MiniMax M3', provider: 'MiniMax', contextLimit: 1_000_000, encoder: hf(HF.minimax, 3.6) },
     { id: 'MiniMax-M2.7', label: 'MiniMax M2.7', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
@@ -586,16 +630,18 @@ export const MODELS: ModelInfo[] = [
     // Moonshot Kimi — exact. Moonshot publishes a tiktoken rank table rather
     // than a tokenizer.json, which is why these were estimated until 2.1.
     // ─────────────────────────────────────────────────────────────────────────
-    // Moonshot closes the K2 series to new users on 2026-10-31 and plans to
+    // Moonshot closed the K2 series to new users on 2026-10-31 and plans to
     // retire it by the end of December 2026 (platform.kimi.ai/docs/pricing/
-    // chat). K3.1 Pro shares K3's rank table: see HF.kimi.
+    // chat): it stays until then, and goes at the first refresh after, aliased
+    // to K3.1 Pro, which Moonshot's notice links the migration to (its FAQ
+    // also tells how to switch to K3, which counts the same).
     { id: 'kimi-k3.1-pro', label: 'Kimi K3.1 Pro', provider: 'Moonshot', contextLimit: 1_048_576, encoder: rankTable(HF.kimi, KIMI) },
     { id: 'kimi-k3', label: 'Kimi K3', provider: 'Moonshot', contextLimit: 1_048_576, encoder: rankTable(HF.kimi, KIMI) },
     { id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', provider: 'Moonshot', contextLimit: 262_144, encoder: rankTable(HF.kimi, KIMI) },
     { id: 'kimi-k2.6', label: 'Kimi K2.6', provider: 'Moonshot', contextLimit: 262_144, encoder: rankTable(HF.kimi, KIMI) },
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Xiaomi MiMo / Tencent Hunyuan — exact.
+    // Xiaomi MiMo / Tencent Hy — exact, except Hy4 until its weights ship.
     // ─────────────────────────────────────────────────────────────────────────
     // Xiaomi routed mimo-v2.5-pro to mimo-v2.6-pro, and mimo-v2.5 to
     // mimo-v2.6-flash, from 2026-10-14, and retired both names on 2026-10-21
@@ -606,10 +652,19 @@ export const MODELS: ModelInfo[] = [
 
     // `hunyuan-hy3` was never a Tencent id — it appears on none of their model
     // tables, on either the international or the China site. The real ids are
-    // `hy4-preview` and `hy3`, and Tencent publishes a "Maximum Input (Tokens)"
-    // column separately from the context window: 960k and 192k, where k is 1024
-    // (the China docs write hy4-preview's window as "1024k", and 960k + 64k of
-    // output closes exactly to it).
+    // `hy4`, `hy4-preview` and `hy3`, and Tencent publishes a "Maximum Input
+    // (Tokens)" column separately from the context window: 960k and 192k, where
+    // k is 1024 (the China docs write Hy4's window as "1024k", and 960k + 64k
+    // of output closes exactly to it).
+    //
+    // Hy4 left preview on 2026-11-04 with image understanding added, and its
+    // weights are promised "in the coming days", so it is estimated with its
+    // preview's measured ratio, HY4_UNPUBLISHED, rather than counted with the
+    // preview's file: hash its tokenizer.json against the preview's (sha256
+    // ff67615d…) once it ships. hy4-preview, which Tencent takes offline on
+    // 2026-12-07 and switches to hy4 (cloud.tencent.com/announce/detail/2559),
+    // stays until then, and goes, aliased to it, at the first refresh after.
+    { id: 'hy4', label: 'Hy4', provider: 'Tencent', contextLimit: 983_040, encoder: { kind: 'heuristic', charsPerToken: HY4_UNPUBLISHED } },
     { id: 'hy4-preview', label: 'Hy4 preview', provider: 'Tencent', contextLimit: 983_040, encoder: hf(HF.hunyuan4, 3.6) },
     { id: 'hy3', label: 'Hy3', provider: 'Tencent', contextLimit: 196_608, encoder: hf(HF.hunyuan, 3.6) },
 ];
@@ -617,7 +672,7 @@ export const MODELS: ModelInfo[] = [
 /**
  * Ids the registry does not list, mapped to the nearest model it does: old ids
  * from v1.x and from later refreshes, and providers' own aliases of listed
- * models (`mistral-large-latest`, `mistral-large-4`).
+ * models (`mistral-small-latest`, `mistral-large-4`, `gpt-5.6`).
  *
  * Most of the old ids no longer exist: some were renamed (the whole Anthropic
  * block, the MiniMax case), some were retired by their provider, and some
@@ -642,7 +697,7 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     'claude-4.5-haiku': 'claude-haiku-4-5',
     // Retired Claude models, each to the model Anthropic suggests in its place,
     // the newest of its line (the Claude API's models reference, read
-    // 2026-10-25).
+    // 2026-11-12).
     'claude-3.7-sonnet': 'claude-sonnet-5-5',
     'claude-3.5-sonnet': 'claude-sonnet-5-5',
     'claude-3-opus': 'claude-opus-5-5',
@@ -658,6 +713,8 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     'o3-mini': 'gpt-5.6-sol',
     'o4-mini': 'gpt-5.6-terra',
     'o3-pro': 'o3',
+    // OpenAI's own: "The `gpt-5.6` alias routes requests to GPT-5.6 Sol."
+    'gpt-5.6': 'gpt-5.6-sol',
 
     // Google: v1.3.0 dropped the `-preview` suffix, so the ids 404'd.
     'gemini-3.1-pro': 'gemini-3.1-pro-preview',
@@ -673,11 +730,15 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     'gemini-2.0-flash': 'gemini-3.6-flash',
     'gemini-1.5-pro': 'gemini-2.5-pro',
 
-    // xAI: grok-4.2 / 4.1-fast / 4-fast are absent from xAI's catalogue and
-    // appear to have been transcription errors for grok-4.20.
+    // xAI: grok-4.2 is no xAI id, and was taken for grok-4.20. grok-4-fast
+    // and grok-4-1-fast are, and grok-4.1-fast is v1.3.0's spelling of the
+    // latter: xAI retired both families on 2026-05-15 and serves their
+    // requests with grok-4.3, as it does grok-3's, and grok-code-fast-1's with
+    // grok-build-0.1 (docs.x.ai/developers/migration/may-15-retirement).
     'grok-4.2': 'grok-4.20',
-    'grok-4.1-fast': 'grok-4.20',
-    'grok-4-fast': 'grok-4.20',
+    'grok-4-fast': 'grok-4.3',
+    'grok-4-1-fast': 'grok-4.3',
+    'grok-4.1-fast': 'grok-4.3',
     'grok-3': 'grok-4.3',
     'grok-code-fast-1': 'grok-build-0.1',
 
@@ -733,9 +794,9 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     'mimo-v2.5': 'mimo-v2.6-flash',
     'mimo-v2.5-pro': 'mimo-v2.6-pro',
 
-    // Zhipu / Moonshot.
+    // Zhipu / Moonshot. Moonshot named K3 when it retired K2.5 in August.
     'glm-4.7': 'glm-5',
     'glm-4.6': 'glm-5',
     'glm-4.5': 'glm-5',
-    'kimi-k2.5': 'kimi-k2.6',
+    'kimi-k2.5': 'kimi-k3',
 });

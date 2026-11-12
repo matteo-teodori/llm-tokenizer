@@ -558,6 +558,58 @@ async function checkDemo(usage, profile) {
     if (!text.includes(`read ${demo.files} of ${demo.files} files in 1 root`)) {
         throw new Error('the extension did not read the demo home alone');
     }
+    await checkPages(usage);
+}
+
+/** What the sessions' strip shows: its pages, the one it rests on, the ones that can be reached, and what its pager says. */
+function pagesShown(usage) {
+    return usage.evaluate(() => {
+        const strip = document.getElementById('sessions');
+        const pages = [...(strip?.children ?? [])].filter(e => e.classList.contains('page'));
+        return {
+            rows: pages.map(p => p.querySelectorAll('tbody tr').length),
+            at: strip ? strip.scrollLeft / strip.clientWidth : -1,
+            reachable: pages.flatMap((p, i) => (p.inert ? [] : [i])),
+            said: document.querySelector('nav[data-pages="sessions"] output')?.textContent ?? null,
+            requests: pages.map(p => [...p.querySelectorAll('tbody tr')].map(r => Number(r.getAttribute('data-k-requests')))),
+        };
+    });
+}
+
+/** The sessions' pager turns its pages in the editor's own webview, and a sort starts its new order on the first page. */
+async function checkPages(usage) {
+    const n = demo.sessions;
+    const pages = Math.ceil(n / 10);
+    const said = page => `${page * 10 + 1}–${Math.min(n, page * 10 + 10)} of ${n}`;
+    const restsOn = async page => {
+        await usage.waitForFunction(text => document.querySelector('nav[data-pages="sessions"] output')?.textContent === text, said(page), { timeout: 10_000 });
+        const shown = await pagesShown(usage);
+        if (Math.abs(shown.at - page) > 0.01 || JSON.stringify(shown.reachable) !== JSON.stringify([page])) {
+            throw new Error(`the sessions did not come to rest on page ${page + 1}: ${JSON.stringify({ at: shown.at, reachable: shown.reachable })}`);
+        }
+        return shown;
+    };
+    const first = await restsOn(0);
+    if (first.rows.length !== pages || first.rows.reduce((a, b) => a + b, 0) !== n || first.rows.slice(0, -1).some(r => r !== 10)) {
+        throw new Error(`the sessions are not in pages of ten: ${JSON.stringify(first.rows)}`);
+    }
+    await usage.click('nav[data-pages="sessions"] button[data-page="next"]');
+    await restsOn(1);
+    // A sort from the second page's header orders every row, and shows the first page.
+    await usage.click('#sessions > .page:nth-child(2) button[data-sort-key="requests"]');
+    const sorted = await restsOn(0);
+    const all = sorted.requests.flat();
+    if (all.some((r, i) => i > 0 && r > all[i - 1])) {
+        throw new Error('a sort did not order the sessions across their pages');
+    }
+    // Back to the order the page opens with: processed, largest first, and
+    // to the panel's top, which the clicks scrolled away from.
+    await usage.click('#sessions > .page:nth-child(1) button[data-sort-key="processed"]');
+    await restsOn(0);
+    await usage.evaluate(() => {
+        document.activeElement?.blur();
+        window.scrollTo(0, 0);
+    });
 }
 
 async function statusTooltip(page) {
@@ -674,6 +726,12 @@ async function gif() {
         await uncut(usage, 20);
         await frame(1.2, [usage]);
         await scrollTo(usage, 'projects');
+        await frame(2.6, [usage]);
+        // The sessions, a page on: the pager says which ten are shown.
+        await scrollTo(usage, 'sessions');
+        await usage.click('nav[data-pages="sessions"] button[data-page="next"]');
+        await usage.waitForFunction(() => document.querySelector('nav[data-pages="sessions"] output')?.textContent?.startsWith('11–20 of'), undefined, { timeout: 10_000 });
+        await rest(page);
         await frame(2.6, [usage]);
         await scrollTo(usage, 'what was processed');
         const item = await statusTooltip(page);

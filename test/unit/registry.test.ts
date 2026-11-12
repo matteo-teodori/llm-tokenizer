@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import * as path from 'path';
 
 import { accuracyOf, isDownloadable } from '../../src/tokenizer/encoders';
-import { MODELS, MODEL_ALIASES, findModel, defaultModel, providers } from '../../src/tokenizer/registry';
+import { MODELS, MODEL_ALIASES, findModel, defaultModel, modelById, providers } from '../../src/tokenizer/registry';
 
 /** The repository root, from .test-out/test/unit. */
 const ROOT = path.join(__dirname, '..', '..', '..');
@@ -86,9 +86,10 @@ suite('model registry', () => {
     });
 
     test('models that never existed are not in the registry', () => {
-        // Verified absent from xAI's published catalogue. `grok-4.2` in
-        // particular looks like a mis-transcription of `grok-4.20`.
-        const fabricated = ['grok-4.2', 'grok-4.1-fast', 'grok-4-fast'];
+        // Not ids xAI ever used: `grok-4.2` looks like a mis-transcription of
+        // `grok-4.20`, and `grok-4.1-fast` of `grok-4-1-fast`. (`grok-4-fast`,
+        // listed here once too, was a real id: see the retired ids below.)
+        const fabricated = ['grok-4.2', 'grok-4.1-fast'];
         const ids = new Set(MODELS.map(m => m.id));
         for (const id of fabricated) {
             assert.ok(!ids.has(id), `"${id}" does not exist and must not be offered`);
@@ -105,6 +106,21 @@ suite('model registry', () => {
                 `${model.id} is not a valid Anthropic model id`,
             );
         }
+    });
+
+    test("a dated Claude id labels as its undated model, without following any alias", () => {
+        // Claude Code records the dated snapshot id for the models before 4.6,
+        // and Anthropic documents the undated id as that snapshot's alias.
+        assert.strictEqual(modelById('claude-haiku-4-5-20251001')?.label, 'Claude Haiku 4.5');
+        assert.strictEqual(modelById('claude-opus-4-5-20251101')?.label, 'Claude Opus 4.5');
+        assert.strictEqual(modelById('claude-sonnet-4-5-20250929')?.label, 'Claude Sonnet 4.5');
+        assert.strictEqual(modelById('claude-opus-5-5')?.label, 'Claude Opus 5.5');
+        // A retired model is not credited to its replacement, dated or not.
+        assert.strictEqual(modelById('claude-3-5-sonnet-20241022'), undefined);
+        assert.strictEqual(modelById('claude-3.5-sonnet'), undefined);
+        // Only a Claude id, and only a whole eight-digit date.
+        assert.strictEqual(modelById('gpt-5.6-sol-20260101'), undefined);
+        assert.strictEqual(modelById('claude-haiku-4-5-2025100'), undefined);
     });
 
     test('findModel resolves live ids, aliases, and nothing else', () => {
@@ -157,7 +173,7 @@ suite('model registry', () => {
         // model still fails the build, and when tiktoken publishes a gpt-6
         // mapping the entries move to `tiktoken` and this list goes back to
         // empty.
-        const noPublishedEncoding = new Set(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna']);
+        const noPublishedEncoding = new Set(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna']);
 
         for (const model of MODELS.filter(m => m.provider === 'OpenAI')) {
             if (noPublishedEncoding.has(model.id)) {
@@ -220,9 +236,10 @@ suite('model registry', () => {
     });
 
     test('a retired id migrates to the replacement its provider names', () => {
-        // Each provider's own deprecation page, read 2026-10-25. Following the
+        // Each provider's own deprecation page, read 2026-11-12. Following the
         // provider puts a saved choice on the model its user calls next, where
-        // a model of the registry's choosing need not be.
+        // a model of the registry's choosing need not be. A deprecated model,
+        // still served, stays listed until it is shut down.
         const replacements: [retired: string, replacement: string][] = [
             // OpenAI shut these down on 2026-10-23 (api/docs/deprecations).
             ['o4-mini', 'gpt-5.6-terra'],
@@ -236,8 +253,14 @@ suite('model registry', () => {
             ['claude-3.7-sonnet', 'claude-sonnet-5-5'],
             ['claude-3.5-sonnet', 'claude-sonnet-5-5'],
             ['claude-3-haiku', 'claude-haiku-5-5'],
-            // Google shut 2.0 Flash down on 2026-06-01 (gemini-api/docs/deprecations).
+            // Google shut 2.0 Flash down on 2026-06-01 (aistudio.google.com/docs/deprecations).
             ['gemini-2.0-flash', 'gemini-3.6-flash'],
+            // xAI serves the retired fast families with Grok 4.3, and Grok Code
+            // Fast with Grok Build (docs.x.ai, the May 15 retirement).
+            ['grok-4-fast', 'grok-4.3'],
+            ['grok-4-1-fast', 'grok-4.3'],
+            ['grok-3', 'grok-4.3'],
+            ['grok-code-fast-1', 'grok-build-0.1'],
             // MiniMax serves the preview's name with M3.1 Flash. It names no
             // replacement for M2.1 and M2, which go where it routes its plans'
             // requests for M2.7 and M2.5, and the lowercase ids follow.
@@ -246,6 +269,8 @@ suite('model registry', () => {
             ['MiniMax-M2', 'MiniMax-M3.1-Flash'],
             ['minimax-m2.1', 'MiniMax-M3.1-Flash'],
             ['minimax-m2', 'MiniMax-M3.1-Flash'],
+            // Moonshot named K3 when it retired K2.5.
+            ['kimi-k2.5', 'kimi-k3'],
         ];
 
         const ids = new Set(MODELS.map(m => m.id));
@@ -272,6 +297,14 @@ suite('model registry', () => {
 
         assert.ok(repoOf('muse-spark-open-816b-a42b'), 'Muse Spark Open downloads no vocabulary');
         assert.notStrictEqual(repoOf('muse-spark-open-816b-a42b'), repoOf('muse-glimmer-30b'));
+
+        // Google's SDK counts Gemini 3.1 with E4B's file, which lost its glitch
+        // tokens' merges on 2026-11-03; 31B and 26B-A4B serve the file before.
+        for (const [model, owner] of [['gemini-3.1-pro-preview', 'gemma-4-e4b-it'], ['gemini-3.1-flash-lite', 'gemma-4-e4b-it'], ['gemma-4-26b-a4b-it', 'gemma-4-31b-it']]) {
+            assert.ok(repoOf(model), `${model} downloads no vocabulary`);
+            assert.strictEqual(repoOf(model), repoOf(owner), `${model} should share ${owner}'s vocabulary`);
+        }
+        assert.notStrictEqual(repoOf('gemma-4-e4b-it'), repoOf('gemma-4-31b-it'));
     });
 
     test('providers() lists each provider once, in registry order', () => {

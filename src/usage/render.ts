@@ -20,7 +20,7 @@ import { PAGE_TEXT_HELPERS, embed, escapeHtml } from '../html';
 import { formatNumber } from '../utils';
 import type { UsageTotals } from './aggregate';
 import { totalPrefix } from './provenance';
-import type { RangeKey, UsageReport } from './report';
+import { ACTIVE_PAUSE_MS, type ModelRow, type RangeKey, type UsageReport } from './report';
 import type { Reading, UsageStatus } from './usageService';
 
 /** What the panel shows besides the report: status, scope, and diagnostics. */
@@ -160,7 +160,11 @@ function banner(view: PanelView): string {
         );
     }
     if (view.status === 'read-only') {
-        lines.push('This history was written by a newer LLM Tokenizer: it is shown, but not updated.');
+        // Another window runs the newer version, or ran it: installed, it
+        // only waits for this window to reload.
+        lines.push(
+            'This history was written by a newer version of LLM Tokenizer, so this window shows it without updating it. Reload the window to run that version here, or update LLM Tokenizer if it is not installed. <button type="button" data-action="reloadWindow">Reload Window</button>',
+        );
     }
     if (view.status === 'failing') {
         lines.push('The history could not be read or updated just now; what is shown may be out of date. <button type="button" data-action="showLog">Show Log</button>');
@@ -368,73 +372,138 @@ function share0(part: UsageTotals, whole: UsageTotals): number {
     return whole.processed > 0 ? part.processed / whole.processed : 0;
 }
 
+/**
+ * Rows a page of a list holds. A longer list pages sideways: its pages side
+ * by side in a strip that scrolls a page at a time, by a swipe or by its
+ * pager's buttons, so that 200 sessions take the room of ten.
+ */
+export const PAGE_ROWS = 10;
+
+/** `items` dealt out `PAGE_ROWS` at a time; one empty page for none. */
+function pagesOf<T>(items: T[]): T[][] {
+    const pages: T[][] = [];
+    for (let i = 0; i < items.length; i += PAGE_ROWS) {
+        pages.push(items.slice(i, i + PAGE_ROWS));
+    }
+    return pages.length > 0 ? pages : [[]];
+}
+
+/**
+ * A section's heading, with its pager when its list runs to more than one
+ * page. The page's script keeps the pager's line and buttons with the page in
+ * view; as rendered, the first is.
+ */
+function sectionHead(title: string, id: string, rows: number): string {
+    const pager =
+        rows > PAGE_ROWS
+            ? `<nav class="pager" data-pages="${id}" aria-label="${escapeHtml(title)}, by page">` +
+              '<button type="button" data-page="previous" aria-label="Previous page" title="Previous page" aria-disabled="true">‹</button>' +
+              `<output aria-live="polite">1–${PAGE_ROWS} of ${rows.toLocaleString('en-US')}</output>` +
+              '<button type="button" data-page="next" aria-label="Next page" title="Next page">›</button></nav>'
+            : '';
+    return `<div class="section-head"><h2>${escapeHtml(title)}</h2>${pager}</div>`;
+}
+
+/**
+ * The strip a list's pages sit in. Every one of them is in the document, so
+ * a sort orders every row, not one page's; only the page in view can be
+ * reached, the others are inert until the strip comes to rest on one.
+ */
+function strip(id: string, title: string, rows: number, pages: string[], attributes = ''): string {
+    return `<div class="pages" id="${id}" role="region" aria-label="${escapeHtml(title)}" data-rows="${rows}" data-page-rows="${PAGE_ROWS}"${attributes}>${pages.join('')}</div>`;
+}
+
 function limitWindows(report: UsageReport, view: PanelView): string {
     if (report.limitWindows.length === 0) {
         return '';
     }
+    // Newest first: the page in view on opening is the latest limits.
+    const windows = [...report.limitWindows].reverse();
+    const pages = pagesOf(windows).map(
+        (page, i) =>
+            `<ul class="page plain-list"${i > 0 ? ' inert' : ''}>${page
+                .map(
+                    w =>
+                        `<li><span>${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
+                            w.hits === 1 ? 'request' : 'requests'
+                        } refused from ${escapeHtml(view.formatTime(w.firstTs))}</span><span class="reason">${
+                            w.resetsAt !== null ? `reset ${escapeHtml(view.formatTime(w.resetsAt * 1000))}` : ''
+                        }</span></li>`,
+                )
+                .join('')}</ul>`,
+    );
     return `
     <section class="panel">
-        <h2>Usage limits reached</h2>
-        <ul class="plain-list">${report.limitWindows
-            .map(
-                w =>
-                    `<li><span>${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
-                        w.hits === 1 ? 'request' : 'requests'
-                    } refused from ${escapeHtml(view.formatTime(w.firstTs))}</span><span class="reason">${
-                        w.resetsAt !== null ? `reset ${escapeHtml(view.formatTime(w.resetsAt * 1000))}` : ''
-                    }</span></li>`,
-            )
-            .join('')}</ul>
+        ${sectionHead('Usage limits reached', 'limits', windows.length)}
+        ${strip('limits', 'Usage limits reached', windows.length, pages)}
         ${report.omitted.limitWindows > 0 ? `<p class="truncation">…and ${report.omitted.limitWindows.toLocaleString('en-US')} earlier ones, not listed.</p>` : ''}
-        <p class="note">For the whole account, whichever project hit them.</p>
+        <p class="note">For the whole account, whichever project hit them, newest first.</p>
     </section>`;
 }
 
-/** A sortable table: each row carries its sort keys, so the page can keep the sort across updates. */
+interface Column {
+    key: string;
+    label: string;
+    numeric?: boolean;
+    /** Its share of the width, alike on every page, so that a column does not move as the pages go by. */
+    width?: string;
+}
+
+/**
+ * A sortable table, a page of it per `PAGE_ROWS` rows. Each row carries its
+ * sort keys, so the page can keep the sort across updates, and each page its
+ * own header, which sorts them all.
+ */
 function table(
     id: string,
-    columns: { key: string; label: string; numeric?: boolean }[],
+    title: string,
+    columns: Column[],
     rows: { keys: Record<string, string | number>; cells: string[] }[],
     initial: string,
 ): string {
-    return `
-    <table id="${id}" data-sort="${initial}" data-ascending="false">
+    const head = `<colgroup>${columns.map(c => (c.width ? `<col style="width: ${c.width}">` : '<col>')).join('')}</colgroup>
         <thead><tr>${columns
             .map(
                 c =>
                     `<th${c.numeric ? ' class="num"' : ''} aria-sort="${c.key === initial ? 'descending' : 'none'}"><button type="button" data-sort-key="${c.key}">${escapeHtml(c.label)}</button></th>`,
             )
-            .join('')}</tr></thead>
-        <tbody>${rows
+            .join('')}</tr></thead>`;
+    const pages = pagesOf(rows).map(
+        (page, i) => `<table class="page"${i > 0 ? ' inert' : ''}>${head}
+        <tbody>${page
             .map(
                 r =>
                     `<tr ${Object.entries(r.keys)
                         .map(([k, v]) => `data-k-${k}="${escapeHtml(String(v))}"`)
-                        .join(' ')}>${r.cells.map((cell, i) => `<td${columns[i]?.numeric ? ' class="num"' : ''}>${cell}</td>`).join('')}</tr>`,
+                        .join(' ')}>${r.cells
+                        .map((cell, c) => `<td${columns[c]?.numeric ? ' class="num"' : columns[c]?.key === 'label' ? ' class="label"' : ''}>${cell}</td>`)
+                        .join('')}</tr>`,
             )
-            .join('')}</tbody>
-    </table>`;
+            .join('')}</tbody></table>`,
+    );
+    return `${sectionHead(title, id, rows.length)}
+        ${strip(id, title, rows.length, pages, ` data-sort="${initial}" data-ascending="false"`)}`;
 }
 
 function projects(report: UsageReport, view: PanelView): string {
     const total = report.totals.processed;
     return `
     <section class="panel">
-        <h2>Projects</h2>
         ${table(
             'projects',
+            'Projects',
             [
                 { key: 'label', label: 'Project' },
-                { key: 'sessions', label: 'Sessions', numeric: true },
-                { key: 'processed', label: 'Processed', numeric: true },
-                { key: 'share', label: 'Share', numeric: true },
+                { key: 'sessions', label: 'Sessions', numeric: true, width: '16%' },
+                { key: 'processed', label: 'Processed', numeric: true, width: '22%' },
+                { key: 'share', label: 'Share', numeric: true, width: '14%' },
             ],
             report.projects.map(p => ({
                 keys: { label: p.label, sessions: p.sessions, processed: p.totals.processed, share: p.totals.processed },
                 cells: [
                     `<span title="${escapeHtml(p.project.kind === 'root' ? p.project.path : p.project.projectDir)}">${escapeHtml(p.label)}</span>`,
                     p.sessions.toLocaleString('en-US'),
-                    `${mark(view, p.totals.provenance)}${p.totals.processed.toLocaleString('en-US')}`,
+                    processedCell(view, p.totals, p.models),
                     total > 0 ? cut(p.totals.processed / total, 1) : '—',
                 ],
             })),
@@ -447,37 +516,38 @@ function projects(report: UsageReport, view: PanelView): string {
 function sessions(report: UsageReport, view: PanelView): string {
     return `
     <section class="panel">
-        <h2>Sessions</h2>
         ${table(
             'sessions',
+            'Sessions',
             [
-                { key: 'started', label: 'Started' },
+                { key: 'started', label: 'Started', width: '22%' },
                 { key: 'label', label: 'Project' },
-                { key: 'span', label: 'Span', numeric: true },
-                { key: 'requests', label: 'Requests', numeric: true },
-                { key: 'processed', label: 'Processed', numeric: true },
-                { key: 'compactions', label: 'Compactions', numeric: true },
+                { key: 'active', label: 'Active', numeric: true, width: '13%' },
+                { key: 'requests', label: 'Requests', numeric: true, width: '12%' },
+                { key: 'processed', label: 'Processed', numeric: true, width: '17%' },
+                { key: 'compactions', label: 'Compactions', numeric: true, width: '14%' },
             ],
             report.sessions.map(s => {
-                const span = s.firstTs !== null && s.lastTs !== null ? s.lastTs - s.firstTs : 0;
                 const compactions = s.compactions
                     .map(c => `${c.preTokens?.toLocaleString('en-US') ?? '?'} → ${c.postTokens?.toLocaleString('en-US') ?? '?'}`)
                     .join(', ');
+                const between =
+                    s.firstTs !== null && s.lastTs !== null ? `Requests from ${view.formatTime(s.firstTs)} to ${view.formatTime(s.lastTs)}` : '';
                 return {
                     keys: {
                         started: s.firstTs ?? 0,
                         label: s.label,
-                        span,
+                        active: s.activeMs,
                         requests: s.totals.coverage.requests,
                         processed: s.totals.processed,
                         compactions: s.compactions.length,
                     },
                     cells: [
                         `<span title="${escapeHtml(`Session ${s.sessionId}`)}">${escapeHtml(s.firstTs !== null ? view.formatTime(s.firstTs) : '—')}</span>`,
-                        escapeHtml(s.label),
-                        escapeHtml(formatSpan(span)),
+                        `<span title="${escapeHtml(s.label)}">${escapeHtml(s.label)}</span>`,
+                        between ? `<span title="${escapeHtml(between)}">${formatActive(s.activeMs)}</span>` : formatActive(s.activeMs),
                         s.totals.coverage.requests.toLocaleString('en-US'),
-                        `${mark(view, s.totals.provenance)}${s.totals.processed.toLocaleString('en-US')}`,
+                        processedCell(view, s.totals, s.models),
                         s.compactions.length > 0 ? `<span title="${escapeHtml(compactions)}">${s.compactions.length}</span>` : '0',
                     ],
                 };
@@ -485,11 +555,38 @@ function sessions(report: UsageReport, view: PanelView): string {
             'processed',
         )}
         ${capNote(report.omitted.sessions, 'sessions')}
-        <p class="note">Span is from a session's first request to its last, not time spent working.</p>
+        <p class="note">Active is a session's time between requests in this range, its subagents' included, leaving out every pause of over ${
+            ACTIVE_PAUSE_MS / 60_000
+        } minutes: Claude and its tools at work, and your replies within that.</p>
     </section>`;
 }
 
-function formatSpan(ms: number): string {
+/** The most models a row's Processed cell names on hover; the rest are counted. */
+const MAX_MODELS_NAMED = 8;
+
+/**
+ * A row's tokens processed, with the models they went through, and each
+ * one's share, on hover: what a session or a project was made of, without a
+ * column for it.
+ */
+function processedCell(view: PanelView, totals: UsageTotals, models: ModelRow[]): string {
+    const figure = `${mark(view, totals.provenance)}${totals.processed.toLocaleString('en-US')}`;
+    if (models.length === 0 || totals.processed <= 0) {
+        return figure;
+    }
+    const named = models
+        .slice(0, MAX_MODELS_NAMED)
+        .map(m => `${modelName(view, m.model, m.variant)} ${cutPercent(m.totals.processed / totals.processed)}`);
+    const rest = models.length - named.length;
+    const title = `${named.join(', ')}${rest > 0 ? `, and ${rest.toLocaleString('en-US')} more` : ''}`;
+    return `<span title="${escapeHtml(title)}">${figure}</span>`;
+}
+
+/** An active time as its cell shows it, in HTML: minutes, and hours past 60; under a minute is said so, not rounded to none. */
+export function formatActive(ms: number): string {
+    if (ms < 60_000) {
+        return '&lt; 1 min';
+    }
     const minutes = Math.round(ms / 60_000);
     return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
@@ -658,12 +755,14 @@ function copyRows(view: PanelView): PanelFragments['copy'] {
         s.sessionId,
         String(s.totals.coverage.requests),
         String(s.totals.processed),
+        String(Math.round(s.activeMs / 60_000)),
     ]);
     const notes = exportNotes(view);
+    notes.push(`active_minutes is the time between a session's requests in the range, pauses of over ${ACTIVE_PAUSE_MS / 60_000} minutes left out`);
     if (report && report.omitted.sessions > 0) {
         notes.push(`${report.omitted.sessions} smaller sessions are counted in the totals but not listed`);
     }
-    return { header: ['started', 'project', 'session', 'requests', 'processed'], rows, notes };
+    return { header: ['started', 'project', 'session', 'requests', 'processed', 'active_minutes'], rows, notes };
 }
 
 /** The `# key: value` lines every export opens with. */
@@ -766,6 +865,28 @@ thead th.num, td.num { text-align: right; }
 thead th button { font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; background: none; border: 0; padding: 0; }
 tbody td { padding: 3px 8px; font-variant-numeric: tabular-nums; }
 tbody tr:hover { background: var(--vscode-list-hoverBackground); }
+/* Columns are as wide on every page. In a narrow panel a project's name is
+   cut, its title whole; every other cell wraps, so no figure is lost. */
+table.page td, table.page th button { overflow-wrap: anywhere; }
+table.page th button { max-width: 100%; }
+table.page td.label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 0 12px; }
+.section-head h2 { margin: 0; }
+.pager { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-muted); font-size: 0.9em; font-variant-numeric: tabular-nums; }
+.pager button { padding: 0 9px; }
+/* Pages snap: a swipe comes to rest on a page's edge, the next one, or past
+   it if long or fast, and the pager follows wherever it rests. */
+.pages {
+    display: flex;
+    align-items: flex-start;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+.pages::-webkit-scrollbar { display: none; }
+.pages > .page { flex: 0 0 100%; min-width: 0; scroll-snap-align: start; scroll-snap-stop: always; }
+table.page { table-layout: fixed; }
 .truncation { color: var(--ink-muted); font-size: 0.9em; font-style: italic; margin: 10px 0 0; }
 .plain-list { list-style: none; padding: 0; margin: 8px 0 0; }
 .plain-list li { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; }
@@ -788,16 +909,24 @@ tbody tr:hover { background: var(--vscode-list-hoverBackground); }
     const vscode = acquireVsCodeApi();
     let exports = ${embed({ csv: first.csv, copy: first.copy })};
     const sorts = {};
+    // The page each list's strip is at, by its id: kept across updates, as sorts are.
+    const at = {};
 ${PAGE_TEXT_HELPERS}
     const controls = document.getElementById('controls');
     const body = document.getElementById('body');
     const slot = document.getElementById('diagnostics-slot');
 
-    // A table keeps the sort chosen for it across updates.
-    function applySort(table) {
-        const state = sorts[table.id] || { key: table.dataset.sort, ascending: false };
-        const tbody = table.tBodies[0];
-        const rows = Array.from(tbody.rows);
+    function pagesIn(strip) {
+        return Array.prototype.filter.call(strip.children, el => el.classList.contains('page'));
+    }
+
+    // A table keeps the sort chosen for it across updates: every row, on
+    // every page, is ordered, then dealt out a page's worth at a time.
+    function applySort(strip) {
+        const state = sorts[strip.id] || { key: strip.dataset.sort, ascending: false };
+        const bodies = pagesIn(strip).map(page => page.tBodies[0]);
+        const rows = [];
+        bodies.forEach(tbody => Array.prototype.push.apply(rows, Array.from(tbody.rows)));
         const value = row => {
             const raw = row.getAttribute('data-k-' + state.key) || '';
             const n = Number(raw);
@@ -808,10 +937,98 @@ ${PAGE_TEXT_HELPERS}
             const d = typeof x === 'number' && typeof y === 'number' ? x - y : String(x) < String(y) ? -1 : String(x) > String(y) ? 1 : 0;
             return state.ascending ? d : -d;
         });
-        rows.forEach(row => tbody.appendChild(row));
-        table.querySelectorAll('th').forEach(th => {
+        const per = Number(strip.dataset.pageRows) || rows.length || 1;
+        rows.forEach((row, i) => bodies[Math.min(bodies.length - 1, Math.floor(i / per))].appendChild(row));
+        strip.querySelectorAll('th').forEach(th => {
             const key = th.querySelector('button') && th.querySelector('button').dataset.sortKey;
             th.setAttribute('aria-sort', key !== state.key ? 'none' : state.ascending ? 'ascending' : 'descending');
+        });
+    }
+
+    // The page a strip has come to rest on: the only one that can be reached,
+    // and the one its pager tells of.
+    function settle(strip) {
+        const pages = pagesIn(strip);
+        const width = strip.clientWidth;
+        const index = width > 0 ? Math.max(0, Math.min(pages.length - 1, Math.round(strip.scrollLeft / width))) : at[strip.id] || 0;
+        at[strip.id] = index;
+        // Back onto that page's edge: a glide cut short by focus, or outlived
+        // by a resize of the panel, can stop between two pages, and scroll
+        // snapping does not move it again.
+        if (width > 0 && Math.abs(strip.scrollLeft - index * width) >= 1) {
+            strip.scrollLeft = index * width;
+        }
+        pages.forEach((page, i) => {
+            const away = i !== index;
+            // Focus on a page about to go inert follows to the same button on the page in view.
+            const focused = document.activeElement;
+            if (away && focused && page.contains(focused)) {
+                const key = focused.getAttribute && focused.getAttribute('data-sort-key');
+                const again = key && pages[index].querySelector('button[data-sort-key="' + key + '"]');
+                pages[index].inert = false;
+                if (again) { again.focus({ preventScroll: true }); }
+            }
+            page.inert = away;
+        });
+        const pager = document.querySelector('nav[data-pages="' + strip.id + '"]');
+        if (pager) {
+            const per = Number(strip.dataset.pageRows);
+            const rows = Number(strip.dataset.rows);
+            const count = n => n.toLocaleString('en-US');
+            const line = count(index * per + 1) + '–' + count(Math.min(rows, (index + 1) * per)) + ' of ' + count(rows);
+            // Written only when it changes: it is a live region, which a
+            // screen reader would read out again on every update.
+            const output = pager.querySelector('output');
+            if (output.textContent !== line) { output.textContent = line; }
+            pager.querySelector('[data-page="previous"]').setAttribute('aria-disabled', String(index === 0));
+            pager.querySelector('[data-page="next"]').setAttribute('aria-disabled', String(index >= pages.length - 1));
+        }
+    }
+
+    // Turn a strip to a page: gliding there from a pager's button, unless
+    // motion is to be reduced, in VS Code (a class on the body) or in the
+    // system; at once after an update or a sort.
+    function turn(strip, index, glide) {
+        const pages = pagesIn(strip);
+        const to = Math.max(0, Math.min(pages.length - 1, index));
+        at[strip.id] = to;
+        const left = to * strip.clientWidth;
+        const reduced =
+            !!(document.body && document.body.classList && document.body.classList.contains('vscode-reduce-motion')) ||
+            !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+        if (glide && !reduced && Math.abs(strip.scrollLeft - left) >= 1) {
+            // Only the page it glides to can be reached from the start: Tab
+            // after the pager's button goes into it, never back into the page
+            // it leaves, where focus would stop the glide halfway.
+            pages.forEach((page, i) => { page.inert = i !== to; });
+            strip.scrollTo({ left, behavior: 'smooth' });
+        } else {
+            strip.scrollLeft = left;
+            settle(strip);
+        }
+    }
+
+    // A strip at rest, after a swipe or a glide. scrollend does not bubble:
+    // it is caught on its way down.
+    document.addEventListener('scrollend', e => {
+        const strip = e.target;
+        if (strip && strip.classList && strip.classList.contains('pages')) { settle(strip); }
+    }, true);
+
+    // Focus that lands on a page turns its strip there, if it is not there
+    // already: one that cuts a glide short can leave no scrollend behind.
+    document.addEventListener('focusin', e => {
+        const page = e.target && e.target.closest && e.target.closest('.pages > .page');
+        if (!page) { return; }
+        const strip = page.parentElement;
+        const index = pagesIn(strip).indexOf(page);
+        if (index !== at[strip.id] || Math.abs(strip.scrollLeft - index * strip.clientWidth) >= 1) { turn(strip, index, false); }
+    });
+
+    function arrange() {
+        document.querySelectorAll('.pages').forEach(strip => {
+            if (strip.dataset.sort) { applySort(strip); }
+            turn(strip, at[strip.id] || 0, false);
         });
     }
 
@@ -829,13 +1046,27 @@ ${PAGE_TEXT_HELPERS}
         // Focus is restored to the same control, found again by what it does,
         // and in which table: two share their sort keys.
         const focused = document.activeElement;
-        let selector = null;
+        let selector = () => null;
         if (focused && focused.matches('button')) {
-            const attribute = ['data-action', 'data-range', 'data-scope', 'data-sort-key'].find(a => focused.getAttribute(a));
-            const table = attribute === 'data-sort-key' && focused.closest('table[id]');
-            selector = attribute ? (table ? '#' + table.id + ' ' : '') + 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' : null;
+            const attribute = ['data-action', 'data-range', 'data-scope', 'data-sort-key', 'data-page'].find(a => focused.getAttribute(a));
+            // A header's button is found again on its list's page in view, once
+            // the update is arranged, and a pager's in its pager: two lists
+            // share their sort keys, and every page has a header.
+            const strip = attribute === 'data-sort-key' && focused.closest('.pages[id]');
+            const pager = attribute === 'data-page' && focused.closest('nav[data-pages]');
+            const button = attribute ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' : null;
+            selector = () =>
+                !button ? null
+                : strip ? '#' + strip.id + ' > .page:nth-child(' + ((at[strip.id] || 0) + 1) + ') ' + button
+                : pager ? 'nav[data-pages="' + pager.dataset.pages + '"] ' + button
+                : button;
+        } else if (focused && focused.matches('.pages[id]')) {
+            // Usage limits reached holds nothing focusable, so its strip is
+            // itself a stop on Tab, and the arrow keys turn its pages.
+            const id = focused.id;
+            selector = () => '#' + id;
         } else if (focused && focused.matches('#diagnostics > summary')) {
-            selector = '#diagnostics > summary';
+            selector = () => '#diagnostics > summary';
         }
         // A region whose page has not changed is left as it is, focus and all.
         if (fragments.controls !== shown.controls) { controls.innerHTML = fragments.controls; }
@@ -849,9 +1080,10 @@ ${PAGE_TEXT_HELPERS}
         }
         shown = { controls: fragments.controls, body: fragments.body, diagnostics: fragments.diagnostics };
         exports = { csv: fragments.csv, copy: fragments.copy };
-        document.querySelectorAll('table[data-sort]').forEach(applySort);
-        if (selector) {
-            const again = document.querySelector(selector);
+        arrange();
+        const restore = selector();
+        if (restore) {
+            const again = document.querySelector(restore);
             if (again && again !== document.activeElement) { again.focus(); }
         }
     }
@@ -863,12 +1095,21 @@ ${PAGE_TEXT_HELPERS}
             vscode.postMessage({ type: 'setRange', range: button.dataset.range });
         } else if (button.dataset.scope) {
             vscode.postMessage({ type: 'setScope', scope: button.dataset.scope });
+        } else if (button.dataset.page) {
+            // Past either end, turn() stays at that end.
+            const pager = button.closest('nav[data-pages]');
+            const strip = pager && document.getElementById(pager.dataset.pages);
+            if (strip) {
+                turn(strip, (at[strip.id] || 0) + (button.dataset.page === 'next' ? 1 : -1), true);
+            }
         } else if (button.dataset.sortKey) {
-            const table = button.closest('table');
-            const current = sorts[table.id] || { key: table.dataset.sort, ascending: false };
+            const strip = button.closest('.pages');
+            const current = sorts[strip.id] || { key: strip.dataset.sort, ascending: false };
             const key = button.dataset.sortKey;
-            sorts[table.id] = { key, ascending: key === current.key ? !current.ascending : key === 'label' };
-            applySort(table);
+            sorts[strip.id] = { key, ascending: key === current.key ? !current.ascending : key === 'label' };
+            applySort(strip);
+            // A new order is shown from its first page.
+            turn(strip, 0, false);
         } else if (button.dataset.action === 'copy') {
             vscode.postMessage({ type: 'copy', text: lines(exports.copy, '\\t', pasteCell) });
         } else if (button.dataset.action === 'export') {
@@ -885,7 +1126,7 @@ ${PAGE_TEXT_HELPERS}
         if (e.data && e.data.type === 'data') { show(e.data.fragments); }
     });
 
-    document.querySelectorAll('table[data-sort]').forEach(applySort);
+    arrange();
     vscode.postMessage({ type: 'ready', zone: Intl.DateTimeFormat().resolvedOptions().timeZone });
 })();
 </script>

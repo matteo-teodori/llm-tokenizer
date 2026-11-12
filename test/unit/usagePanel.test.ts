@@ -231,6 +231,7 @@ suite('usage panel', () => {
             label: 'repo',
             firstTs: 9e15,
             lastTs: 9e15,
+            activeMs: 0,
             totals: emptyTotals(),
             models: [],
             compactions: [],
@@ -293,10 +294,13 @@ suite('usage panel', () => {
             page.send({ type: 'clear' });
             page.send({ type: 'showLog' });
             page.send({ type: 'openFile', path: '/etc/passwd' });
+            // Run by the recorder above: nothing reloads.
+            page.send({ type: 'reloadWindow' });
             await settle();
             assert.deepStrictEqual(ran, [
                 ['workbench.action.openSettings', { query: 'llm-tokenizer.enableClaudeCodeUsage' }],
                 ['llm-tokenizer.clearClaudeCodeUsageHistory'],
+                ['workbench.action.reloadWindow'],
             ]);
             assert.strictEqual(logShown, 1);
         } finally {
