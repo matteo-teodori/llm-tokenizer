@@ -416,7 +416,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             } finally {
                 pass = undefined;
             }
-            rememberNames(store, request.accountFiles ?? []);
+            settleAccounts(store, request.accountFiles ?? []);
             reply(
                 summary
                     ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false, ...takeRecovered() }
@@ -462,18 +462,23 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
 let remembered: string | undefined;
 
 /**
- * Keep the names Claude Code's configuration gives its accounts now, so
- * that an account keeps its name in the history once signed out of. After
- * each pass, whichever window held the lease: the configuration is read
- * again only once it has changed, and kept again only once it says
- * something else, or the history was cleared. Never in a history a newer
- * version writes. A failure here is only a name not kept yet: the pass's
- * answer goes out all the same.
+ * After each pass, whichever window held the lease: number the accounts the
+ * history's sessions were signed in to that have no number yet (see
+ * `numberAccounts`), and keep the names Claude Code's configuration gives
+ * its accounts now, so that an account keeps its name in the history once
+ * signed out of. The configuration is read again only once it has changed,
+ * and kept again only once it says something else, or the history was
+ * cleared; nothing is written when there is nothing new. Never in a history
+ * a newer version writes. A failure here is only a number or a name not
+ * kept yet: the pass's answer goes out all the same.
  */
-function rememberNames(store: UsageStore, files: string[]): void {
+function settleAccounts(store: UsageStore, files: string[]): void {
     try {
         if (store.readOnly || store.outdated(PARSER_VERSION)) {
             return;
+        }
+        if (store.hasUnnumberedAccounts('claude-code')) {
+            store.transaction(() => store.numberAccounts('claude-code'));
         }
         const { names } = readClaudeAccounts(files);
         const said = JSON.stringify([store.file, store.storeId(), store.generation(), names]);
@@ -483,7 +488,7 @@ function rememberNames(store: UsageStore, files: string[]): void {
         store.transaction(() => store.rememberAccounts('claude-code', names, Date.now()));
         remembered = said;
     } catch {
-        // Busy, say: kept after the next pass.
+        // Busy, say: settled after the next pass.
     }
 }
 

@@ -18,8 +18,7 @@ import { accountKey } from './accounts';
 import type { ConfiguredAccounts } from './claudeAccounts';
 import { comparablePath, isWithin, projectOf, sessionRoot } from './projects';
 import { buildReport, rangeSince, rangeUntil, type RangeKey, type ReportSession, type UsageReport } from './report';
-import type { AccountName, UsageStore } from './store';
-import type { SessionSighting } from './types';
+import type { AccountName, StoredSession, UsageStore } from './store';
 
 export interface ReportQuery {
     range: RangeKey;
@@ -48,6 +47,7 @@ export function queryReport(store: UsageStore, query: ReportQuery): UsageReport 
         limitHits: store.limitHits(since, until),
         coverage: store.coverage(until),
         accountNames: store.accountNames(),
+        accountNumbers: store.accountNumbers(),
     }));
     const configured = query.configured ?? { names: [], current: [] };
     return buildReport(
@@ -81,7 +81,7 @@ function mergeNames(now: AccountName[], kept: AccountName[]): AccountName[] {
 
 /** Each stored session with its project, its grouping key and whether it is in the workspace. */
 export function reportSessions(
-    sessions: SessionSighting[],
+    sessions: StoredSession[],
     query: Pick<ReportQuery, 'workspaceFolders' | 'platform' | 'realpath'>,
 ): ReportSession[] {
     const realpath = query.realpath ?? realOrSelf;

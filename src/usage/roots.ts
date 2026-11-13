@@ -221,10 +221,11 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
  * Claude Code's configuration file for each root, as Claude Code 2.1.322
  * finds its own: `<root>/.config.json`, an older name, while it is a file
  * with something in it; else `.claude.json` in the folder CLAUDE_CONFIG_DIR
- * names, or in the home folder when it names none. A root is the folder
- * CLAUDE_CONFIG_DIR names or `~/.claude`, which it names too at times, so
- * for `~/.claude` both places are read. Only the ones that are files, each
- * under its real path, which the worker reads.
+ * names, or in the home folder when it names none. `~/.claude` can be
+ * either, named by CLAUDE_CONFIG_DIR or not, so of its two, the one modified
+ * last is read: Claude Code writes its own at every start, and the other is
+ * one it has left. Only files, each under its real path, which the worker
+ * reads.
  */
 function accountFiles(roots: RootCandidate[], home: string): string[] {
     const homeRoot = realPath(path.join(home, '.claude'));
@@ -232,13 +233,25 @@ function accountFiles(roots: RootCandidate[], home: string): string[] {
     for (const root of roots) {
         const legacy = path.join(root.path, '.config.json');
         const candidates = fileSize(legacy) > 0 ? [legacy] : [path.join(root.path, '.claude.json'), ...(root.path === homeRoot ? [path.join(home, '.claude.json')] : [])];
-        for (const file of candidates.filter(f => fileSize(f) >= 0).map(realPath)) {
-            if (!files.includes(file)) {
-                files.push(file);
-            }
+        const live = candidates
+            .map(file => ({ file, modified: fileModified(file) }))
+            .filter(c => c.modified !== undefined)
+            .sort((a, b) => (b.modified ?? 0) - (a.modified ?? 0))[0];
+        if (live && !files.includes(realPath(live.file))) {
+            files.push(realPath(live.file));
         }
     }
     return files;
+}
+
+/** When the regular file at `p` was modified, or undefined where there is none. */
+function fileModified(p: string): number | undefined {
+    try {
+        const stat = fs.statSync(p);
+        return stat.isFile() ? stat.mtimeMs : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 /** The size of the regular file at `p`, or -1 where there is none. */

@@ -679,6 +679,10 @@ function useOwnerLine(line: Buffer, file: TranscriptFile, result: ReadResult): v
     }
     const r = objectOf(record);
     if (r?.type === 'session-owner') {
+        // A copy Claude Code set aside is named after no session: its
+        // owner's record says which, as the rest of its records would have
+        // when they were read.
+        result.sessionId ??= boundedString(r.sessionId, MAX_ID);
         parseOwner(r, file, result);
     }
 }

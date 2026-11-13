@@ -33,7 +33,7 @@ import {
     type TranscriptFile,
 } from './transcripts';
 import type { FileCheckpoint, ReadGuard, UsageStore } from './store';
-import type { SessionSighting } from './types';
+import type { OwnerSighting, SessionSighting } from './types';
 
 const PROVIDER = 'claude-code';
 
@@ -449,7 +449,7 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
             // Only for a session this file has a row for: an owner naming
             // one it does not would start that session's row here, in what
             // may not be its project.
-            owner: result.owners.get(id) ?? null,
+            owner: ownerOf(result, id, file),
         };
         store.upsertSession(PROVIDER, sighting);
     }
@@ -482,6 +482,12 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
         malformedLines: (carried?.malformedLines ?? 0) + malformed,
         newestVersion: result.newestVersion ?? carried?.newestVersion ?? null,
     });
+}
+
+/** The owner `result` read for session `id`, with what decides it against another transcript's (see `upsertSession`). */
+function ownerOf(result: ReadResult, id: string, file: TranscriptFile): OwnerSighting | null {
+    const owner = result.owners.get(id);
+    return owner ? { ...owner, named: file.sessionId === id, mtimeMs: result.checkpoint.mtimeMs } : null;
 }
 
 function skipReason(error: unknown): SkipReason {

@@ -73,9 +73,12 @@ function asSchema(file: string, schema: 1 | 2 | 3): void {
     const db = new sqlite.DatabaseSync(file);
     // Schema 4 only added to schema 3.
     const before4 = `
+        DROP TRIGGER clear_accounts;
         DROP TABLE accounts;
         ALTER TABLE sessions DROP COLUMN account_uuid;
-        ALTER TABLE sessions DROP COLUMN organization_uuid;`;
+        ALTER TABLE sessions DROP COLUMN organization_uuid;
+        ALTER TABLE sessions DROP COLUMN owner_named;
+        ALTER TABLE sessions DROP COLUMN owner_mtime;`;
     if (schema === 3) {
         try {
             db.exec(`BEGIN; ${before4} PRAGMA user_version = 3; COMMIT;`);
@@ -727,22 +730,104 @@ suite('usage history store', () => {
         assert.deepStrictEqual(migrated.accountNames(), []);
     });
 
-    test("a session's owner is the last one a sighting names; a sighting that names none keeps it", () => {
+    test("a session's owner is the last one written: its own transcript's over a copy's, the newer of two of its own, never none", () => {
         const store = ready(open());
-        const sight = (owner?: { accountUuid: string; organizationUuid: string | null } | null) =>
+        type Owner = { accountUuid: string; organizationUuid: string | null; named: boolean; mtimeMs: number };
+        const sight = (owner?: Owner | null) =>
             store.transaction(() =>
                 store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: 1, lastTs: 2, owner }),
             );
         const owners = () => store.sessions().map(s => s.owner);
         sight();
         assert.deepStrictEqual(owners(), [null]);
-        sight({ accountUuid: 'a', organizationUuid: 'o' });
+        // From a copy Claude Code set aside: taken while there is no other.
+        sight({ accountUuid: 'a', organizationUuid: 'o', named: false, mtimeMs: 300 });
         sight(null);
         sight();
         assert.deepStrictEqual(owners(), [{ accountUuid: 'a', organizationUuid: 'o' }]);
-        // Another account, with no organization: both replaced.
-        sight({ accountUuid: 'b', organizationUuid: null });
+        // Its own transcript, though older, stands over the copy.
+        sight({ accountUuid: 'b', organizationUuid: null, named: true, mtimeMs: 100 });
         assert.deepStrictEqual(owners(), [{ accountUuid: 'b', organizationUuid: null }]);
+        // A copy read after it, newer or not, changes nothing.
+        sight({ accountUuid: 'a', organizationUuid: 'o', named: false, mtimeMs: 900 });
+        assert.deepStrictEqual(owners(), [{ accountUuid: 'b', organizationUuid: null }]);
+        // Of two transcripts of its own, as when it moved to another project folder, the one written last.
+        sight({ accountUuid: 'c', organizationUuid: 'o', named: true, mtimeMs: 50 });
+        assert.deepStrictEqual(owners(), [{ accountUuid: 'b', organizationUuid: null }]);
+        sight({ accountUuid: 'c', organizationUuid: 'o', named: true, mtimeMs: 200 });
+        assert.deepStrictEqual(owners(), [{ accountUuid: 'c', organizationUuid: 'o' }]);
+        // The same transcript read on, its next owner: written later, it is later.
+        sight({ accountUuid: 'd', organizationUuid: null, named: true, mtimeMs: 200 });
+        assert.deepStrictEqual(owners(), [{ accountUuid: 'd', organizationUuid: null }]);
+    });
+
+    test('an account is numbered once, by first use among those numbered together, and keeps its number', () => {
+        const store = ready(open());
+        const sight = (sessionId: string, accountUuid: string, firstTs: number, organizationUuid: string | null = null) =>
+            store.upsertSession('claude-code', {
+                sessionId,
+                root: '/root',
+                cwd: null,
+                cwdTs: null,
+                projectDir: 'p',
+                firstTs,
+                lastTs: firstTs,
+                owner: { accountUuid, organizationUuid, named: true, mtimeMs: 1 },
+            });
+        store.transaction(() => {
+            sight('s1', 'b', 20);
+            sight('s2', 'a', 10);
+            sight('s3', 'a', 30, 'o');
+        });
+        assert.ok(store.hasUnnumberedAccounts('claude-code'));
+        assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 3);
+        assert.ok(!store.hasUnnumberedAccounts('claude-code'));
+        assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), { 'a/': 1, 'b/': 2, 'a/o': 3 });
+        // A session from before the others, signed in to a new account: next, not first.
+        store.transaction(() => sight('s0', 'c', 1));
+        assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 1);
+        assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), { 'a/': 1, 'b/': 2, 'a/o': 3, 'c/': 4 });
+        // An account named before any session was: numbered once one is, its name kept.
+        store.transaction(() => store.rememberAccounts('claude-code', [{ accountUuid: 'd', organizationUuid: null, email: 'd@example.com', organizationName: null }], 5));
+        store.transaction(() => sight('s4', 'd', 40));
+        store.transaction(() => store.numberAccounts('claude-code'));
+        assert.deepStrictEqual([store.accountNumbers().get('d/'), store.accountNames().map(n => n.email)], [5, ['d@example.com']]);
+        assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 0);
+    });
+
+    test('a Clear in a build before this schema, which knows nothing of accounts, leaves no account named on disk', () => {
+        // As 2.3.0 runs it, in a window not reloaded since the update.
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertRequests([req()]);
+            store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: null, email: 'Secret-Person-0xFACE@example.com', organizationName: 'Secret-Org-0xFEED' }], 1);
+        });
+        assert.ok(holding('Secret-Person-0xFACE').length > 0);
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const old = new sqlite.DatabaseSync(file);
+        try {
+            old.exec('PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; BEGIN IMMEDIATE');
+            for (const table of ['files', 'read_guards', 'requests', 'paths', 'sessions', 'compactions', 'limit_hits']) {
+                old.exec(`DELETE FROM ${table}`);
+            }
+            old.exec("DELETE FROM lease; UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
+            old.exec('COMMIT');
+            old.exec('VACUUM');
+            old.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+        } finally {
+            old.close();
+        }
+        assert.deepStrictEqual(store.accountNames(), []);
+        assert.deepStrictEqual([holding('Secret-Person-0xFACE'), holding('Secret-Org-0xFEED')], [[], []], "an account's name is still on disk");
+        // Another update of the generation, with the history not empty, empties nothing.
+        store.transaction(() => {
+            store.upsertRequests([req()]);
+            store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: null, email: 'a@example.com', organizationName: null }], 2);
+        });
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
+        raw.close();
+        assert.strictEqual(store.accountNames().length, 1);
     });
 
     test('account names are kept as Claude Code last gave them, and kept once it no longer does', () => {

@@ -135,11 +135,23 @@ export interface SessionSighting {
     firstTs: number | null;
     lastTs: number | null;
     /**
-     * Its owner, when this import read one: the last read replaces the one
-     * stored, and an import that read none leaves it be. Null or absent,
-     * none read.
+     * Its owner, when this import read one, with what decides it against the
+     * one stored (see `UsageStore.upsertSession`). Null or absent, none read,
+     * and the stored one stays.
      */
-    owner?: SessionOwner | null;
+    owner?: OwnerSighting | null;
+}
+
+/** An owner as one transcript gives it: the last of its records for the session. */
+export interface OwnerSighting extends SessionOwner {
+    /**
+     * Whether the transcript is the one named after the session, rather than
+     * a copy Claude Code set aside, or another session's file holding a copy
+     * of the record.
+     */
+    named: boolean;
+    /** The transcript's modification time when it was read. */
+    mtimeMs: number;
 }
 
 /** One group of the store's bucket sums: counters summed, a missing one adding nothing. */

@@ -53,11 +53,11 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
         ],
         dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: t }],
         accounts: [{ key: 'none', owner: null, sessions: 1, totals: t, models: [], projects: [HOSTILE] }],
-        accountsSeen: [{ key: 'none', owner: null, sessions: 1, firstTs: Date.UTC(2026, 9, 9, 10), lastTs: Date.UTC(2026, 9, 9, 11, 30) }],
+        accountsSeen: [{ key: 'none', owner: null, sessions: 1, firstTs: Date.UTC(2026, 9, 9, 10), lastTs: Date.UTC(2026, 9, 9, 11, 30), ordinal: null }],
         accountNames: [],
         currentAccounts: [],
         limitWindows: [{ account: 'none', limitType: HOSTILE, resetsAt: 1791561600, hits: 2, firstTs: Date.UTC(2026, 9, 9, 10, 6), date: '2026-10-09' }],
-        omitted: { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 },
+        omitted: { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0, accounts: 0, accountsSeen: 0 },
         coverage: { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 3, ahead: 0, files: 4, oversizeLines: 0, malformedLines: 0 },
         ...overrides,
     };
@@ -495,14 +495,14 @@ suite('usage page', () => {
     });
 
     test('the cap is disclosed on the page and in the export', () => {
-        const capped = renderFragments(view({ report: report({ omitted: { sessions: 7, projects: 2, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 } }) }));
+        const capped = renderFragments(view({ report: report({ omitted: { sessions: 7, projects: 2, models: 0, efforts: 0, dayModels: 0, limitWindows: 0, accounts: 0, accountsSeen: 0 } }) }));
         assert.ok(capped.body.includes('7 smaller sessions') && capped.body.includes('2 smaller projects'));
         assert.ok(capped.copy.notes.some(n => n.includes('7 smaller sessions')));
     });
 
     test('every capped list says how many rows it left out', () => {
         const capped = renderFragments(
-            view({ report: report({ omitted: { sessions: 0, projects: 0, models: 3, efforts: 2, dayModels: 5, limitWindows: 4 } }) }),
+            view({ report: report({ omitted: { sessions: 0, projects: 0, models: 3, efforts: 2, dayModels: 5, limitWindows: 4, accounts: 0, accountsSeen: 0 } }) }),
         );
         assert.ok(capped.body.includes('…and 3 smaller models, counted in the totals'));
         assert.ok(capped.body.includes('…and 2 smaller effort levels, counted in the totals'));
@@ -998,9 +998,9 @@ suite('usage page', () => {
                 { key: 'none', owner: null, sessions: 4, totals: { ...t, processed: 100 }, models: [], projects: ['old'] },
             ],
             accountsSeen: [
-                { key: `${A}/${ORG}`, owner: ownerA, sessions: 2, firstTs: Date.UTC(2026, 9, 1, 9), lastTs: Date.UTC(2026, 9, 9, 11) },
-                { key: `${B}/`, owner: ownerB, sessions: 1, firstTs: Date.UTC(2026, 9, 3, 9), lastTs: Date.UTC(2026, 9, 4, 9) },
-                { key: 'none', owner: null, sessions: 4, firstTs: Date.UTC(2026, 8, 1, 9), lastTs: Date.UTC(2026, 8, 30, 9) },
+                { key: `${A}/${ORG}`, owner: ownerA, sessions: 2, firstTs: Date.UTC(2026, 9, 1, 9), lastTs: Date.UTC(2026, 9, 9, 11), ordinal: 1 },
+                { key: `${B}/`, owner: ownerB, sessions: 1, firstTs: Date.UTC(2026, 9, 3, 9), lastTs: Date.UTC(2026, 9, 4, 9), ordinal: 2 },
+                { key: 'none', owner: null, sessions: 4, firstTs: Date.UTC(2026, 8, 1, 9), lastTs: Date.UTC(2026, 8, 30, 9), ordinal: null },
             ],
             accountNames: [{ accountUuid: A, organizationUuid: ORG, email: `a@example.com`, organizationName: HOSTILE }],
             currentAccounts: [`${A}/${ORG}`],

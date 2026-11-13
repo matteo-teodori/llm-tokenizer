@@ -237,7 +237,7 @@ suite('usage report', () => {
         assert.deepStrictEqual(report.limitWindows, [
             { account: 'none', limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
         ]);
-        assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 });
+        assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0, accounts: 0, accountsSeen: 0 });
         assert.deepStrictEqual([report.coverage.requests, report.coverage.files], [4, 4]);
     });
 
@@ -817,6 +817,45 @@ suite('usage report', () => {
             assert.deepStrictEqual([both.totals.output, both.sessions.map(s => s.sessionId)], [5, ['b2']]);
         });
 
+        test('accounts keep the numbers the history gave them, and the worker gives them after each pass', async () => {
+            const store = await history();
+            // Before any number: by first use.
+            assert.deepStrictEqual(queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal]), [
+                [keyA, null], [keyB, null], [keyA2, null], ['none', null],
+            ]);
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual(queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal]), [
+                [keyA, 1], [keyB, 2], [keyA2, 3], ['none', null],
+            ]);
+            // A session from before them all, of a new account: after them, by its number.
+            const C = '11111111-2222-4333-8444-555555555555';
+            transcript('-repo-one', 'c1.jsonl', [
+                userRecord('c1', '/repo/one', '2026-10-01T10:00:00Z'),
+                assistantRecord('c1', 'm-c1', '2026-10-01T10:00:01Z', 1),
+                owner('c1', C),
+            ]);
+            await importRoots(store, [path.join(tmp, 'root')]);
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual(queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal]), [
+                [keyA, 1], [keyB, 2], [keyA2, 3], [`${C}/`, 4], ['none', null],
+            ]);
+        });
+
+        test('one account chosen narrows a range too, and a session the history has no row for counts as recording none', async () => {
+            const store = await history();
+            // The last 7 days from the 10th: every one of these.
+            const week = queryReport(store, query({ range: '7d', account: keyB }));
+            assert.deepStrictEqual([week.totals.output, week.sessions.map(s => s.sessionId).sort()], [305, ['b1', 'b2']]);
+            const today = queryReport(store, query({ range: 'today', account: keyB }));
+            assert.strictEqual(today.totals.coverage.requests, 0);
+            // A request whose session has no row, as only a hand-made history holds.
+            const none = buildReport(
+                { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
+                { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', account: 'none' },
+            );
+            assert.strictEqual(none.totals.coverage.requests, store.coverage().requests);
+        });
+
         test("the names Claude Code gives now stand over those the history kept, which are kept for the rest", async () => {
             const store = await history();
             store.transaction(() =>
@@ -845,6 +884,57 @@ suite('usage report', () => {
             assert.deepStrictEqual(report.currentAccounts, [keyA]);
         });
     }
+
+    test('accounts are capped as the other lists are: those with most tokens listed, those with most sessions offered', () => {
+        const owner = (i: number) => ({ accountUuid: `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`, organizationUuid: null });
+        const sessions = Array.from({ length: 260 }, (_, i) => ({
+            sessionId: `s${i}`,
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: false,
+            firstTs: Date.UTC(2026, 9, 9) + i,
+            lastTs: Date.UTC(2026, 9, 9) + i,
+            owner: owner(i),
+        }));
+        // One more session for each of the last ten accounts: the ten with most sessions.
+        const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
+        const sums = [...sessions, ...extra].map((s, i) => ({
+            bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
+            sessionId: s.sessionId,
+            model: 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: Date.UTC(2026, 9, 9, 12),
+            lastTs: Date.UTC(2026, 9, 9, 12),
+            input: i,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        }));
+        const report = buildReport(
+            { sums, sessions: [...sessions, ...extra], compactions: [], limitHits: [], coverage: { start: 0, newest: 0, requests: 270, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 } },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual([report.accounts.length, report.omitted.accounts, report.accountsSeen.length, report.omitted.accountsSeen], [50, 210, 200, 60]);
+        // The ones with most tokens listed; the ones with most sessions offered, in the order they were first used.
+        assert.strictEqual(report.accounts[0].key, `${owner(259).accountUuid}/`);
+        assert.deepStrictEqual(report.accountsSeen.slice(0, 2).map(a => a.sessions), [1, 1]);
+        assert.ok(report.accountsSeen.some(a => a.key === `${owner(250).accountUuid}/` && a.sessions === 2));
+        assert.ok(report.accountsSeen.every((a, i, all) => i === 0 || (all[i - 1].firstTs ?? 0) <= (a.firstTs ?? 0)));
+        // The totals keep every account.
+        assert.strictEqual(report.totals.coverage.requests, 270);
+    });
 
     test('a missing counter makes the report a lower bound', () => {
         const store = freshStore();
@@ -963,6 +1053,8 @@ suite('usage worker queries', () => {
             [[A, 'a@example.com'], [B, 'b@example.com']],
         );
         assert.deepStrictEqual(report.report.currentAccounts, [`${B}/`]);
+        // Numbered by the pass, as they were first used.
+        assert.deepStrictEqual(report.report.accountsSeen.map(a => [a.key, a.ordinal]), [[`${A}/`, 1], [`${B}/`, 2], ['none', null]]);
 
         const one = await worker.send(ask(storeFile, { account: `${A}/` }));
         assert.ok(one.type === 'report' && one.report.totals.output === 10 && one.report.account === `${A}/`, JSON.stringify(one).slice(0, 200));

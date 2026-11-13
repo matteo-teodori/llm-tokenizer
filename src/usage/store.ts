@@ -145,6 +145,12 @@ export interface FileCheckpoint {
     newestVersion: string | null;
 }
 
+/** A session as stored: what the imports saw of it, merged, with its owner. */
+export interface StoredSession extends Omit<SessionSighting, 'owner'> {
+    provider: UsageProvider;
+    owner: SessionOwner | null;
+}
+
 /**
  * A Claude account's name, as Claude Code's configuration gives it: its
  * email, and the name of the organization, where it gives them.
@@ -398,25 +404,41 @@ INSERT OR REPLACE INTO meta (key, value) VALUES ('${OLD_NEWEST_PARSER}', '${Numb
 `;
 
 /**
- * Version 4: each session's owner, the Claude account and organization its
- * main transcript says it was signed in to, by id; and `accounts`, the names
- * Claude Code's own configuration gave those ids while this history was kept
- * (`organization_uuid` is empty where it named no organization), so that an
- * account signed out of since keeps its name. A session read before has no
- * owner until its main transcript is searched again (see `OWNERS_SINCE`).
+ * Version 4: each session's owner, the Claude account and organization a
+ * transcript says it was signed in to, by id, with what decides between two
+ * transcripts' owners (see `upsertSession`); and `accounts`, one row per
+ * account and organization (`organization_uuid` empty where it named none):
+ * its number among the accounts the history's sessions were signed in to,
+ * given once and kept (see `numberAccounts`), and the names Claude Code's
+ * own configuration gave it while this history was kept, so that an account
+ * signed out of since keeps its name. A session read before has no owner
+ * until its main transcript is searched again (see `OWNERS_SINCE`).
+ *
+ * `clear_accounts` empties `accounts` when a Clear by a build before this
+ * schema, which knows nothing of it, has emptied `requests`, as
+ * `clear_paths` does `paths`: no account's email is left on disk. A schema
+ * that drops the table must drop the trigger too.
  */
 const MIGRATE_TO_4 = `
 ALTER TABLE sessions ADD COLUMN account_uuid TEXT;
 ALTER TABLE sessions ADD COLUMN organization_uuid TEXT;
+ALTER TABLE sessions ADD COLUMN owner_named INTEGER;
+ALTER TABLE sessions ADD COLUMN owner_mtime INTEGER;
 CREATE TABLE accounts (
     provider TEXT NOT NULL DEFAULT 'claude-code',
     account_uuid TEXT NOT NULL,
     organization_uuid TEXT NOT NULL,
+    ordinal INTEGER,
     email TEXT,
     organization_name TEXT,
-    seen_ts INTEGER NOT NULL,
+    named_ts INTEGER,
     PRIMARY KEY (provider, account_uuid, organization_uuid)
 ) STRICT;
+CREATE TRIGGER clear_accounts AFTER UPDATE OF value ON meta
+WHEN new.key = 'store_generation' AND NOT EXISTS (SELECT 1 FROM requests)
+BEGIN
+    DELETE FROM accounts;
+END;
 `;
 
 /** Tables that hold history, and the bookkeeping of reading it: everything Clear empties. */
@@ -790,19 +812,30 @@ export class UsageStore {
     /**
      * Merge what an import saw of a session. Its cwd is the earliest one seen,
      * by record time and then by text, so the order files are read in never
-     * matters; its span only ever widens. Its owner is the last one read, as
-     * Claude Code takes it: a sighting with none leaves the stored one be.
+     * matters; its span only ever widens.
+     *
+     * Its owner is the last one written, as Claude Code takes it, whatever
+     * order the files are read in. Within a transcript, that is the last one
+     * read; between two, the one in the transcript named after the session,
+     * over a copy Claude Code set aside or another session's file that
+     * copied the record, and of two such, the one modified last: a session
+     * moved to another project folder goes on in the newer. A sighting with
+     * none leaves the stored one be.
      */
     upsertSession(provider: UsageProvider, s: SessionSighting): void {
         this.assertWritable();
         const earlier = `excluded.cwd IS NOT NULL AND (sessions.cwd IS NULL
             OR (excluded.cwd_ts IS NOT NULL AND (sessions.cwd_ts IS NULL OR excluded.cwd_ts < sessions.cwd_ts))
             OR (excluded.cwd_ts IS sessions.cwd_ts AND excluded.cwd < sessions.cwd))`;
-        const owned = 'excluded.account_uuid IS NOT NULL';
+        const wins = `excluded.account_uuid IS NOT NULL AND (sessions.account_uuid IS NULL
+            OR (excluded.owner_named, excluded.owner_mtime) >= (coalesce(sessions.owner_named, 0), coalesce(sessions.owner_mtime, 0)))`;
+        const owner = (column: string) => `${column} = CASE WHEN ${wins} THEN excluded.${column} ELSE sessions.${column} END`;
         this.db
             .prepare(
-                `INSERT INTO sessions (provider, session_id, root, cwd, cwd_ts, project_dir, first_ts, last_ts, account_uuid, organization_uuid)
-                 VALUES (:provider, :sessionId, :root, :cwd, :cwdTs, :projectDir, :firstTs, :lastTs, :accountUuid, :organizationUuid)
+                `INSERT INTO sessions (provider, session_id, root, cwd, cwd_ts, project_dir, first_ts, last_ts,
+                                       account_uuid, organization_uuid, owner_named, owner_mtime)
+                 VALUES (:provider, :sessionId, :root, :cwd, :cwdTs, :projectDir, :firstTs, :lastTs,
+                         :accountUuid, :organizationUuid, :ownerNamed, :ownerMtime)
                  ON CONFLICT (provider, session_id) DO UPDATE SET
                      cwd = CASE WHEN ${earlier} THEN excluded.cwd ELSE sessions.cwd END,
                      cwd_ts = CASE WHEN ${earlier} THEN excluded.cwd_ts ELSE sessions.cwd_ts END,
@@ -810,8 +843,7 @@ export class UsageStore {
                                      THEN coalesce(excluded.first_ts, sessions.first_ts) ELSE sessions.first_ts END,
                      last_ts = CASE WHEN sessions.last_ts IS NULL OR excluded.last_ts > sessions.last_ts
                                     THEN coalesce(excluded.last_ts, sessions.last_ts) ELSE sessions.last_ts END,
-                     account_uuid = CASE WHEN ${owned} THEN excluded.account_uuid ELSE sessions.account_uuid END,
-                     organization_uuid = CASE WHEN ${owned} THEN excluded.organization_uuid ELSE sessions.organization_uuid END`,
+                     ${['account_uuid', 'organization_uuid', 'owner_named', 'owner_mtime'].map(owner).join(',\n                     ')}`,
             )
             .run({
                 provider,
@@ -824,6 +856,8 @@ export class UsageStore {
                 lastTs: s.lastTs,
                 accountUuid: s.owner?.accountUuid ?? null,
                 organizationUuid: s.owner ? s.owner.organizationUuid : null,
+                ownerNamed: s.owner ? (s.owner.named ? 1 : 0) : null,
+                ownerMtime: s.owner ? Math.floor(s.owner.mtimeMs) : null,
             });
     }
 
@@ -832,7 +866,7 @@ export class UsageStore {
      * time is its last request's before `untilMs`, as a report counts them:
      * one record dated ahead would otherwise stretch its span by years.
      */
-    sessions(untilMs = Number.MAX_SAFE_INTEGER): (SessionSighting & { provider: UsageProvider })[] {
+    sessions(untilMs = Number.MAX_SAFE_INTEGER): StoredSession[] {
         return this.db
             .prepare(
                 `SELECT provider, session_id, root, cwd, cwd_ts, project_dir, first_ts,
@@ -1046,25 +1080,28 @@ export class UsageStore {
      * account keeps its name once Claude Code has signed out of it. Call
      * inside `transaction`.
      */
-    rememberAccounts(provider: UsageProvider, accounts: Iterable<AccountName>, seenTs: number): void {
+    rememberAccounts(provider: UsageProvider, accounts: Iterable<AccountName>, namedTs: number): void {
         this.assertWritable();
         const upsert = this.db.prepare(
-            `INSERT INTO accounts (provider, account_uuid, organization_uuid, email, organization_name, seen_ts)
+            `INSERT INTO accounts (provider, account_uuid, organization_uuid, email, organization_name, named_ts)
              VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (provider, account_uuid, organization_uuid) DO UPDATE SET
                  email = coalesce(excluded.email, accounts.email),
                  organization_name = coalesce(excluded.organization_name, accounts.organization_name),
-                 seen_ts = max(excluded.seen_ts, accounts.seen_ts)`,
+                 named_ts = max(excluded.named_ts, coalesce(accounts.named_ts, 0))`,
         );
         for (const a of accounts) {
-            upsert.run(provider, a.accountUuid, a.organizationUuid ?? '', a.email, a.organizationName, seenTs);
+            upsert.run(provider, a.accountUuid, a.organizationUuid ?? '', a.email, a.organizationName, namedTs);
         }
     }
 
-    /** The names kept for accounts, newest first. */
+    /** The names kept for accounts, the most lately given first. */
     accountNames(): AccountName[] {
         return this.db
-            .prepare('SELECT account_uuid, organization_uuid, email, organization_name FROM accounts ORDER BY seen_ts DESC, account_uuid, organization_uuid')
+            .prepare(
+                `SELECT account_uuid, organization_uuid, email, organization_name FROM accounts
+                 WHERE named_ts IS NOT NULL ORDER BY named_ts DESC, account_uuid, organization_uuid`,
+            )
             .all()
             .map(row => ({
                 accountUuid: row.account_uuid as string,
@@ -1072,6 +1109,67 @@ export class UsageStore {
                 email: row.email as string | null,
                 organizationName: row.organization_name as string | null,
             }));
+    }
+
+    /**
+     * Give each account and organization the history's sessions were signed
+     * in to, and that has none yet, its number: after the highest given, in
+     * the order of their sessions' first request, so that those first seen
+     * together are numbered by first use. A number once given is kept, so an
+     * account's never changes as more come, or as an older session is
+     * resumed under a newer account. Call inside `transaction`.
+     *
+     * @returns how many were numbered.
+     */
+    numberAccounts(provider: UsageProvider): number {
+        this.assertWritable();
+        const result = this.db
+            .prepare(
+                `INSERT INTO accounts (provider, account_uuid, organization_uuid, ordinal)
+                 SELECT provider, account_uuid, organization_uuid,
+                        (SELECT coalesce(max(ordinal), 0) FROM accounts WHERE provider = :provider)
+                          + row_number() OVER (ORDER BY first_ts IS NULL, first_ts, account_uuid, organization_uuid)
+                 FROM (
+                     SELECT provider, account_uuid, coalesce(organization_uuid, '') AS organization_uuid, min(first_ts) AS first_ts
+                     FROM sessions
+                     WHERE provider = :provider AND account_uuid IS NOT NULL
+                     GROUP BY provider, account_uuid, coalesce(organization_uuid, '')
+                 ) AS seen
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM accounts a
+                     WHERE a.provider = seen.provider AND a.account_uuid = seen.account_uuid
+                       AND a.organization_uuid = seen.organization_uuid AND a.ordinal IS NOT NULL
+                 )
+                 ON CONFLICT (provider, account_uuid, organization_uuid) DO UPDATE SET ordinal = excluded.ordinal`,
+            )
+            .run({ provider });
+        return Number(result.changes);
+    }
+
+    /** Whether some account a session was signed in to has no number yet: a read, before `numberAccounts` writes. */
+    hasUnnumberedAccounts(provider: UsageProvider): boolean {
+        return (
+            this.db
+                .prepare(
+                    `SELECT 1 FROM sessions s
+                     WHERE s.provider = ? AND s.account_uuid IS NOT NULL AND NOT EXISTS (
+                         SELECT 1 FROM accounts a
+                         WHERE a.provider = s.provider AND a.account_uuid = s.account_uuid
+                           AND a.organization_uuid = coalesce(s.organization_uuid, '') AND a.ordinal IS NOT NULL
+                     ) LIMIT 1`,
+                )
+                .get(provider) !== undefined
+        );
+    }
+
+    /** Each account's number, by key (see `accountKey`). */
+    accountNumbers(): Map<string, number> {
+        return new Map(
+            this.db
+                .prepare('SELECT account_uuid, organization_uuid, ordinal FROM accounts WHERE ordinal IS NOT NULL')
+                .all()
+                .map(row => [`${row.account_uuid as string}/${row.organization_uuid as string}`, row.ordinal as number]),
+        );
     }
 
     /**

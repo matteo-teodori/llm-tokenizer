@@ -73,6 +73,15 @@ suite('usage transcripts', () => {
         return result.store;
     }
 
+    /** Another store under `tmp`, by name: a history read anew. */
+    function freshStoreAt(name: string): UsageStore {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const result = UsageStore.open(sqlite, path.join(tmp, 'store', `${name}.sqlite`));
+        assert.strictEqual(result.status, 'ready');
+        stores.push(result.store);
+        return result.store;
+    }
+
     /** A main transcript file record for `file` in a temporary root. */
     function mainFile(file: string): TranscriptFile {
         return { path: file, root: tmp, projectDir: 'p', kind: 'main', sessionId: 's1', agentId: null, runId: null };
@@ -836,6 +845,65 @@ suite('usage transcripts', () => {
         fs.appendFileSync(main, line(owner(ACCOUNT_B)));
         await importRoots(store, [tmp]);
         assert.deepStrictEqual(store.sessions().map(s => s.owner), [{ accountUuid: ACCOUNT_B, organizationUuid: null }]);
+    });
+
+    test("a session's owner is its own transcript's last, whatever copy Claude Code set aside, and in whatever order they are read", async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(dir, { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        // As Claude Code leaves them: the copy set aside holds the owner the
+        // session had then, the transcript the one it has now.
+        fs.writeFileSync(main, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5)) + line(owner(ACCOUNT_B)) + line(assistant('m2', 7)));
+        const copy = path.join(dir, 's1.jsonl.superseded-1791000000');
+        fs.writeFileSync(copy, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5)));
+        // Set aside before the transcript was last written.
+        fs.utimesSync(copy, new Date(1_791_000_000_000), new Date(1_791_000_000_000));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(store.sessions().map(s => s.owner), [{ accountUuid: ACCOUNT_B, organizationUuid: null }]);
+        // Read the other way round, the copy last: the same.
+        fs.utimesSync(main, new Date(), new Date(Date.now() + 1_000));
+        fs.renameSync(copy, path.join(dir, 'a-s1.orphaned-1791000000-x.jsonl'));
+        const again = freshStoreAt('again');
+        await importRoots(again, [tmp]);
+        assert.deepStrictEqual(again.sessions().map(s => s.owner), [{ accountUuid: ACCOUNT_B, organizationUuid: null }]);
+    });
+
+    test("a session moved to another project folder takes the owner of the transcript written last, whichever folder comes first", async () => {
+        const first = path.join(tmp, 'projects', 'a-moved-to');
+        const second = path.join(tmp, 'projects', 'z-moved-from');
+        fs.mkdirSync(first, { recursive: true });
+        fs.mkdirSync(second, { recursive: true });
+        const newer = path.join(first, 's1.jsonl');
+        const older = path.join(second, 's1.jsonl');
+        fs.writeFileSync(older, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5)));
+        fs.writeFileSync(newer, line(owner(ACCOUNT_B)) + line(assistant('m2', 7)));
+        // Path order reads the newer first, the older last.
+        fs.utimesSync(older, new Date(1_791_000_000_000), new Date(1_791_000_000_000));
+        fs.utimesSync(newer, new Date(1_791_100_000_000), new Date(1_791_100_000_000));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(store.sessions().map(s => s.owner), [{ accountUuid: ACCOUNT_B, organizationUuid: null }]);
+    });
+
+    test("a copy set aside that an older parser read keeps its session's owner, when it is all there is of the session", async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(dir, { recursive: true });
+        const orphan = path.join(dir, 's9.orphaned-1791000000-abc.jsonl');
+        fs.writeFileSync(orphan, line(assistant('m1', 5, { sessionId: 's9' })) + line(owner(ACCOUNT_A, ORG_A, 's9')));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(store.sessions().map(s => [s.sessionId, s.owner]), [['s9', { accountUuid: ACCOUNT_A, organizationUuid: ORG_A }]]);
+        // As the older parser left it: its checkpoint, and no owner.
+        const real = fs.realpathSync(orphan);
+        const checkpoint = store.getFile('claude-code', real);
+        assert.ok(checkpoint && sqlite);
+        store.transaction(() => store.putFile({ ...checkpoint, parserVersion: OWNERS_SINCE - 1 }));
+        const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+        raw.exec('UPDATE sessions SET account_uuid = NULL, organization_uuid = NULL, owner_named = NULL, owner_mtime = NULL');
+        raw.close();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(store.sessions().map(s => [s.sessionId, s.owner]), [['s9', { accountUuid: ACCOUNT_A, organizationUuid: ORG_A }]]);
     });
 
     test('an unchanged file is not even opened', async function () {

@@ -83,9 +83,55 @@ suite('usage accounts: keys and labels', () => {
         assert.deepStrictEqual([[...label].length, label.endsWith('…')], [80, true]);
     });
 
+    test('an account with no name keeps the number the history gave it, whatever was used first', () => {
+        // C was numbered first, though a session resumed under A later began before C's.
+        const seen = [
+            { key: `${A}/`, owner: { accountUuid: A, organizationUuid: null }, firstTs: 1, ordinal: 2 },
+            { key: `${C}/`, owner: { accountUuid: C, organizationUuid: null }, firstTs: 5, ordinal: 1 },
+            // Not numbered yet: after the numbered ones, by first use.
+            { key: `${B}/`, owner: { accountUuid: B, organizationUuid: null }, firstTs: 0, ordinal: null },
+        ];
+        const labels = accountLabels(seen, [], {});
+        assert.deepStrictEqual([labels.get(`${C}/`)?.label, labels.get(`${A}/`)?.label, labels.get(`${B}/`)?.label], ['Account 1', 'Account 2', 'Account 3']);
+    });
+
+    test('labels that would read alike are told apart by the first digits of what differs', () => {
+        const seen = [
+            { key: `${A}/${ORG_A}`, owner: { accountUuid: A, organizationUuid: ORG_A }, firstTs: 1 },
+            { key: `${A}/${ORG_A2}`, owner: { accountUuid: A, organizationUuid: ORG_A2 }, firstTs: 2 },
+            { key: `${B}/`, owner: { accountUuid: B, organizationUuid: null }, firstTs: 3 },
+            { key: `${C}/`, owner: { accountUuid: C, organizationUuid: null }, firstTs: 4 },
+        ];
+        const names = [
+            { accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: 'Acme' },
+            { accountUuid: A, organizationUuid: ORG_A2, email: 'a@example.com', organizationName: 'Acme' },
+            { accountUuid: B, organizationUuid: null, email: 'b@example.com', organizationName: null },
+        ];
+        // Two organizations of one name, and a name you gave that is another account's email.
+        const labels = accountLabels(seen, names, { [C]: 'b@example.com' });
+        assert.deepStrictEqual(
+            seen.map(x => labels.get(x.key)?.label),
+            [`a@example.com (Acme) · ${ORG_A.slice(0, 8)}`, `a@example.com (Acme) · ${ORG_A2.slice(0, 8)}`, `b@example.com · ${B.slice(0, 8)}`, `b@example.com · ${C.slice(0, 8)}`],
+        );
+        // A name you gave that reads as the sessions that record none.
+        const plain = accountLabels([...seen.slice(2, 3), { key: 'none', owner: null, firstTs: 0 }], [], { [B]: 'Not recorded' });
+        assert.deepStrictEqual([plain.get(`${B}/`)?.label, plain.get('none')?.label], [`Not recorded · ${B.slice(0, 8)}`, 'Not recorded']);
+    });
+
+    test("a personal organization's name gives its email where nothing else does, and a long email is cut before its organization", () => {
+        const seen = [{ key: `${A}/${ORG_A}`, owner: { accountUuid: A, organizationUuid: ORG_A }, firstTs: 1 }];
+        const personal = accountLabels(seen, [{ accountUuid: A, organizationUuid: ORG_A, email: null, organizationName: "a@example.com's Organization" }], {});
+        assert.strictEqual(personal.get(`${A}/${ORG_A}`)?.label, 'a@example.com');
+        const long = accountLabels(seen, [{ accountUuid: A, organizationUuid: ORG_A, email: `${'x'.repeat(90)}@example.com`, organizationName: 'Acme Corp' }], {});
+        const label = long.get(`${A}/${ORG_A}`)?.label ?? '';
+        assert.ok(label.endsWith('… (Acme Corp)') && [...label].length === 80, label);
+    });
+
     test('a name keeps nothing that could hide or reorder what it shows, and the names you give are only ids with a name', () => {
         const hidden = `Wo${char(0x202e)}rk${char(0x200b)}${char(0x0007)}\n\t  Org`;
         assert.strictEqual(showable(hidden, 60), 'Wo rk Org');
+        // Invisible tags, a Mongolian vowel separator and interlinear annotations, past the basic plane or not.
+        assert.strictEqual(showable(`Work${char(0xe0041)}${char(0xe007f)}${char(0x180e)}${char(0xfff9)}`, 60), 'Work');
         assert.strictEqual(showable(`  ${char(0x2028)} `, 60), null);
         assert.strictEqual(showable(42, 60), null);
         assert.strictEqual(showable('x'.repeat(70), 60)?.length, 60);
@@ -199,9 +245,15 @@ suite("usage accounts: Claude Code's configuration", () => {
         assert.deepStrictEqual(resolve(), [path.join('home', '.claude.json')]);
         // A folder CLAUDE_CONFIG_DIR names: its own, besides ~/.claude's.
         assert.deepStrictEqual(resolve({ CLAUDE_CONFIG_DIR: custom }), [path.join('custom', '.claude.json'), path.join('home', '.claude.json')]);
-        // ~/.claude named by CLAUDE_CONFIG_DIR too, at times: both places.
+        // ~/.claude named by CLAUDE_CONFIG_DIR at times, and not at others:
+        // of its two files, the one Claude Code wrote last.
         fs.writeFileSync(path.join(claude, '.claude.json'), '{}');
-        assert.deepStrictEqual(resolve(), [path.join('home', '.claude', '.claude.json'), path.join('home', '.claude.json')]);
+        const at = (file: string, seconds: number) => fs.utimesSync(file, new Date(seconds * 1000), new Date(seconds * 1000));
+        at(path.join(claude, '.claude.json'), 2_000_000_000);
+        at(path.join(home, '.claude.json'), 1_900_000_000);
+        assert.deepStrictEqual(resolve(), [path.join('home', '.claude', '.claude.json')]);
+        at(path.join(home, '.claude.json'), 2_100_000_000);
+        assert.deepStrictEqual(resolve(), [path.join('home', '.claude.json')]);
         // The older name, while it holds something, is the one Claude Code reads.
         fs.writeFileSync(path.join(custom, '.config.json'), '{}');
         assert.deepStrictEqual(resolve({ CLAUDE_CONFIG_DIR: custom })[0], path.join('custom', '.config.json'));
