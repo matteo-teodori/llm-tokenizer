@@ -42,7 +42,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
                 sessionId: HOSTILE,
                 project: { kind: 'root', path: `/repo/${HOSTILE}` },
                 label: HOSTILE,
-                account: 'none',
+                accounts: ['none'],
                 firstTs: Date.UTC(2026, 9, 9, 10),
                 lastTs: Date.UTC(2026, 9, 9, 11, 30),
                 activeMs: 47 * 60_000,
@@ -1018,7 +1018,7 @@ suite('usage page', () => {
             ],
             accountNames: [{ accountUuid: A, organizationUuid: ORG, email: `a@example.com`, organizationName: HOSTILE }],
             currentAccounts: [`${A}/${ORG}`],
-            sessions: [{ ...base.sessions[0], account: `${B}/` }],
+            sessions: [{ ...base.sessions[0], accounts: [`${B}/`] }],
             ...overrides,
         });
     }
@@ -1103,7 +1103,12 @@ suite('usage page', () => {
         assert.ok(fragments.body.includes(`<li><span>a@example.com (${HOSTILE_ESCAPED}): five hour limit, 1 request refused`));
         assert.ok(fragments.body.includes('Each for its whole account, whichever project hit them'));
         assert.deepStrictEqual([fragments.copy.header.at(-1), fragments.copy.rows[0]?.at(-1)], ['account', 'Account 2']);
-        assert.ok(fragments.copy.notes.some(n => n.startsWith('account is the Claude account a session was signed in to')));
+        assert.ok(fragments.copy.notes.some(n => n.startsWith("account is the Claude account a session's requests were made with")));
+        // A session resumed under another account names both, the first used first.
+        const resumed = renderFragments(view({ report: accountsReport({ sessions: [{ ...both.sessions[0], accounts: [KEY_A, `${ID_B}/`] }] }) }));
+        assert.ok(resumed.body.includes(`\nAccounts: a@example.com (${HOSTILE_ESCAPED}), then Account 2"`), 'the session resumed');
+        const copied = resumed.copy.rows[0]?.at(-1) ?? '';
+        assert.ok(copied.startsWith('a@example.com (') && copied.endsWith('; Account 2'), copied);
         // One account alone hit any, with others on the page: still whose.
         const one = renderFragments(view({ report: accountsReport({ limitWindows: [both.limitWindows[1]] }) }));
         assert.ok(one.body.includes('<li><span>Account 2: five hour limit') && one.body.includes('Each for its whole account'));

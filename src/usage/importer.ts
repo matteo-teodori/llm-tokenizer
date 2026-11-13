@@ -33,7 +33,7 @@ import {
     type TranscriptFile,
 } from './transcripts';
 import type { FileCheckpoint, ReadGuard, UsageStore } from './store';
-import type { OwnerSighting, SessionSighting } from './types';
+import type { SessionOwner, SessionSighting } from './types';
 
 const PROVIDER = 'claude-code';
 
@@ -257,7 +257,10 @@ async function runImport(
 
             let result: ReadResult;
             try {
-                result = readTranscript(file, previous, options.progress);
+                // Where a main transcript was read to, its sessions' owners
+                // then: the lines read on from there are under them.
+                const inForce = previous && file.kind === 'main' ? store.ownersInForce(PROVIDER, file.path) : undefined;
+                result = readTranscript(file, previous, options.progress, inForce);
             } catch (error) {
                 if (guard) {
                     // A failure the reader caught is not a crash.
@@ -415,10 +418,24 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     if (result.restarted === 'parser') {
         store.deleteRequestsFromFile(PROVIDER, file.path);
     }
-    const requests = [...dedupe(result.requests).values()];
+    // A subagent's transcript records no owner: its requests, and the limits
+    // it hit, were made with the account its session was signed in to at
+    // their time, in the main transcript beside it.
+    const timed = file.kind === 'main' ? undefined : ownerByTime(store, file);
+    const requests = [...dedupe(result.requests).values()].map(r => (timed && !r.owner ? { ...r, owner: timed(r.sessionId, r.timestamp) } : r));
     store.upsertRequests(requests);
     store.insertCompactions(PROVIDER, result.compactions);
-    store.insertLimitHits(PROVIDER, result.limitHits);
+    store.insertLimitHits(
+        PROVIDER,
+        result.limitHits.map(h => (timed && !h.owner ? { ...h, owner: timed(h.sessionId, h.timestamp) } : h)),
+    );
+    if (file.kind === 'main') {
+        store.putOwnerChanges(PROVIDER, file.path, file.projectDir, result.ownerChanges, result.firstRequestTs, result.restarted !== null);
+        if (result.restarted === null && previous && previous.offset > 0 && needsOwnerScan(file, previous)) {
+            // The rows an older parser read from the bytes just searched.
+            store.giveOwners(PROVIDER, file.path, result.ownerChanges);
+        }
+    }
 
     // Every session the file's requests name is sighted, not only the file's
     // own: a resumed or forked transcript can hold records copied from an
@@ -446,10 +463,6 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
             cwdTs: own ? result.firstCwdTs : null,
             projectDir: file.projectDir,
             ...span,
-            // Only for a session this file has a row for: an owner naming
-            // one it does not would start that session's row here, in what
-            // may not be its project.
-            owner: ownerOf(result, id, file),
         };
         store.upsertSession(PROVIDER, sighting);
     }
@@ -484,10 +497,31 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     });
 }
 
-/** The owner `result` read for session `id`, with what decides it against another transcript's (see `upsertSession`). */
-function ownerOf(result: ReadResult, id: string, file: TranscriptFile): OwnerSighting | null {
-    const owner = result.owners.get(id);
-    return owner ? { ...owner, named: file.sessionId === id, mtimeMs: result.checkpoint.mtimeMs } : null;
+/**
+ * The account a subagent's request at a time was made with: its session's
+ * owner then, in the main transcripts of the subagent's project folder, as
+ * far as they have been read. They are read first, their path sorting
+ * before the folder beside them, and a subagent runs within a turn, never
+ * across a change of owner. Null before the first change with a time: the
+ * request counts under the session's first owner.
+ */
+function ownerByTime(store: UsageStore, file: TranscriptFile): (sessionId: string, timestamp: number) => SessionOwner | null {
+    const timelines = new Map<string, { sinceTs: number; owner: SessionOwner }[]>();
+    return (sessionId, timestamp) => {
+        let timeline = timelines.get(sessionId);
+        if (!timeline) {
+            timeline = store.ownerTimeline(PROVIDER, sessionId, file.projectDir);
+            timelines.set(sessionId, timeline);
+        }
+        let owner: SessionOwner | null = null;
+        for (const change of timeline) {
+            if (change.sinceTs > timestamp) {
+                break;
+            }
+            owner = change.owner;
+        }
+        return owner;
+    };
 }
 
 function skipReason(error: unknown): SkipReason {

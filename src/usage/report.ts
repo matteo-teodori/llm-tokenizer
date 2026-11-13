@@ -11,7 +11,7 @@ import { ALL_ACCOUNTS, NOT_RECORDED } from './accounts';
 import { BUCKET_MS, emptyTotals, localDate, mergeTotals, type UsageTotals } from './aggregate';
 import { projectLabel, type ProjectRef } from './projects';
 import type { AccountName } from './store';
-import type { BucketSums, Compaction, LimitHit, PromptSize, SessionOwner, StoreCoverage, TranscriptKind } from './types';
+import type { BucketSums, Compaction, LimitHit, OwnerSpan, PromptSize, SessionOwner, StoreCoverage, TranscriptKind } from './types';
 
 /** Today, the last 7 or 30 local days, or everything held. Never "all time". */
 export type RangeKey = 'today' | '7d' | '30d' | 'coverage';
@@ -29,8 +29,12 @@ export interface ReportSession {
     /** Its whole observed span, not only the part in the range. */
     firstTs: number | null;
     lastTs: number | null;
-    /** The account it was signed in to, as its main transcript records it; null where it records none. */
-    owner: SessionOwner | null;
+    /**
+     * The accounts it was signed in to, in time order, as its main
+     * transcripts record them: the first also takes the requests before any
+     * owner record. Empty where they record none.
+     */
+    owners: OwnerSpan[];
 }
 
 export interface ReportInput {
@@ -53,7 +57,7 @@ export interface ReportOptions {
     zone: string;
     now: number;
     scope: 'all' | 'workspace';
-    /** One account's sessions only, by its key, or NOT_RECORDED's; every session when absent or ALL_ACCOUNTS. */
+    /** One account's requests only, by its key, or NOT_RECORDED's; every request when absent or ALL_ACCOUNTS. */
     account?: string;
     /** Rows kept per list, largest first; the rest are counted in `omitted`. */
     maxSessions?: number;
@@ -78,8 +82,8 @@ export interface SessionRow {
     sessionId: string;
     project: ProjectRef;
     label: string;
-    /** Its account's key: see `accountKey`. */
-    account: string;
+    /** The keys of the accounts its requests in the range were made with (see `accountKey`), the first used first. */
+    accounts: string[];
     firstTs: number | null;
     lastTs: number | null;
     /** Its time between requests in the range, pauses over ACTIVE_PAUSE_MS left out: see `activeTime`. */
@@ -91,7 +95,7 @@ export interface SessionRow {
 
 /**
  * An account's requests in the range: an account and organization, by key,
- * or the sessions that record none.
+ * or those of the sessions that record none.
  */
 export interface AccountRow {
     key: string;
@@ -117,7 +121,7 @@ export interface AccountSeen {
 
 /** The hits of one limit window: one limit type and one reset time, on one account. */
 export interface LimitWindow {
-    /** The account of the sessions that hit it, by key: a limit is an account's. */
+    /** The account that hit it, by key: a limit is an account's. */
     account: string;
     limitType: string;
     resetsAt: number | null;
@@ -279,9 +283,11 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
 
     const sessionsById = new Map(input.sessions.map(s => [s.sessionId, s]));
     const account = options.account ?? ALL_ACCOUNTS;
-    const accountOf = (session: ReportSession | undefined) => (session?.owner ? keyOf(session.owner) : NOT_RECORDED);
-    const ofAccount = (session: ReportSession | undefined) => account === ALL_ACCOUNTS || accountOf(session) === account;
-    const inScope = (session: ReportSession | undefined) => (options.scope === 'all' || session?.inWorkspace === true) && ofAccount(session);
+    // The account requests were made with: the one they record, else their
+    // session's first owner, which those before any owner record are under.
+    const ownerOf = (owner: SessionOwner | null | undefined, session: ReportSession | undefined) => owner ?? session?.owners[0]?.owner ?? null;
+    const ofAccount = (key: string) => account === ALL_ACCOUNTS || key === account;
+    const inScope = (session: ReportSession | undefined) => options.scope === 'all' || session?.inWorkspace === true;
 
     let totals = emptyTotals();
     const days = new Map<string, UsageTotals>();
@@ -292,6 +298,8 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     const projects = new Map<string, { row: ProjectRow; sessionIds: Set<string>; models: Map<string, ModelRow> }>();
     const sessions = new Map<string, { row: SessionRow; models: Map<string, ModelRow> }>();
     const accounts = new Map<string, { row: AccountRow; sessionIds: Set<string>; models: Map<string, ModelRow>; projects: Map<string, number> }>();
+    // The accounts each session's requests in the range were made with, and when each was first.
+    const sessionAccounts = new Map<string, Map<string, number>>();
     // Each session's first and last request by bucket, the buckets fetched
     // before the range included, for its active time.
     const activity = new Map<string, Map<number, BucketActivity>>();
@@ -299,7 +307,9 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     for (const sums of input.sums) {
         const date = localDate(sums.bucket * BUCKET_MS, zone);
         const session = sessionsById.get(sums.sessionId);
-        if (!inScope(session)) {
+        const owner = ownerOf(sums.owner, session);
+        const accountKey = owner ? keyOf(owner) : NOT_RECORDED;
+        if (!inScope(session) || !ofAccount(accountKey)) {
             continue;
         }
         noteActivity(activity, sums, inRange(date));
@@ -344,11 +354,10 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         p.sessionIds.add(sums.sessionId);
         addModel(p.models, modelKey, sums, t);
 
-        const accountKey = accountOf(session);
         let a = accounts.get(accountKey);
         if (!a) {
             a = {
-                row: { key: accountKey, owner: session?.owner ?? null, sessions: 0, totals: emptyTotals(), models: [], projects: [] },
+                row: { key: accountKey, owner, sessions: 0, totals: emptyTotals(), models: [], projects: [] },
                 sessionIds: new Set(),
                 models: new Map(),
                 projects: new Map(),
@@ -360,6 +369,9 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         addModel(a.models, modelKey, sums, t);
         const projectName = projectLabel(project);
         a.projects.set(projectName, (a.projects.get(projectName) ?? 0) + t.processed);
+        const used = sessionAccounts.get(sums.sessionId) ?? new Map<string, number>();
+        used.set(accountKey, Math.min(used.get(accountKey) ?? Infinity, sums.firstTs));
+        sessionAccounts.set(sums.sessionId, used);
 
         let s = sessions.get(sums.sessionId);
         if (!s) {
@@ -368,7 +380,7 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
                     sessionId: sums.sessionId,
                     project,
                     label: projectLabel(project),
-                    account: accountKey,
+                    accounts: [],
                     firstTs: session?.firstTs ?? null,
                     lastTs: session?.lastTs ?? null,
                     activeMs: 0,
@@ -399,6 +411,7 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     }));
     const sessionRows = [...sessions.values()].map(({ row, models: m }) => ({
         ...row,
+        accounts: [...(sessionAccounts.get(row.sessionId) ?? [])].sort(([x, a], [y, b]) => a - b || compareText(x, y)).map(([key]) => key),
         activeMs: activeTime(activity.get(row.sessionId)),
         models: byProcessed([...m.values()]),
     }));
@@ -414,9 +427,13 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         .sort((a, b) => compareText(b.date, a.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model))
         .slice(0, MAX_DAY_MODELS)
         .sort((a, b) => compareText(a.date, b.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model));
+    const hitAccount = (hit: LimitHit) => {
+        const owner = ownerOf(hit.owner, sessionsById.get(hit.sessionId));
+        return owner ? keyOf(owner) : NOT_RECORDED;
+    };
     const windows = limitWindows(
-        input.limitHits.filter(hit => ofAccount(sessionsById.get(hit.sessionId))),
-        hit => accountOf(sessionsById.get(hit.sessionId)),
+        input.limitHits.filter(hit => ofAccount(hitAccount(hit))),
+        hitAccount,
         zone,
         inRange,
     );
@@ -555,17 +572,31 @@ function activeTime(buckets: Map<number, BucketActivity> | undefined): number {
 /**
  * Every account in the history, from each session's whole span: when it was
  * used, which tells an account apart, and its number, which names one with
- * no name.
+ * no name. A session counts for each account it was signed in to: its first
+ * owner from its first request, a later one from the first request after
+ * its change, each until the next one's.
  */
 function accountsSeen(sessions: ReportSession[], numbers: ReadonlyMap<string, number> | undefined): AccountSeen[] {
     const seen = new Map<string, AccountSeen>();
-    for (const s of sessions) {
-        const key = s.owner ? keyOf(s.owner) : NOT_RECORDED;
-        const a = seen.get(key) ?? { key, owner: s.owner, sessions: 0, firstTs: null, lastTs: null, ordinal: numbers?.get(key) ?? null };
-        a.sessions++;
-        a.firstTs = s.firstTs === null ? a.firstTs : a.firstTs === null ? s.firstTs : Math.min(a.firstTs, s.firstTs);
-        a.lastTs = s.lastTs === null ? a.lastTs : a.lastTs === null ? s.lastTs : Math.max(a.lastTs, s.lastTs);
+    const counted = new Map<string, string>();
+    const note = (owner: SessionOwner | null, sessionId: string, from: number | null, to: number | null) => {
+        const key = owner ? keyOf(owner) : NOT_RECORDED;
+        const a = seen.get(key) ?? { key, owner, sessions: 0, firstTs: null, lastTs: null, ordinal: numbers?.get(key) ?? null };
+        if (counted.get(key) !== sessionId) {
+            counted.set(key, sessionId);
+            a.sessions++;
+        }
+        a.firstTs = from === null ? a.firstTs : a.firstTs === null ? from : Math.min(a.firstTs, from);
+        a.lastTs = to === null ? a.lastTs : a.lastTs === null ? to : Math.max(a.lastTs, to);
         seen.set(key, a);
+    };
+    for (const s of sessions) {
+        // A later owner no request has followed yet has none to count.
+        const spans = s.owners.filter((o, i) => i === 0 || o.sinceTs !== null);
+        if (spans.length === 0) {
+            note(null, s.sessionId, s.firstTs, s.lastTs);
+        }
+        spans.forEach((o, i) => note(o.owner, s.sessionId, i === 0 ? s.firstTs : o.sinceTs, spans[i + 1]?.sinceTs ?? s.lastTs));
     }
     return [...seen.values()];
 }

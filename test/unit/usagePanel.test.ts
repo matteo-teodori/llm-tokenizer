@@ -229,7 +229,7 @@ suite('usage panel', () => {
             sessionId: 's',
             project: { kind: 'root' as const, path: '/repo' },
             label: 'repo',
-            account: 'none',
+            accounts: ['none'],
             firstTs: 9e15,
             lastTs: 9e15,
             activeMs: 0,

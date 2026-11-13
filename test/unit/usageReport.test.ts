@@ -781,8 +781,8 @@ suite('usage report', () => {
                 ],
             );
             assert.deepStrictEqual(
-                report.sessions.map(s => [s.sessionId, s.account]).sort(),
-                [['a1', keyA], ['a2', keyA2], ['b1', keyB], ['b2', keyB], ['n1', 'none']],
+                report.sessions.map(s => [s.sessionId, s.accounts]).sort(),
+                [['a1', [keyA]], ['a2', [keyA2]], ['b1', [keyB]], ['b2', [keyB]], ['n1', ['none']]],
             );
             // Every account of the history, by when it was first used, the ones with none last.
             assert.deepStrictEqual(
@@ -841,19 +841,69 @@ suite('usage report', () => {
             ]);
         });
 
-        test('one account chosen narrows a range too, and a session the history has no row for counts as recording none', async () => {
+        test('a session resumed under another account after a limit: its tokens and the limit split where the account changed, its subagents\' by their time, within one quarter hour', async () => {
+            transcript('-repo-one', 'r1.jsonl', [
+                // From before Claude Code recorded owners: under the first it records.
+                userRecord('r1', '/repo/one', '2026-10-09T09:50:00Z'),
+                assistantRecord('r1', 'm-r0', '2026-10-09T09:50:01Z', 1000),
+                owner('r1', A, ORG_A),
+                userRecord('r1', '/repo/one', '2026-10-09T10:00:00Z'),
+                assistantRecord('r1', 'm-r1', '2026-10-09T10:00:01Z', 100),
+                limitHit('r1', 'hit-r1', '2026-10-09T10:05:00Z'),
+                // Signed in to B, and resumed.
+                owner('r1', B),
+                userRecord('r1', '/repo/one', '2026-10-09T10:06:00Z'),
+                assistantRecord('r1', 'm-r2', '2026-10-09T10:07:00Z', 40),
+                limitHit('r1', 'hit-r2', '2026-10-09T10:09:00Z'),
+            ]);
+            // Signed in to another account at the end, with no request since: not one of its accounts yet.
+            transcript('-repo-one', 'r2.jsonl', [
+                owner('r2', B),
+                userRecord('r2', '/repo/one', '2026-10-09T11:00:00Z'),
+                assistantRecord('r2', 'm-r3', '2026-10-09T11:00:01Z', 1),
+                owner('r2', A, ORG_A2),
+            ]);
+            transcript('-repo-one', path.join('r1', 'subagents', 'agent-y.jsonl'), [
+                { ...assistantRecord('r1', 'm-r1-early', '2026-10-09T10:02:00Z', 3), isSidechain: true, agentId: 'y' },
+                { ...assistantRecord('r1', 'm-r2-agent', '2026-10-09T10:08:00Z', 20), isSidechain: true, agentId: 'y' },
+            ]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const all = queryReport(store, query());
+            assert.deepStrictEqual(all.accounts.map(a => [a.key, a.sessions, a.totals.output]), [[keyA, 1, 1103], [keyB, 2, 61]]);
+            assert.deepStrictEqual(
+                all.sessions.map(s => [s.sessionId, s.accounts, s.totals.output]),
+                [['r1', [keyA, keyB], 1163], ['r2', [keyB], 1]],
+            );
+            assert.deepStrictEqual(all.limitWindows.map(w => [w.account, w.hits]), [[keyA, 1], [keyB, 1]]);
+            // Each account from its first request in a session to the next one's.
+            assert.deepStrictEqual(all.accountsSeen.map(a => [a.key, a.sessions, a.firstTs, a.lastTs]), [
+                [keyA, 1, Date.parse('2026-10-09T09:50:01Z'), Date.parse('2026-10-09T10:07:00Z')],
+                [keyB, 2, Date.parse('2026-10-09T10:07:00Z'), Date.parse('2026-10-09T11:00:01Z')],
+            ]);
+            const ofA = queryReport(store, query({ account: keyA }));
+            const ofB = queryReport(store, query({ account: keyB }));
+            assert.deepStrictEqual(
+                [ofA.totals.output, ofA.limitWindows.map(w => w.account), ofA.sessions.map(s => s.accounts), ofB.totals.output, ofB.limitWindows.map(w => w.account)],
+                [1103, [keyA], [[keyA]], 61, [keyB]],
+            );
+        });
+
+        test('one account chosen narrows a range too, and a request whose session the history has no row for counts under the owner it records, or none', async () => {
             const store = await history();
             // The last 7 days from the 10th: every one of these.
             const week = queryReport(store, query({ range: '7d', account: keyB }));
             assert.deepStrictEqual([week.totals.output, week.sessions.map(s => s.sessionId).sort()], [305, ['b1', 'b2']]);
             const today = queryReport(store, query({ range: 'today', account: keyB }));
             assert.strictEqual(today.totals.coverage.requests, 0);
-            // A request whose session has no row, as only a hand-made history holds.
-            const none = buildReport(
-                { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
-                { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', account: 'none' },
-            );
-            assert.strictEqual(none.totals.coverage.requests, store.coverage().requests);
+            // A request whose session has no row, as only a hand-made history
+            // holds: a2's alone was made after its session's owner record.
+            const bare = (account: string) =>
+                buildReport(
+                    { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
+                    { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', account },
+                ).totals.coverage.requests;
+            assert.deepStrictEqual([bare('none'), bare(keyA2)], [store.coverage().requests - 1, 1]);
         });
 
         test("the names Claude Code gives now stand over those the history kept, which are kept for the rest", async () => {
@@ -894,7 +944,7 @@ suite('usage report', () => {
             inWorkspace: false,
             firstTs: Date.UTC(2026, 9, 9) + i,
             lastTs: Date.UTC(2026, 9, 9) + i,
-            owner: owner(i),
+            owners: [{ owner: owner(i), sinceTs: null }],
         }));
         // One more session for each of the last ten accounts: the ten with most sessions.
         const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
@@ -908,6 +958,7 @@ suite('usage report', () => {
             speed: null,
             inferenceGeo: null,
             promptSize: null,
+            owner: null,
             requests: 1,
             completeRequests: 1,
             firstTs: Date.UTC(2026, 9, 9, 12),

@@ -27,7 +27,7 @@ export interface ReportQuery {
     workspaceFolders: string[] | null;
     now: number;
     platform: NodeJS.Platform;
-    /** One account's sessions only, by key; every session when absent. */
+    /** One account's requests only, by key; every request when absent. */
     account?: string;
     /** What Claude Code's configuration says now of its accounts. */
     configured?: ConfiguredAccounts;
@@ -106,7 +106,7 @@ export function reportSessions(
             inWorkspace: real !== null && folders.some(folder => isWithin(real, folder, query.platform)),
             firstTs: s.firstTs,
             lastTs: s.lastTs,
-            owner: s.owner ?? null,
+            owners: s.owners,
         };
     });
 }

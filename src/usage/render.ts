@@ -113,7 +113,7 @@ function emptyState(view: PanelView): string | undefined {
                 <ul>
                     <li>each request's token counts, model, effort, speed, where it ran, time and Claude Code version, and its ids: message, request, session, and the subagent or workflow run it came from;</li>
                     <li>the folder each session started in;</li>
-                    <li>the Claude account and organization each session was signed in to, by id, and for each account its number in the history, and the email and organization name Claude Code last gave it, with when;</li>
+                    <li>the Claude account and organization each request was made with, by id, and where each session's changed in its transcript; for each account its number in the history, and the email and organization name Claude Code last gave it, with when;</li>
                     <li>each transcript's path, size, file id and how far it was read, with a hash of the last 64 bytes read, to tell what changed;</li>
                     <li>compactions' sizes, and the usage limits reached, with when they reset;</li>
                     <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
@@ -588,7 +588,7 @@ function accounts(report: UsageReport, view: PanelView): string {
             'processed',
         )}
         ${capNote(report.omitted.accounts, 'accounts')}
-        <p class="note">An account is the Claude account and organization a session was signed in to, as Claude Code records it, its subagents' tokens included; its name is the one Claude Code gave it while this history was kept, or the one you give it.${
+        <p class="note">An account is the Claude account and organization a request was made with, as its session's transcript records it, its subagents' included: a session resumed under another account counts under each for its own requests, and one from before Claude Code recorded accounts under the first it records. Its name is the one Claude Code gave it while this history was kept, or the one you give it.${
             unrecorded
                 ? ' Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in October 2026, those signed in with an API key or through a cloud provider, and those Claude Code had deleted before this version first read them.'
                 : ''
@@ -692,7 +692,7 @@ function sessions(report: UsageReport, view: PanelView): string {
                         compactions: s.compactions.length,
                     },
                     cells: [
-                        `<span title="${escapeHtml(`Session ${s.sessionId}${labels ? `\nAccount: ${labelOf(labels, s.account)}` : ''}`)}">${escapeHtml(
+                        `<span title="${escapeHtml(`Session ${s.sessionId}${labels ? `\n${accountsLine(labels, s.accounts)}` : ''}`)}">${escapeHtml(
                             s.firstTs !== null ? view.formatTime(s.firstTs) : '—',
                         )}</span>`,
                         `<span title="${escapeHtml(s.label)}">${escapeHtml(s.label)}</span>`,
@@ -710,6 +710,11 @@ function sessions(report: UsageReport, view: PanelView): string {
             ACTIVE_PAUSE_MS / 60_000
         } minutes: Claude and its tools at work, and your replies within that.</p>
     </section>`;
+}
+
+/** The accounts a session's requests were made with, as its hover says: one resumed under another names both, the first used first. */
+function accountsLine(labels: Map<string, AccountLabel>, keys: string[]): string {
+    return `${keys.length > 1 ? 'Accounts' : 'Account'}: ${keys.map(key => labelOf(labels, key)).join(', then ')}`;
 }
 
 /** The most models a row's Processed cell names on hover; the rest are counted. */
@@ -919,14 +924,16 @@ function copyRows(view: PanelView): PanelFragments['copy'] {
         String(s.totals.coverage.requests),
         String(s.totals.processed),
         String(Math.round(s.activeMs / 60_000)),
-        labelOf(labels, s.account),
+        s.accounts.map(key => labelOf(labels, key)).join('; '),
     ]);
     const notes = exportNotes(view);
     notes.push(`active_minutes is the time between a session's requests in the range, pauses of over ${ACTIVE_PAUSE_MS / 60_000} minutes left out`);
     if (report && report.omitted.sessions > 0) {
         notes.push(`${report.omitted.sessions} smaller sessions are counted in the totals but not listed`);
     }
-    notes.push("account is the Claude account a session was signed in to, as the panel names it; Not recorded where its transcripts record none");
+    notes.push(
+        "account is the Claude account a session's requests were made with, as the panel names it, those of one resumed under another separated by semicolons, the first used first; Not recorded where its transcripts record none",
+    );
     return { header: ['started', 'project', 'session', 'requests', 'processed', 'active_minutes', 'account'], rows, notes };
 }
 

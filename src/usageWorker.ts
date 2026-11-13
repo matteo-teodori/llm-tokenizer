@@ -463,7 +463,7 @@ let remembered: string | undefined;
 
 /**
  * After each pass, whichever window held the lease: number the accounts the
- * history's sessions were signed in to that have no number yet (see
+ * history's requests were made with that have no number yet (see
  * `numberAccounts`), and keep the names Claude Code's configuration gives
  * its accounts now, so that an account keeps its name in the history once
  * signed out of. The configuration is read again only once it has changed,

@@ -172,7 +172,7 @@ account or one:
   with the share of it that was cache reads;
 - a column per day, in your time zone;
 - models, the main conversation against subagents and workflows, and effort;
-- the Claude accounts the sessions were signed in to, projects and sessions,
+- the Claude accounts the requests were made with, projects and sessions,
   sortable, each session with its active time, and the usage limits you
   reached, newest first; a long list shows ten rows a page, and a swipe or
   the ‹ › beside its heading turns the page;
@@ -198,11 +198,12 @@ work, and your replies within that, rather than how long the session stayed
 open.
 
 **Accounts.** Claude Code records, in each session's transcript, which Claude
-account and organization the session was signed in to, by id; the Accounts
-section splits the tokens by them, a session's subagents included, and the
-filter beside the scope shows one account at a time: its totals, days,
-models, projects, sessions and usage limits, each limit said to be its
-account's. An account is named as Claude Code names it, by its email and,
+account and organization the session is signed in to, by id, and records it
+again when the session is resumed under another; the Accounts section splits
+the tokens by the account each request was made with, a session's subagents
+included, and the filter beside the scope shows one account at a time: its
+totals, days, models, projects, sessions and usage limits, each limit said to
+be the account's that reached it. An account is named as Claude Code names it, by its email and,
 unless it is a personal one, its organization, from Claude Code's own
 configuration file (`~/.claude.json`, or `.claude.json` in
 `CLAUDE_CONFIG_DIR`): the account it is signed in to now, marked *signed in
@@ -211,10 +212,12 @@ so an account you have since signed out of keeps its name; one never named
 there is *Account 3*, by a number the history gives each account as it first
 sees it, and keeps. Below each, when it was used and in which projects tell
 it apart, and **Name…** gives it a name of your own, kept in **Claude Code
-Account Names** by its id (on hover). A session counts under the last account
-Claude Code recorded for it, as Claude Code takes it: one resumed under
-another account counts under that one, whole. Sessions whose transcripts
-record no account are *Not recorded*: those Claude Code wrote before it began
+Account Names** by its id (on hover). A session resumed under another
+account, after a usage limit say, counts under each for its own requests, and
+the limit under the account that reached it; one from before Claude Code
+recorded accounts counts under the first account it records, its older
+requests included. Sessions whose transcripts record no account are *Not
+recorded*: those Claude Code wrote before it began
 recording accounts, around version 2.1.318 in October 2026, those signed in
 with an API key or through a cloud provider, and those whose transcripts
 Claude Code had deleted before this version first read the history.
@@ -256,9 +259,10 @@ Tokenizer) keeps:
   Claude Code version, and its ids: message, request, session, and the
   subagent or workflow run it came from;
 - the folder each session started in;
-- the Claude account and organization each session was signed in to, by id,
-  and for each account its number in the history, and the email and
-  organization name Claude Code last gave it, with when;
+- the Claude account and organization each request was made with, by id,
+  and where each session's changed in its transcript; for each account its
+  number in the history, and the email and organization name Claude Code
+  last gave it, with when;
 - each transcript's path, size, file id and how far it was read, with a hash
   of the last 64 bytes read, to tell what changed;
 - compactions' sizes, and the usage limits reached, with when they reset;
@@ -314,7 +318,7 @@ may leave this extension's storage on disk after the extension is gone.
   signed in with an API key or through a cloud provider, or whose transcript
   Claude Code had deleted before this version read it: Not recorded. A
   session from before then that was resumed since records the account it was
-  resumed with, and counts under it whole.
+  resumed with, and its older requests count under that one.
 
 The records' format is internal to Claude Code and may change with it; the
 diagnostics say when lines could not be read.

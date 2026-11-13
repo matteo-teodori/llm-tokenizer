@@ -81,6 +81,13 @@ export interface UsageRequest extends TokenCounts {
     byteOffset: number;
     /** The parser that produced the row; a newer one always wins. */
     parserVersion: number;
+    /**
+     * The account it was made with: the owner its main transcript records
+     * before it, or for a subagent's, the one its session was signed in to
+     * at its time. Null or absent where none is known yet: it then counts
+     * under its session's first owner (see `OwnerChange`).
+     */
+    owner?: SessionOwner | null;
 }
 
 /** A context compaction: how many tokens a session held before and after it. */
@@ -105,6 +112,8 @@ export interface LimitHit {
     timestamp: number;
     limitType: string;
     resetsAt: number | null;
+    /** The account that hit it, as a request's (see `UsageRequest.owner`). */
+    owner?: SessionOwner | null;
 }
 
 /**
@@ -117,6 +126,37 @@ export interface SessionOwner {
     accountUuid: string;
     /** Null where the record names no organization. */
     organizationUuid: string | null;
+}
+
+/**
+ * A session's owner changing, in one main transcript: a `session-owner`
+ * record naming another account than the one before it there. Claude Code
+ * writes one when a session starts, again with the rest of its metadata,
+ * and when it is resumed under another account; the records after it are
+ * that account's, and those before a session's first are its first owner's.
+ */
+export interface OwnerChange {
+    sessionId: string;
+    /** The record's byte offset in its transcript. */
+    offset: number;
+    owner: SessionOwner;
+    /**
+     * The time of the session's first request after it in that transcript:
+     * where it begins for the session's subagents, whose own transcripts
+     * record no owner. Null until one has been read.
+     */
+    sinceTs: number | null;
+}
+
+/**
+ * A session's owner from a time on, as a report takes it: its owner changes
+ * in time order, the first its first owner, which the requests before any
+ * owner record also count under.
+ */
+export interface OwnerSpan {
+    owner: SessionOwner;
+    /** When its requests began; null where none has followed it yet. */
+    sinceTs: number | null;
 }
 
 /** What one import learnt about a session, merged into what is stored. */
@@ -134,24 +174,6 @@ export interface SessionSighting {
     projectDir: string;
     firstTs: number | null;
     lastTs: number | null;
-    /**
-     * Its owner, when this import read one, with what decides it against the
-     * one stored (see `UsageStore.upsertSession`). Null or absent, none read,
-     * and the stored one stays.
-     */
-    owner?: OwnerSighting | null;
-}
-
-/** An owner as one transcript gives it: the last of its records for the session. */
-export interface OwnerSighting extends SessionOwner {
-    /**
-     * Whether the transcript is the one named after the session, rather than
-     * a copy Claude Code set aside, or another session's file holding a copy
-     * of the record.
-     */
-    named: boolean;
-    /** The transcript's modification time when it was read. */
-    mtimeMs: number;
 }
 
 /** One group of the store's bucket sums: counters summed, a missing one adding nothing. */
@@ -174,6 +196,8 @@ export interface BucketSums {
     inferenceGeo: string | null;
     /** Null where a request missed one of the three counters. */
     promptSize: PromptSize | null;
+    /** The account the requests were made with; null where none is known, and they count under their session's first owner. */
+    owner: SessionOwner | null;
     requests: number;
     /** Requests that reported all four counters. */
     completeRequests: number;

@@ -8,10 +8,13 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Added
 - **Tokens by account.** Claude Code records, in each session's transcript,
-  which Claude account and organization the session was signed in to, by
-  id, since version 2.1.318 or so. A new **Accounts** section splits the
-  tokens by them, a session's subagents included, with each one's sessions,
-  tokens and share, and, below it, when it was used and in which projects.
+  which Claude account and organization the session is signed in to, by id,
+  since version 2.1.318 or so, and again when it is resumed under another.
+  A new **Accounts** section splits the tokens by the account each request
+  was made with, a session's subagents included, so that a session resumed
+  under another account after a usage limit counts under each for its own
+  requests; with each one's sessions, tokens and share, and, below it, when
+  it was used and in which projects.
   An account is named as Claude Code names it, by its email and, unless it
   is a personal one, its organization, from Claude Code's own configuration
   file: the one it is signed in to now, marked *signed in now*, and every
@@ -20,16 +23,18 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   *Account 3*, by a number the history gives each account as it first sees
   it, and keeps, and **Name…** gives it a name of your own, kept in a new
   setting, **Claude Code Account Names**. Sessions with no account recorded,
-  from before Claude Code recorded it, signed in with an API key, or whose
-  transcripts Claude Code had already deleted, are *Not recorded*.
+  from before Claude Code recorded it, signed in with an API key or through
+  a cloud provider, or whose transcripts Claude Code had deleted before this
+  version first read them, are *Not recorded*.
 - **One account at a time.** A filter beside the scope narrows the whole
   page to one account, or to the sessions that record none: totals, days,
   models, projects, sessions and usage limits.
 
 ### Changed
 - **A usage limit is an account's.** Limits reached on two accounts are no
-  longer merged into one, and each says whose it is while the page shows
-  more than one account.
+  longer merged into one: each counts under the account that reached it,
+  even in a session since resumed under another, and says whose it is while
+  the page shows more than one account.
 - **Copy Sessions** adds each session's `account`, and both exports' notes
   say which account they hold when one is chosen.
 - **Updating reads only what it must.** Picking up the accounts of sessions
