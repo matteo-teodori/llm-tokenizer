@@ -745,6 +745,34 @@ suite('usage transcripts', () => {
         );
     });
 
+    test("an error's placeholder is no use of an account: a change waits for a request kept or a limit reached, read now or searched for later", () => {
+        const apiError = (id: string, minute: number) => ({
+            ...assistant(id, 0, { timestamp: at(minute) }),
+            message: { model: '<synthetic>', id, type: 'message', role: 'assistant', content: [{ type: 'text', text: 'API Error: 401' }], usage: { input_tokens: 0, output_tokens: 0 } },
+            isApiErrorMessage: true,
+        });
+        const file = path.join(tmp, 's1.jsonl');
+        // Resumed under B, refused for a bad key, and quit: B was never used.
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)) + line(apiError('e1', 2)));
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual(read.ownerChanges.map(c => [c.owner, c.sinceTs]), [[A, time(1)], [B, null]]);
+        // A limit reached is a use, as a request kept is.
+        fs.appendFileSync(file, line(refused('r1', 3)));
+        assert.deepStrictEqual(readTranscript(mainFile(file), undefined).ownerChanges.map(c => c.sinceTs), [time(1), time(3)]);
+        // The same in the bytes an older parser read, searched for owners.
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(apiError('e2', 4)) + line(assistant('m2', 7, { timestamp: at(5) })));
+        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 };
+        const searched = readTranscript(mainFile(file), older);
+        assert.deepStrictEqual(searched.ownerChanges.map(c => [c.owner, c.sinceTs]), [[A, time(5)]]);
+        // And there too a limit reached begins it.
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(refused('r2', 6)) + line(assistant('m3', 7, { timestamp: at(7) })));
+        const limited = readTranscript(mainFile(file), { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 });
+        assert.deepStrictEqual(limited.ownerChanges.map(c => [c.owner, c.sinceTs]), [[A, time(6)]]);
+        // Read whole, a session that only erred is no request of anyone's: no first request to give an earlier change.
+        fs.writeFileSync(file, line(apiError('e3', 6)));
+        assert.strictEqual(readTranscript(mainFile(file), undefined).firstRequestTs.size, 0);
+    });
+
     test('the requests before a session\'s first owner record are under none, as a session from before Claude Code recorded them, resumed since', () => {
         const file = path.join(tmp, 's1.jsonl');
         fs.writeFileSync(file, line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m2', 7, { timestamp: at(2) })));

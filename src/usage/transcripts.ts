@@ -43,8 +43,9 @@ import type { Compaction, LimitHit, OwnerChange, SessionOwner, TranscriptKind, U
  * 3: the account each request was made with, from its main transcript's
  *    `session-owner` records.
  * 4: only the owner a request's own transcript records before it, none for
- *    a subagent's, and of the changes of owner before a request, only the
- *    last takes its time. Its rows are parser 3's, so parser 3 files are read
+ *    a subagent's; a change of owner begins with the next request kept or
+ *    limit reached, never an error's placeholder, and of several before
+ *    one, only the last. Its rows are parser 3's, so parser 3 files are read
  *    on; the bump is what stops a window still running a build of 2.4.0
  *    made before then, which wrote them otherwise (see `outdated`).
  */
@@ -742,10 +743,34 @@ function useOwnerLine(line: Buffer, offset: number, file: TranscriptFile, readin
     } else if (r?.type === 'assistant') {
         const timestamp = recordTime(r.timestamp);
         const sessionId = boundedString(r.sessionId, MAX_ID) ?? file.sessionId;
-        if (timestamp !== null && sessionId) {
+        if (timestamp !== null && sessionId && isUse(r)) {
             settlePending(reading, sessionId, timestamp);
         }
     }
+}
+
+/**
+ * Whether an assistant record is a use of the account a session is under:
+ * a request kept (a model's, with an id and usage), or a limit reached.
+ * An error's placeholder, such as a request refused for a bad key, is not:
+ * nothing is ever shown under the account for it. As `parseAssistant` keeps
+ * them.
+ */
+function isUse(r: Record<string, unknown>): boolean {
+    const m = objectOf(r.message);
+    const model = m && boundedString(m.model, MAX_MODEL);
+    if (!m || !model) {
+        return false;
+    }
+    return limitOf(r) !== null || (!isSyntheticModel(model) && boundedString(m.id, MAX_ID) !== null && objectOf(m.usage) !== undefined);
+}
+
+/** A refused request's limit: its type, and the record's id. */
+function limitOf(r: Record<string, unknown>): { quota: Record<string, unknown>; uuid: string; limitType: string } | null {
+    const quota = objectOf(r.quotaLimits);
+    const uuid = boundedString(r.uuid, MAX_ID);
+    const limitType = boundedString(quota?.rateLimitType, MAX_ID);
+    return quota && uuid && limitType ? { quota, uuid, limitType } : null;
 }
 
 /**
@@ -792,6 +817,18 @@ function settlePending(reading: Reading, sessionId: string, timestamp: number): 
     reading.pending.delete(sessionId);
 }
 
+/**
+ * A use of the account at `timestamp` (see `isUse`): it begins the owner
+ * change waiting for one, and is the session's first in this read, which
+ * gives an earlier read's change its time, unless a change came first.
+ */
+function began(reading: Reading, sessionId: string, timestamp: number): void {
+    settlePending(reading, sessionId, timestamp);
+    if (!reading.result.firstRequestTs.has(sessionId) && !reading.changed.has(sessionId)) {
+        reading.result.firstRequestTs.set(sessionId, timestamp);
+    }
+}
+
 function parseAssistant(r: Record<string, unknown>, offset: number, file: TranscriptFile, reading: Reading): void {
     const result = reading.result;
     const message = r.message;
@@ -815,10 +852,6 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         count(result.malformed, 'bad-field:sessionId');
         return;
     }
-    settlePending(reading, sessionId, timestamp);
-    if (!result.firstRequestTs.has(sessionId) && !reading.changed.has(sessionId)) {
-        result.firstRequestTs.set(sessionId, timestamp);
-    }
     // The account it was made with, where its own transcript says: the
     // session's owner at this point of it. Where none does, a subagent's
     // transcript among them, a report goes by the time of the request and
@@ -830,10 +863,10 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
     // records are the <synthetic> placeholders with zero usage, so this comes
     // before they are set aside below. It is a log of hits, not a gauge of how
     // much of an allowance is used.
-    const quota = objectOf(r.quotaLimits);
-    const uuid = boundedString(r.uuid, MAX_ID);
-    const limitType = boundedString(quota?.rateLimitType, MAX_ID);
-    if (quota && uuid && limitType) {
+    const limit = limitOf(r);
+    if (limit) {
+        const { quota, uuid, limitType } = limit;
+        began(reading, sessionId, timestamp);
         const resetsAt = quota.resetsAt;
         result.limitHits.push({
             uuid,
@@ -866,6 +899,7 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         count(result.malformed, 'bad-field:message.usage');
         return;
     }
+    began(reading, sessionId, timestamp);
 
     const cacheCreation = objectOf(usage.cache_creation);
     const serverTools = objectOf(usage.server_tool_use);
