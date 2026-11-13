@@ -153,8 +153,8 @@ export interface FileCheckpoint {
 export interface StoredSession extends SessionSighting {
     provider: UsageProvider;
     owners: OwnerSpan[];
-    /** When it first reached a usage limit its transcript records no owner before: a report gives that one by its time. */
-    unownedHitTs: number | null;
+    /** When it first and last reached a usage limit its transcript records no owner before: a report gives those by their time. */
+    unownedHits: { firstTs: number; lastTs: number } | null;
 }
 
 /**
@@ -1221,7 +1221,8 @@ export class UsageStore {
      * the owner before it left out: the first is its first owner, which the
      * requests before any are counted under. Of two at one time, a change a
      * file says now comes after one it said before it was read again. With
-     * them, when it first reached a usage limit that records no owner.
+     * them, when it first and last reached a usage limit that records no
+     * owner.
      */
     sessions(untilMs = Number.MAX_SAFE_INTEGER): StoredSession[] {
         const owners = new Map<string, OwnerSpan[]>();
@@ -1247,9 +1248,9 @@ export class UsageStore {
                         CASE WHEN last_ts >= :until
                              THEN (SELECT max(ts) FROM requests r WHERE r.provider = s.provider AND r.session_id = s.session_id AND r.ts < :until)
                              ELSE last_ts END AS last_ts,
-                        h.ts AS unowned_hit_ts
+                        h.first_hit AS unowned_first_ts, h.last_hit AS unowned_last_ts
                  FROM sessions s
-                 LEFT JOIN (SELECT provider, session_id, min(ts) AS ts FROM limit_hits WHERE owner IS NULL GROUP BY provider, session_id) h
+                 LEFT JOIN (SELECT provider, session_id, min(ts) AS first_hit, max(ts) AS last_hit FROM limit_hits WHERE owner IS NULL GROUP BY provider, session_id) h
                         ON h.provider = s.provider AND h.session_id = s.session_id
                  ORDER BY s.session_id`,
             )
@@ -1264,7 +1265,8 @@ export class UsageStore {
                 firstTs: row.first_ts as number | null,
                 lastTs: row.last_ts as number | null,
                 owners: owners.get(row.session_id as string) ?? [],
-                unownedHitTs: row.unowned_hit_ts as number | null,
+                unownedHits:
+                    row.unowned_first_ts === null ? null : { firstTs: row.unowned_first_ts as number, lastTs: row.unowned_last_ts as number },
             }));
     }
 

@@ -773,7 +773,7 @@ suite('usage report', () => {
             // Refused at once, from before Claude Code recorded owners, then
             // resumed under C and quit before it asked anything: its limit is C's.
             const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
-            transcript('-repo-one', 'c1.jsonl', [limitHit('c1', 'hit-c', '2026-10-09T06:00:00Z'), owner('c1', C)]);
+            transcript('-repo-one', 'c1.jsonl', [limitHit('c1', 'hit-c', '2026-10-09T06:00:00Z'), limitHit('c1', 'hit-c2', '2026-10-09T06:20:00Z'), owner('c1', C)]);
             // One that records no owner at all: the sessions that record none.
             transcript('-repo-one', 'n2.jsonl', [limitHit('n2', 'hit-n2', '2026-10-09T06:30:00Z')]);
             // And one whose owner changed again before anything followed: neither is used, nothing to offer.
@@ -781,15 +781,35 @@ suite('usage report', () => {
             const store = freshStore();
             await importRoots(store, [path.join(tmp, 'root')]);
             const report = queryReport(store, query());
-            assert.deepStrictEqual(report.limitWindows.map(w => [w.account, w.hits]), [[`${C}/`, 1], ['none', 1]]);
+            assert.deepStrictEqual(report.limitWindows.map(w => [w.account, w.hits]), [[`${C}/`, 2], ['none', 1]]);
+            // Used from its first limit to its last.
             assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions, a.firstTs, a.lastTs]), [
-                [`${C}/`, 1, Date.parse('2026-10-09T06:00:00Z'), Date.parse('2026-10-09T06:00:00Z')],
+                [`${C}/`, 1, Date.parse('2026-10-09T06:00:00Z'), Date.parse('2026-10-09T06:20:00Z')],
                 ['none', 1, Date.parse('2026-10-09T06:30:00Z'), Date.parse('2026-10-09T06:30:00Z')],
             ]);
             store.transaction(() => store.numberAccounts('claude-code'));
             assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
             // Chosen, C shows its limit.
             assert.deepStrictEqual(queryReport(store, query({ account: `${C}/` })).limitWindows.map(w => w.account), [`${C}/`]);
+        });
+
+        test('a session a transcript names only by a copied change of owner and limit has its row: its limit is offered as the account it is shown under', async () => {
+            // s9 holds records copied from s10, whose own transcript was gone
+            // before the history first read it: its owner, then a refusal.
+            const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
+            transcript('-repo-one', 's9.jsonl', [
+                userRecord('s9', '/repo/one', '2026-10-09T05:00:00Z'),
+                assistantRecord('s9', 'm-s9', '2026-10-09T05:00:01Z', 3),
+                owner('s10', C),
+                limitHit('s10', 'hit-s10', '2026-10-09T05:10:00Z'),
+            ]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const report = queryReport(store, query());
+            assert.deepStrictEqual(report.limitWindows.map(w => w.account), [`${C}/`]);
+            assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions]), [[`${C}/`, 1], ['none', 1]]);
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
         });
 
         test('tokens are split by account and organization, subagents included, the sessions that record none in a row of their own', async () => {
@@ -1008,7 +1028,7 @@ suite('usage report', () => {
             firstTs: Date.UTC(2026, 9, 9) + i,
             lastTs: Date.UTC(2026, 9, 9) + i,
             owners: [{ owner: owner(i), sinceTs: null }],
-            unownedHitTs: null,
+            unownedHits: null,
         }));
         // One more session for each of the last ten accounts: the ten with most sessions.
         const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
@@ -1072,7 +1092,7 @@ suite('usage report', () => {
             firstTs,
             lastTs: firstTs,
             owners: [{ owner: { accountUuid, organizationUuid: null }, sinceTs: null }],
-            unownedHitTs: null,
+            unownedHits: null,
         });
         const sum = (sessionId: string, input: number) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
@@ -1185,7 +1205,7 @@ suite('usage report', () => {
         const report = buildReport(
             {
                 sums,
-                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null }],
+                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHits: null }],
                 compactions: [],
                 limitHits: [],
                 coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },

@@ -651,12 +651,12 @@ function accountCell(view: PanelView, row: AccountRow, label: AccountLabel | und
               current ? 'Claude Code is signed in to it now' : '',
               `Account ${row.owner.accountUuid}`,
               row.owner.organizationUuid ? `Organization ${row.owner.organizationUuid}` : 'No organization',
-              firstTs !== null && lastTs !== null ? `Requests from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
+              firstTs !== null && lastTs !== null ? `Used from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
               row.projects.length > 0 ? `In ${row.projects.join(', ')}` : '',
           ]
         : [
               'Sessions whose transcripts record no account',
-              firstTs !== null && lastTs !== null ? `Requests from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
+              firstTs !== null && lastTs !== null ? `Used from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
               row.projects.length > 0 ? `In ${row.projects.join(', ')}` : '',
           ];
     // Its account's id names it in the setting; its key finds the button
@@ -875,7 +875,7 @@ export function renderFragments(view: PanelView): PanelFragments {
         empty ??
         (report
             ? report.totals.coverage.requests === 0
-                ? `${banner(view)}<section class="empty-state"><h2>Nothing in this range</h2><p>${
+                ? `${banner(view)}<section class="empty-state"><h2>${report.limitWindows.length > 0 ? 'No request in this range' : 'Nothing in this range'}</h2><p>${
                       report.coverage.requests === 0
                           ? 'No Claude Code requests have been read yet.'
                           : view.reading
@@ -890,7 +890,10 @@ export function renderFragments(view: PanelView): PanelFragments {
                               : view.scope === 'workspace'
                                 ? 'No session in this range started in a folder of this workspace.'
                                 : 'No requests fall in this range.'
-                  }</p></section>`
+                  }${
+                      // Refused requests are no requests, but their limits were reached in the range all the same.
+                      report.limitWindows.length > 0 ? ' Usage limits were reached in it: they are below.' : ''
+                  }</p></section>${limitWindows(report, view)}`
                 : `${banner(view)}${overview(report, view)}${accounts(report, view)}${projects(report, view)}${sessions(report, view)}`
             : `${banner(view)}<p class="muted">Reading Claude Code's records…</p>`);
     const choices = empty ? null : choicesOf(view);

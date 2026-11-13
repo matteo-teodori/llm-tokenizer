@@ -35,8 +35,12 @@ export interface ReportSession {
      * owner record. Empty where they record none.
      */
     owners: OwnerSpan[];
-    /** When it first reached a usage limit that records no owner: one its first owner takes, if it has any. */
-    unownedHitTs: number | null;
+    /**
+     * When it first and last reached a usage limit that records no owner:
+     * each goes to its owner at its time (see `ownerAt`), the first owner
+     * where none has a time yet.
+     */
+    unownedHits: { firstTs: number; lastTs: number } | null;
 }
 
 export interface ReportInput {
@@ -119,7 +123,7 @@ export interface AccountSeen {
     key: string;
     owner: SessionOwner | null;
     sessions: number;
-    /** Its sessions' first and last request. */
+    /** Its sessions' first and last request, or limit reached where a session made none. */
     firstTs: number | null;
     lastTs: number | null;
     /**
@@ -628,7 +632,7 @@ function firstUsed(used: Map<string, number> | undefined): { accounts: string[];
  * account. As `usedAccounts` in store.ts.
  */
 function usedOwners(s: ReportSession): OwnerSpan[] {
-    return s.owners.filter((o, i) => (i === 0 ? s.firstTs !== null || o.sinceTs !== null || s.unownedHitTs !== null : o.sinceTs !== null));
+    return s.owners.filter((o, i) => (i === 0 ? s.firstTs !== null || o.sinceTs !== null || s.unownedHits !== null : o.sinceTs !== null));
 }
 
 /**
@@ -655,12 +659,18 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
     };
     for (const s of sessions) {
         const spans = usedOwners(s);
-        if (spans.length === 0 && (s.firstTs !== null || s.unownedHitTs !== null)) {
-            note(null, s.sessionId, s.firstTs ?? s.unownedHitTs, s.lastTs ?? s.unownedHitTs);
+        const hits = s.unownedHits;
+        if (spans.length === 0 && (s.firstTs !== null || hits !== null)) {
+            note(null, s.sessionId, s.firstTs ?? hits?.firstTs ?? null, s.lastTs ?? hits?.lastTs ?? null);
         }
-        // Dated as the history numbers them: the first from the session's first request, or its own, or its limit's.
+        // Dated as the history numbers them: the first from the session's first request, or its own, or its first limit's.
         spans.forEach((o, i) =>
-            note(o.owner, s.sessionId, i === 0 ? (s.firstTs ?? o.sinceTs ?? s.unownedHitTs) : o.sinceTs, spans[i + 1]?.sinceTs ?? s.lastTs ?? s.unownedHitTs),
+            note(
+                o.owner,
+                s.sessionId,
+                i === 0 ? (s.firstTs ?? o.sinceTs ?? hits?.firstTs ?? null) : o.sinceTs,
+                spans[i + 1]?.sinceTs ?? s.lastTs ?? hits?.lastTs ?? null,
+            ),
         );
     }
     return [...seen.values()];

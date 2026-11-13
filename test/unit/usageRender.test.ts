@@ -568,6 +568,20 @@ suite('usage page', () => {
         assert.ok(renderFragments(view({ report: nothing })).body.includes('No requests fall in this range.'));
     });
 
+    test('a range with no request but limits reached shows them, and says so', () => {
+        const refusedOnly = report({ totals: emptyTotals(), days: [], models: [], kinds: [], efforts: [], projects: [], sessions: [] });
+        const body = renderFragments(view({ report: refusedOnly })).body;
+        assert.ok(body.includes('<h2>No request in this range</h2>'), body);
+        assert.ok(body.includes('No requests fall in this range. Usage limits were reached in it: they are below.'));
+        assert.ok(body.includes('Usage limits reached') && body.includes('2 requests refused from'));
+        // One account chosen, whose only use in the range is a limit: the limit shows.
+        const chosen = renderFragments(view({ report: refusedOnly, account: 'none' })).body;
+        assert.ok(chosen.includes('No request of a session that records no account falls in this range. Usage limits were reached in it') && chosen.includes('2 requests refused from'));
+        // With none, there is nothing in the range at all.
+        const nothing = renderFragments(view({ report: { ...refusedOnly, limitWindows: [] } })).body;
+        assert.ok(nothing.includes('<h2>Nothing in this range</h2>') && !nothing.includes('Usage limits'));
+    });
+
     test("the total's line says how much of it is cache reads, cut rather than rounded up", () => {
         const page = (cacheRead: number, rest: number) =>
             renderFragments(view({ report: report({ totals: { ...totals(cacheRead + rest), input: rest, cacheRead } }) })).body;
@@ -1171,8 +1185,8 @@ suite('usage page', () => {
         assert.ok(body.includes(`<div class="account-hint">2026-10-03 – 2026-10-04 · ${HOSTILE_ESCAPED}</div>`));
         // The sessions that record none, told apart the same way.
         assert.ok(body.includes('<div class="account-hint">2026-09-01 – 2026-09-30 · old</div>'));
-        // Its ids on hover, whole, as the setting keys names by them.
-        assert.ok(body.includes(`Account ${ID_A}\nOrganization a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d`));
+        // Its ids on hover, whole, as the setting keys names by them, and when it was used: its requests, or its limits where a session made none.
+        assert.ok(body.includes(`Account ${ID_A}\nOrganization a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d\nUsed from 2026-10-01`));
         // A button to name each recorded account, by its id, its row's key and its name; none for the sessions that record none.
         assert.ok(body.includes(`data-action="nameAccount" data-account="${ID_A}" data-key="${KEY_A}" aria-label="Name a@example.com (${HOSTILE_ESCAPED})"`), body);
         assert.ok(body.includes(`data-action="nameAccount" data-account="${ID_B}" data-key="${ID_B}/" aria-label="Name Account 2"`));

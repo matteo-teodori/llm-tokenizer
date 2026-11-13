@@ -107,7 +107,7 @@ export function reportSessions(
             firstTs: s.firstTs,
             lastTs: s.lastTs,
             owners: s.owners,
-            unownedHitTs: s.unownedHitTs,
+            unownedHits: s.unownedHits,
         };
     });
 }

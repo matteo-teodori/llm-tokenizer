@@ -437,13 +437,16 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
         }
     }
 
-    // Every session the file's requests name is sighted, not only the file's
+    // Every session the file's records name is sighted, not only the file's
     // own: a resumed or forked transcript can hold records copied from an
-    // earlier session, and each request needs its session's row.
+    // earlier session, and each request, limit and change of owner needs its
+    // session's row, which the report's sessions and accounts are read from.
     const sessionId = file.sessionId ?? result.sessionId;
     const spans = new Map<string, { firstTs: number | null; lastTs: number | null }>();
-    if (sessionId) {
-        spans.set(sessionId, { firstTs: null, lastTs: null });
+    for (const id of [sessionId, ...result.limitHits.map(h => h.sessionId), ...result.ownerChanges.map(c => c.sessionId)]) {
+        if (id && !spans.has(id)) {
+            spans.set(id, { firstTs: null, lastTs: null });
+        }
     }
     for (const r of requests) {
         const span = spans.get(r.sessionId) ?? { firstTs: null, lastTs: null };
