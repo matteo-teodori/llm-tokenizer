@@ -461,6 +461,31 @@ suite('usage panel', () => {
         }
     });
 
+    test("Name… says so too where the label cuts a long email before its organization", async () => {
+        const id = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const acme = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+        const email = `${'x'.repeat(90)}@example.com`;
+        const { service, fake } = fakeService();
+        fake.report = quietReport({
+            accountsSeen: [{ key: `${id}/${acme}`, owner: { accountUuid: id, organizationUuid: acme }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1, organizationOrdinal: 1, organizations: 1 }],
+            accountNames: [{ accountUuid: id, organizationUuid: acme, email, organizationName: 'Acme Corp' }],
+        });
+        const asked: vscode.InputBoxOptions[] = [];
+        const window = vscode.window as unknown as Record<string, unknown>;
+        const original = window.showInputBox;
+        window.showInputBox = (options: vscode.InputBoxOptions) => (asked.push(options), Promise.resolve(undefined));
+        try {
+            UsagePanel.show(context, service, log);
+            await until(() => page.posted.length > 0 || page.pages.length > 1);
+            await settle();
+            page.send({ type: 'nameAccount', account: id });
+            await until(() => asked.length === 1);
+            assert.ok(asked[0]?.prompt?.startsWith(`Shown in Claude Code Usage in place of ${email}, beside its organization.`), asked[0]?.prompt);
+        } finally {
+            Object.assign(window, { showInputBox: original });
+        }
+    });
+
     test('each action the page can ask for does what it says, and nothing else', async () => {
         // Copy and Export write the clipboard, which the editor does not let a
         // test replace, and which is the developer's own: their messages are

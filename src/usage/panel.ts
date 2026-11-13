@@ -327,7 +327,7 @@ export class UsagePanel implements vscode.Disposable {
         const report = this.lastReport;
         const replaces = report ? nameReplaces(account, report.accountsSeen, report.accountNames) : 'its number';
         const plain = report ? accountLabels(report.accountsSeen, report.accountNames, {}) : undefined;
-        const organized = report?.accountsSeen.some(a => a.owner?.accountUuid === account && plain?.get(a.key)?.label.startsWith(`${replaces} (`)) ?? false;
+        const organized = report?.accountsSeen.some(a => a.owner?.accountUuid === account && (plain?.get(a.key)?.organization ?? null) !== null) ?? false;
         const typed = await vscode.window.showInputBox({
             title: 'Name a Claude account',
             prompt: `Shown in Claude Code Usage in place of ${replaces}${organized ? ', beside its organization' : ''}. Leave it empty to show ${

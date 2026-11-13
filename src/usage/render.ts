@@ -995,9 +995,12 @@ function exportNotes(view: PanelView): string[] {
 
 /**
  * The account an export holds, when one is chosen, for its range note. A
- * label is another program's text, an organization's name its admin's: its
- * commas would split the CSV's note line into cells, the one after a comma
- * free to start a formula, so they are written as semicolons.
+ * label is another program's text, an organization's name its admin's. In
+ * the CSV, a note line stays one comment, never quoted, so that a reader
+ * that skips lines starting with `#` still does: a comma or a semicolon in
+ * the label, which a spreadsheet splits cells at, as it is set to, would
+ * start a cell, a formula perhaps, so each is written as a space. What
+ * follows a fixed comma of the note then starts with a word of it.
  */
 function accountNote(view: PanelView): string {
     if (view.account === ALL_ACCOUNTS) {
@@ -1005,7 +1008,9 @@ function accountNote(view: PanelView): string {
     }
     return view.account === NOT_RECORDED
         ? ', the sessions that record no account'
-        : `, account ${labelOf(labelsOf(view), view.account).replace(/,/g, ';')}`;
+        : `, account ${labelOf(labelsOf(view), view.account)
+              .replace(/[,;]/g, ' ')
+              .replace(/\s+/g, ' ')}`;
 }
 
 /** How long the account filter's value must stay put before it is sent. */
@@ -1303,7 +1308,11 @@ ${PAGE_TEXT_HELPERS}
         const next = fragments.choices;
         const select = controls.querySelector('select[data-account-filter]');
         if (!next || !choices || !next.account !== !select) {
-            if (JSON.stringify(next) !== JSON.stringify(choices)) { controls.innerHTML = fragments.controls; }
+            if (JSON.stringify(next) !== JSON.stringify(choices)) {
+                controls.innerHTML = fragments.controls;
+                // What was waiting for the select it replaces is not the new one's.
+                deferred = null;
+            }
             choices = next;
             return;
         }
@@ -1331,10 +1340,13 @@ ${PAGE_TEXT_HELPERS}
     let applied = 0;
     // What the account filter offers now, waiting for it to lose focus.
     let deferred = null;
+    // In use: focused, in a window that has focus. Left focused while the
+    // editor is in the background, it takes updates as they come.
+    const inUse = select => document.activeElement === select && document.hasFocus();
     function updateSelect(select, account) {
         // Not while it is in use: an open list would close under the
         // pointer, and the next arrow key start from somewhere else.
-        if (document.activeElement === select) {
+        if (inUse(select)) {
             deferred = account;
             return;
         }
@@ -1344,6 +1356,7 @@ ${PAGE_TEXT_HELPERS}
             account.options.every((o, i) => options[i].value === o.value && options[i].textContent === o.label && options[i].disabled === !!o.disabled);
         if (!same) {
             const value = select.value;
+            const shownOption = select.options[select.selectedIndex];
             select.replaceChildren(...account.options.map(o => {
                 const option = document.createElement('option');
                 option.value = o.value;
@@ -1351,6 +1364,11 @@ ${PAGE_TEXT_HELPERS}
                 option.disabled = !!o.disabled;
                 return option;
             }));
+            // A choice not yet applied keeps its option, though the update
+            // no longer offers it: the filter never goes blank under it.
+            if ((choosing !== undefined || applied < sent) && shownOption && !account.options.some(o => o.value === value)) {
+                select.appendChild(shownOption);
+            }
             select.value = value;
         }
         if (choosing === undefined && applied >= sent && select.value !== account.value) {
@@ -1363,7 +1381,7 @@ ${PAGE_TEXT_HELPERS}
         if (deferred && select && select.matches && select.matches('select[data-account-filter]')) {
             // Once focus has gone where it goes.
             setTimeout(() => {
-                if (deferred && select.isConnected && document.activeElement !== select) { updateSelect(select, deferred); }
+                if (deferred && select.isConnected && !inUse(select)) { updateSelect(select, deferred); }
             }, 0);
         }
     });
@@ -1465,10 +1483,13 @@ ${PAGE_TEXT_HELPERS}
         const select = e.target;
         if (select && select.matches && select.matches('select[data-account-filter]')) {
             clearTimeout(choosing);
+            // The account chosen, as it was chosen: an update meanwhile can
+            // change what the select offers, never what is sent.
+            const value = select.value;
             choosing = setTimeout(() => {
                 choosing = undefined;
                 sent += 1;
-                vscode.postMessage({ type: 'setAccount', account: select.value, choice: sent });
+                vscode.postMessage({ type: 'setAccount', account: value, choice: sent });
             }, ACCOUNT_SETTLE_MS);
         }
     });

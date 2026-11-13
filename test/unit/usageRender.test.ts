@@ -254,6 +254,7 @@ function livePage(
     const written: string[] = [];
     const document = {
         activeElement: null as unknown,
+        hasFocus: () => true,
         body: { classList: { contains: (name: string) => name === 'vscode-reduce-motion' && motion.vscodeReduced === true } },
         getElementById: (id: string) =>
             id === 'diagnostics'
@@ -319,8 +320,10 @@ interface FakeSelect {
     /** How many times its options were replaced. */
     replaced: number;
     isConnected: boolean;
+    selectedIndex: number;
     matches(selector: string): boolean;
     replaceChildren(...options: { value: string; textContent: string; disabled: boolean }[]): void;
+    appendChild(option: { value: string; textContent: string; disabled: boolean }): void;
 }
 
 function fakeSelect(options: { value: string; label: string; disabled?: true }[], value: string): FakeSelect {
@@ -335,12 +338,18 @@ function fakeSelect(options: { value: string; label: string; disabled?: true }[]
         },
         replaced: 0,
         isConnected: true,
+        get selectedIndex() {
+            return select.options.findIndex(o => o.value === current);
+        },
         matches: selector => selector === 'select[data-account-filter]',
         replaceChildren(...options) {
             select.options = options;
             select.replaced++;
             // As a browser does: new options, the first selected.
             current = options[0]?.value ?? '';
+        },
+        appendChild(option) {
+            select.options = [...select.options, option];
         },
     };
     return select;
@@ -386,6 +395,8 @@ function runPage(
     message(origin: string, fragments: PanelFragments, choice?: number): void;
     /** Focus moved: onto `element`, from where it was. */
     focus(element: unknown): void;
+    /** The editor's window went to the background, or came back: focus stays where it was. */
+    windowFocused(focused: boolean): void;
 } {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
     const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
@@ -402,6 +413,8 @@ function runPage(
         querySelectorAll: () => [],
         addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
         activeElement: null as unknown,
+        windowFocused: true,
+        hasFocus: () => document.windowFocused,
         createElement: () => ({ value: '', textContent: '', disabled: false }),
     };
     vm.runInNewContext(script, {
@@ -437,6 +450,12 @@ function runPage(
             document.activeElement = target;
             if (from) {
                 listeners.focusout({ target: from });
+            }
+        },
+        windowFocused: focused => {
+            document.windowFocused = focused;
+            if (!focused && document.activeElement) {
+                listeners.focusout({ target: document.activeElement });
             }
         },
     };
@@ -1275,6 +1294,46 @@ suite('usage page', () => {
         assert.strictEqual(region.rebuilt, 1);
     });
 
+    test("the account filter, focused in a window in the background, takes updates; a choice waiting keeps its option; one rebuilt forgets what waited for the old", () => {
+        const first = renderFragments(view({ report: accountsReport() }));
+        const select = fakeSelect(first.choices?.account?.options ?? [], 'all');
+        const region = fakeControls(select, []);
+        const page = runPage(first, { choices: region });
+        const withC = accountsReport({
+            accountsSeen: [
+                ...accountsReport().accountsSeen.slice(0, 2),
+                { key: `${ID_C}/`, owner: { accountUuid: ID_C, organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 3, organizationOrdinal: 1, organizations: 1 },
+                ...accountsReport().accountsSeen.slice(2),
+            ],
+        });
+        // Left focused, the editor in the background: an update comes in at once.
+        page.focus(select);
+        page.windowFocused(false);
+        page.elapse();
+        page.message(ORIGIN, renderFragments(view({ report: withC })), 0);
+        assert.deepStrictEqual([select.replaced, select.options.some(o => o.value === `${ID_C}/`)], [1, true]);
+        page.windowFocused(true);
+
+        // C chosen; the next update no longer offers it: the select still shows C, and C is what goes.
+        page.focus(null);
+        page.choose(`${ID_C}/`, select);
+        page.message(ORIGIN, first, 0);
+        assert.strictEqual(select.value, `${ID_C}/`, 'the filter went blank under a choice');
+        page.elapse();
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(page.posted.at(-1))), { type: 'setAccount', account: `${ID_C}/`, choice: 1 });
+
+        // An update waits while the filter is in use; the filter goes and comes back rebuilt: the new one never takes what waited.
+        page.message(ORIGIN, renderFragments(view({ report: withC })), 1);
+        page.focus(select);
+        page.message(ORIGIN, first, 1);
+        page.message(ORIGIN, renderFragments(view()), 1);
+        assert.strictEqual(region.rebuilt, 1);
+        const replaced = select.replaced;
+        page.focus(null);
+        page.elapse();
+        assert.strictEqual(select.replaced, replaced, 'what waited for the old filter went into one no longer shown');
+    });
+
     test("a session's account is on hover and in Copy; a limit says whose it is once there are two; one account's export says which", () => {
         const both = accountsReport({
             limitWindows: [
@@ -1318,8 +1377,16 @@ suite('usage page', () => {
         });
         const page = runPage(renderFragments(view({ account: KEY_A, report: named })));
         const range = page.click('export').split('\n').find(l => l.startsWith('# range: ')) ?? '';
-        assert.ok(range.includes('me@client.example (x;=HYPERLINK('), range);
-        assert.deepStrictEqual(range.split(',').filter(cell => /^\s*[=+\-@]/.test(cell)), [], range);
+        assert.ok(range.includes('me@client.example (x =HYPERLINK('), range);
+        // Read with commas or with semicolons, as a spreadsheet is set to: no cell starts a formula.
+        for (const separator of [',', ';']) {
+            assert.deepStrictEqual(range.split(separator).filter(cell => /^\s*[=+\-@]/.test(cell)), [], `${separator} ${range}`);
+        }
+        const semicolon = runPage(
+            renderFragments(view({ account: KEY_A, report: accountsReport({ ...named, accountNames: [{ ...named.accountNames[0], organizationName: 'x;=1+1' }] }) })),
+        );
+        const line = semicolon.click('export').split('\n').find(l => l.startsWith('# range: ')) ?? '';
+        assert.ok(line.endsWith('(x =1+1)') && !line.includes(';'), line);
     });
 
     test('the diagnostics say which configuration file names the accounts, or that none does', () => {
