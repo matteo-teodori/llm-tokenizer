@@ -35,6 +35,8 @@ export interface ReportSession {
      * owner record. Empty where they record none.
      */
     owners: OwnerSpan[];
+    /** When it first reached a usage limit that records no owner: one its first owner takes, if it has any. */
+    unownedHitTs: number | null;
 }
 
 export interface ReportInput {
@@ -122,13 +124,13 @@ export interface AccountSeen {
     lastTs: number | null;
     /**
      * Its number in the history, what names it when nothing else does, and
-     * its organization's among the account's: as the history gave them, or
-     * as it will, by first use, those not numbered yet. Null for the
-     * sessions that record none.
+     * its organization's among the account's, as the history gave them: null
+     * until a pass has numbered it (by first use, once the history is read
+     * whole), and for the sessions that record none.
      */
     ordinal: number | null;
     organizationOrdinal: number | null;
-    /** How many of the account's organizations the history has numbered: past one, an unnamed one is told by its number. */
+    /** How many organizations the account has in the history, numbered or not yet: past one, an unnamed one is told by its number. */
     organizations: number;
 }
 
@@ -589,16 +591,25 @@ function activeTime(buckets: Map<number, BucketActivity> | undefined): number {
 /**
  * The owner `owners`, a session's in time order, say it was under at `ts`:
  * the last whose requests had begun by then, else its first, which the
- * requests before any owner record also count under.
+ * requests before any owner record also count under. Those with a time come
+ * first, in its order, as `UsageStore.sessions` gives them, so the last to
+ * have begun is found by halving: a session that changed owner thousands of
+ * times costs a report no more than a few steps a row.
  */
-function ownerAt(owners: readonly OwnerSpan[], ts: number): SessionOwner | null {
-    let owner = owners[0]?.owner ?? null;
-    for (const span of owners) {
-        if (span.sinceTs !== null && span.sinceTs <= ts) {
-            owner = span.owner;
+export function ownerAt(owners: readonly OwnerSpan[], ts: number): SessionOwner | null {
+    // The first span that had not begun by `ts`: one with no time yet, or a later one.
+    let low = 0;
+    let high = owners.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        const since = owners[middle].sinceTs;
+        if (since !== null && since <= ts) {
+            low = middle + 1;
+        } else {
+            high = middle;
         }
     }
-    return owner;
+    return owners[low - 1]?.owner ?? owners[0]?.owner ?? null;
 }
 
 /** A session's accounts, by when each was first used in the range: the first few, and how many more. */
@@ -609,12 +620,15 @@ function firstUsed(used: Map<string, number> | undefined): { accounts: string[];
 
 /**
  * The owners of a session that were in force for something: its first,
- * once the session has a request, or a request or limit hit followed it,
- * and every later one a request followed. One changed again before any
- * request, or a session quit before it asked anything, used no account.
+ * once the session has a request, a request or limit hit followed it, or
+ * the session reached a limit that records no owner, which `ownerAt` gives
+ * the first owner when it has no other in time; and every later one a
+ * request or limit hit followed. One changed again before any, or one a
+ * session was resumed under and quit before it asked anything, used no
+ * account. As `usedAccounts` in store.ts.
  */
 function usedOwners(s: ReportSession): OwnerSpan[] {
-    return s.owners.filter((o, i) => (i === 0 ? s.firstTs !== null || o.sinceTs !== null : o.sinceTs !== null));
+    return s.owners.filter((o, i) => (i === 0 ? s.firstTs !== null || o.sinceTs !== null || s.unownedHitTs !== null : o.sinceTs !== null));
 }
 
 /**
@@ -622,7 +636,8 @@ function usedOwners(s: ReportSession): OwnerSpan[] {
  * used, which tells an account apart. A session counts for each account it
  * used: its first owner from its first request, a later one from the first
  * request after its change, each until the next one's. A session that used
- * none counts for the sessions that record none, once it has a request.
+ * none counts for the sessions that record none, once it has a request or
+ * has reached a limit, which a report then gives them too.
  */
 function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
     const seen = new Map<string, AccountSeen>();
@@ -640,11 +655,13 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
     };
     for (const s of sessions) {
         const spans = usedOwners(s);
-        if (spans.length === 0 && s.firstTs !== null) {
-            note(null, s.sessionId, s.firstTs, s.lastTs);
+        if (spans.length === 0 && (s.firstTs !== null || s.unownedHitTs !== null)) {
+            note(null, s.sessionId, s.firstTs ?? s.unownedHitTs, s.lastTs ?? s.unownedHitTs);
         }
-        // Dated as the history numbers them: the first from the session's first request, or its own.
-        spans.forEach((o, i) => note(o.owner, s.sessionId, i === 0 ? (s.firstTs ?? o.sinceTs) : o.sinceTs, spans[i + 1]?.sinceTs ?? s.lastTs));
+        // Dated as the history numbers them: the first from the session's first request, or its own, or its limit's.
+        spans.forEach((o, i) =>
+            note(o.owner, s.sessionId, i === 0 ? (s.firstTs ?? o.sinceTs ?? s.unownedHitTs) : o.sinceTs, spans[i + 1]?.sinceTs ?? s.lastTs ?? s.unownedHitTs),
+        );
     }
     return [...seen.values()];
 }

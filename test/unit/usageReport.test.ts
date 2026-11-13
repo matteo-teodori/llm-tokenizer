@@ -8,7 +8,7 @@ import { importRoots } from '../../src/usage/importer';
 import { comparablePath, isWithin, projectLabel, sessionRoot } from '../../src/usage/projects';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import { inFolders, queryReport, reportSessions, type ReportQuery } from '../../src/usage/queries';
-import { buildReport, rangeSince, rangeUntil, type RangeKey } from '../../src/usage/report';
+import { buildReport, ownerAt, rangeSince, rangeUntil, type RangeKey } from '../../src/usage/report';
 import { createHistory, currentHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
 import { PARSER_VERSION } from '../../src/usage/transcripts';
@@ -769,6 +769,29 @@ suite('usage report', () => {
             return store;
         }
 
+        test('a limit reached in a session with no request is offered and numbered as the account it is shown under, or as the sessions that record none', async () => {
+            // Refused at once, from before Claude Code recorded owners, then
+            // resumed under C and quit before it asked anything: its limit is C's.
+            const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
+            transcript('-repo-one', 'c1.jsonl', [limitHit('c1', 'hit-c', '2026-10-09T06:00:00Z'), owner('c1', C)]);
+            // One that records no owner at all: the sessions that record none.
+            transcript('-repo-one', 'n2.jsonl', [limitHit('n2', 'hit-n2', '2026-10-09T06:30:00Z')]);
+            // And one whose owner changed again before anything followed: neither is used, nothing to offer.
+            transcript('-repo-one', 'd1.jsonl', [owner('d1', A, ORG_A), owner('d1', B)]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const report = queryReport(store, query());
+            assert.deepStrictEqual(report.limitWindows.map(w => [w.account, w.hits]), [[`${C}/`, 1], ['none', 1]]);
+            assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions, a.firstTs, a.lastTs]), [
+                [`${C}/`, 1, Date.parse('2026-10-09T06:00:00Z'), Date.parse('2026-10-09T06:00:00Z')],
+                ['none', 1, Date.parse('2026-10-09T06:30:00Z'), Date.parse('2026-10-09T06:30:00Z')],
+            ]);
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
+            // Chosen, C shows its limit.
+            assert.deepStrictEqual(queryReport(store, query({ account: `${C}/` })).limitWindows.map(w => w.account), [`${C}/`]);
+        });
+
         test('tokens are split by account and organization, subagents included, the sessions that record none in a row of their own', async () => {
             const report = queryReport(await history(), query());
             assert.strictEqual(report.account, 'all');
@@ -985,6 +1008,7 @@ suite('usage report', () => {
             firstTs: Date.UTC(2026, 9, 9) + i,
             lastTs: Date.UTC(2026, 9, 9) + i,
             owners: [{ owner: owner(i), sinceTs: null }],
+            unownedHitTs: null,
         }));
         // One more session for each of the last ten accounts: the ten with most sessions.
         const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
@@ -1048,6 +1072,7 @@ suite('usage report', () => {
             firstTs,
             lastTs: firstTs,
             owners: [{ owner: { accountUuid, organizationUuid: null }, sinceTs: null }],
+            unownedHitTs: null,
         });
         const sum = (sessionId: string, input: number) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
@@ -1160,7 +1185,7 @@ suite('usage report', () => {
         const report = buildReport(
             {
                 sums,
-                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners }],
+                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null }],
                 compactions: [],
                 limitHits: [],
                 coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },
@@ -1182,6 +1207,39 @@ suite('usage report', () => {
             [report.totals.provenance, report.totals.coverage.incompleteRequests, report.totals.input],
             ['partial', 1, 1],
         );
+    });
+});
+
+suite('the owner at a time', () => {
+    test('is the last owner begun by then, else the first, found by halving as by looking at every one', () => {
+        const owners = ['a', 'b', 'c'].map(accountUuid => ({ accountUuid, organizationUuid: null }));
+        // As UsageStore.sessions gives them: those with a time in its order, ties included, then those with none.
+        const linear = (spans: { owner: (typeof owners)[number]; sinceTs: number | null }[], ts: number) => {
+            let owner = spans[0]?.owner ?? null;
+            for (const span of spans) {
+                if (span.sinceTs !== null && span.sinceTs <= ts) {
+                    owner = span.owner;
+                }
+            }
+            return owner;
+        };
+        let seed = 7;
+        const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % n);
+        for (let round = 0; round < 2_000; round++) {
+            const timed = Array.from({ length: random(6) }, () => random(20)).sort((x, y) => x - y);
+            const spans = [...timed.map(sinceTs => ({ owner: owners[random(3)], sinceTs })), ...Array.from({ length: random(3) }, () => ({ owner: owners[random(3)], sinceTs: null }))];
+            for (let ts = -1; ts <= 21; ts++) {
+                assert.strictEqual(ownerAt(spans, ts), linear(spans, ts), JSON.stringify({ spans, ts }));
+            }
+        }
+        assert.strictEqual(ownerAt([], 5), null);
+        // Thousands of changes, a lookup each: a few steps, not a walk of them all.
+        const many = Array.from({ length: 100_000 }, (_, i) => ({ owner: owners[i % 3], sinceTs: i }));
+        const started = performance.now();
+        for (let i = 0; i < 100_000; i++) {
+            ownerAt(many, i);
+        }
+        assert.ok(performance.now() - started < 1_000, `${performance.now() - started} ms`);
     });
 });
 

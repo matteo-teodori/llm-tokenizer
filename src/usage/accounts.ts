@@ -42,8 +42,9 @@ export function isAccountId(value: unknown): value is string {
 /**
  * An account in the history, by key: its number, and its organization's
  * among the account's, as the history gave them (see `numberAccounts`), how
- * many organizations of the account the history numbered, and when it was
- * first used. Null numbers for the sessions that record none.
+ * many organizations the account has in the history, numbered or not yet,
+ * and when it was first used. Null numbers until the history has numbered
+ * it, and for the sessions that record none.
  */
 export interface AccountSeen {
     key: string;

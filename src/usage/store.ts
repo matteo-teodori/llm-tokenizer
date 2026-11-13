@@ -153,6 +153,8 @@ export interface FileCheckpoint {
 export interface StoredSession extends SessionSighting {
     provider: UsageProvider;
     owners: OwnerSpan[];
+    /** When it first reached a usage limit its transcript records no owner before: a report gives that one by its time. */
+    unownedHitTs: number | null;
 }
 
 /**
@@ -601,9 +603,12 @@ function keepSessionOwners(db: DatabaseSync): void {
 /**
  * The sessions whose requests were made with more than one account. Their
  * requests that record none, a subagent's or one in a transcript with no
- * owner record before it, go by their own time in a report: summed by the
- * quarter hour, those made either side of a change of account, as when a
- * limit is reached and the session resumed under another, would be one.
+ * owner record before it, go by their time in a report: summed by the
+ * quarter hour alone, those made either side of a change of account, as
+ * when a limit is reached and the session resumed under another, would be
+ * one. They are summed apart by the latest change begun by their time,
+ * which tells the owner a report gives them (see `ownerAt` in report.ts):
+ * one row more per change, not per request.
  */
 const SWITCHED_SESSIONS = `SELECT session_id FROM owner_changes WHERE since_ts IS NOT NULL GROUP BY session_id HAVING count(DISTINCT owner) > 1`;
 
@@ -1154,7 +1159,8 @@ export class UsageStore {
      * time order, those no request has followed yet last, and one that names
      * the owner before it left out: the first is its first owner, which the
      * requests before any are counted under. Of two at one time, a change a
-     * file says now comes after one it said before it was read again.
+     * file says now comes after one it said before it was read again. With
+     * them, when it first reached a usage limit that records no owner.
      */
     sessions(untilMs = Number.MAX_SAFE_INTEGER): StoredSession[] {
         const owners = new Map<string, OwnerSpan[]>();
@@ -1176,11 +1182,15 @@ export class UsageStore {
         }
         return this.db
             .prepare(
-                `SELECT provider, session_id, root, cwd, cwd_ts, project_dir, first_ts,
+                `SELECT s.provider, s.session_id, root, cwd, cwd_ts, project_dir, first_ts,
                         CASE WHEN last_ts >= :until
                              THEN (SELECT max(ts) FROM requests r WHERE r.provider = s.provider AND r.session_id = s.session_id AND r.ts < :until)
-                             ELSE last_ts END AS last_ts
-                 FROM sessions s ORDER BY session_id`,
+                             ELSE last_ts END AS last_ts,
+                        h.ts AS unowned_hit_ts
+                 FROM sessions s
+                 LEFT JOIN (SELECT provider, session_id, min(ts) AS ts FROM limit_hits WHERE owner IS NULL GROUP BY provider, session_id) h
+                        ON h.provider = s.provider AND h.session_id = s.session_id
+                 ORDER BY s.session_id`,
             )
             .all({ until: untilMs })
             .map(row => ({
@@ -1193,6 +1203,7 @@ export class UsageStore {
                 firstTs: row.first_ts as number | null,
                 lastTs: row.last_ts as number | null,
                 owners: owners.get(row.session_id as string) ?? [],
+                unownedHitTs: row.unowned_hit_ts as number | null,
             }));
     }
 
@@ -1201,14 +1212,18 @@ export class UsageStore {
      * effort and owner, from `sinceMs` on and before `untilMs`. Every current
      * UTC offset is a multiple of 15 minutes, so no bucket straddles a local
      * midnight, and the caller folds them into days in any zone exactly. A
-     * session made with more than one account has each request that records
-     * none summed on its own (see SWITCHED_SESSIONS).
+     * session made with more than one account has its requests that record
+     * none summed apart by the change of owner in force (see
+     * SWITCHED_SESSIONS).
      */
     bucketSums(sinceMs: number, untilMs = Number.MAX_SAFE_INTEGER): BucketSums[] {
         const owners = this.owners();
         // Looked for first: most histories have none, and their sums cost no more for it.
         const switched = this.db.prepare(`SELECT EXISTS (${SWITCHED_SESSIONS}) AS any`).get() as { any: number };
-        const exact = switched.any ? `CASE WHEN owner IS NULL AND session_id IN (${SWITCHED_SESSIONS}) THEN ts END` : 'NULL';
+        const exact = switched.any
+            ? `CASE WHEN owner IS NULL AND session_id IN (${SWITCHED_SESSIONS})
+                    THEN (SELECT max(o.since_ts) FROM owner_changes o WHERE o.session_id = requests.session_id AND o.since_ts <= requests.ts) END`
+            : 'NULL';
         return this.db
             .prepare(
                 `SELECT ts / ${BUCKET_MS} AS bucket, session_id, model, variant, kind, effort, speed, inference_geo, owner,
@@ -1467,16 +1482,18 @@ export class UsageStore {
     /**
      * Every account and organization the history's requests were made with,
      * as its sessions' owners say: each session's first owner, once the
-     * session has a request or a limit hit, and every later one a request
-     * followed, with when it was first used, by first use. A session's first
-     * owner is used from its first request, the requests before any owner
-     * record included; a later one from the request after its change.
+     * session has a request, a request or limit hit followed it, or the
+     * session reached a limit that records no owner, which a report gives it;
+     * and every later one a request or limit hit followed: with when it was
+     * first used, by first use. A session's first owner is used from its
+     * first request, the requests before any owner record included; a later
+     * one from the request after its change. As `usedOwners` in report.ts.
      */
     private usedAccounts(provider: UsageProvider): { id: number; owner: SessionOwner; ordinal: number | null }[] {
         return this.db
             .prepare(
                 `SELECT a.id, a.ordinal, a.account_uuid, a.organization_uuid,
-                        min(CASE WHEN o.n = 1 THEN coalesce(s.first_ts, o.since_ts) ELSE o.since_ts END) AS first_used
+                        min(CASE WHEN o.n = 1 THEN coalesce(s.first_ts, o.since_ts, h.ts) ELSE o.since_ts END) AS first_used
                  FROM (
                      SELECT owner, session_id, since_ts,
                             row_number() OVER (PARTITION BY session_id ORDER BY since_ts IS NULL, since_ts, retired = 0, retired, file, offset) AS n
@@ -1484,7 +1501,9 @@ export class UsageStore {
                  ) AS o
                  JOIN accounts a ON a.id = o.owner
                  LEFT JOIN sessions s ON s.provider = :provider AND s.session_id = o.session_id
-                 WHERE (o.n = 1 AND (s.first_ts IS NOT NULL OR o.since_ts IS NOT NULL)) OR (o.n > 1 AND o.since_ts IS NOT NULL)
+                 LEFT JOIN (SELECT session_id, min(ts) AS ts FROM limit_hits WHERE provider = :provider AND owner IS NULL GROUP BY session_id) h
+                        ON h.session_id = o.session_id
+                 WHERE (o.n = 1 AND (s.first_ts IS NOT NULL OR o.since_ts IS NOT NULL OR h.ts IS NOT NULL)) OR (o.n > 1 AND o.since_ts IS NOT NULL)
                  GROUP BY a.id
                  ORDER BY first_used IS NULL, first_used, a.account_uuid, a.organization_uuid`,
             )

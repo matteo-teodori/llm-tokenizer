@@ -197,7 +197,11 @@ export interface BucketSums {
     inferenceGeo: string | null;
     /** Null where a request missed one of the three counters. */
     promptSize: PromptSize | null;
-    /** The account the requests were made with; null where none is known, and they count under their session's first owner. */
+    /**
+     * The account the requests were made with, where their own transcript
+     * records it before them; null elsewhere, and a report takes their
+     * session's owner at their time.
+     */
     owner: SessionOwner | null;
     requests: number;
     /** Requests that reported all four counters. */

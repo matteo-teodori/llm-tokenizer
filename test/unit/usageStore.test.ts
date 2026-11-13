@@ -8,6 +8,7 @@ import { dedupe } from '../../src/usage/accounting';
 import { totalsOf } from '../../src/usage/aggregate';
 import { createHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { queryReport } from '../../src/usage/queries';
+import { ownerAt } from '../../src/usage/report';
 import { LEASE_TAKEOVER_MS, SCHEMA_VERSION, UsageStore, loadSqlite, type FileCheckpoint, type OpenResult } from '../../src/usage/store';
 import { OWNERS_SINCE, PARSER_VERSION } from '../../src/usage/transcripts';
 import type { SessionOwner, UsageRequest } from '../../src/usage/types';
@@ -1094,6 +1095,44 @@ suite('usage history store', () => {
             });
             assert.deepStrictEqual(owners()['session-a'], [{ owner: A, sinceTs: null }], name);
         }
+    });
+
+    test('a session used with two accounts has its requests that record none summed apart by the change in force, not one by one', () => {
+        const store = ready(open());
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        // One quarter hour: A from 10:05, B from 10:10.
+        const t = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: t(1), lastTs: t(13) });
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, t(5)), change(500, B, t(10))], new Map(), false);
+            store.upsertRequests(
+                [1, 2, 6, 7, 10, 11, 12, 13].map(minute => req({ messageId: `x${minute}`, file: SUB, kind: 'task', timestamp: t(minute), input: minute })),
+            );
+        });
+        const rows = store.bucketSums(0).map(r => [r.requests, r.input, r.firstTs, r.lastTs]);
+        // Before any change, under A, under B from the moment it began: three rows, one per change in force, whatever the requests.
+        assert.deepStrictEqual(rows.sort((x, y) => x[2] - y[2]), [
+            [2, 3, t(1), t(2)],
+            [2, 13, t(6), t(7)],
+            [4, 46, t(10), t(13)],
+        ]);
+        // Each row goes to one owner, as each of its requests would.
+        const owners = store.sessions()[0].owners;
+        assert.deepStrictEqual(
+            store.bucketSums(0).map(r => [r.input, ownerAt(owners, r.firstTs), ownerAt(owners, r.lastTs)]).sort((x, y) => (x[0] as number) - (y[0] as number)),
+            [
+                [3, A, A],
+                [13, A, A],
+                [46, B, B],
+            ],
+        );
+        // A session that never changed account is summed as before, by the quarter hour.
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-b', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: t(1), lastTs: t(2) });
+            store.putOwnerChanges('claude-code', '/root/projects/p/session-b.jsonl', 'p', [change(0, A, t(1), 'session-b')], new Map(), false);
+            store.upsertRequests([1, 2].map(minute => req({ messageId: `y${minute}`, sessionId: 'session-b', file: '/root/projects/p/session-b/subagents/agent-y.jsonl', kind: 'task', timestamp: t(minute), input: 100 })));
+        });
+        assert.deepStrictEqual(store.bucketSums(0).filter(r => r.sessionId === 'session-b').map(r => r.requests), [2]);
     });
 
     test('an account first used in a session with no request, only a limit reached, is numbered by when it was', () => {
