@@ -166,14 +166,16 @@ the T, right-click the editor's title bar and choose
 <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects, turns to the second page of its sessions, each with its active time, and the status item's tooltip shows the running session's context">
 
 **The panel** shows today, the last 7 or 30 days, or everything since the
-history starts, for all projects or for this workspace:
+history starts, for all projects or for this workspace, and for every Claude
+account or one:
 - tokens processed, split into input, cache writes, cache reads and output,
   with the share of it that was cache reads;
 - a column per day, in your time zone;
 - models, the main conversation against subagents and workflows, and effort;
-- projects and sessions, sortable, each session with its active time, and
-  the usage limits you reached, newest first; a long list shows ten rows a
-  page, and a swipe or the ‹ › beside its heading turns the page;
+- the Claude accounts the sessions were signed in to, projects and sessions,
+  sortable, each session with its active time, and the usage limits you
+  reached, newest first; a long list shows ten rows a page, and a swipe or
+  the ‹ › beside its heading turns the page;
 - diagnostics: what was read, what was skipped and why, and where from.
 
 <picture>
@@ -194,6 +196,28 @@ many of the files it has gone through, and shows the totals as they grow.
 included, leaving out every pause of over 15 minutes: Claude and its tools at
 work, and your replies within that, rather than how long the session stayed
 open.
+
+**Accounts.** Claude Code records, in each session's transcript, which Claude
+account and organization the session was signed in to, by id; the Accounts
+section splits the tokens by them, a session's subagents included, and the
+filter beside the scope shows one account at a time: its totals, days,
+models, projects, sessions and usage limits, each limit said to be its
+account's. An account is named as Claude Code names it, by its email and,
+unless it is a personal one, its organization, from Claude Code's own
+configuration file (`~/.claude.json`, or `.claude.json` in
+`CLAUDE_CONFIG_DIR`): the account it is signed in to now, marked *signed in
+now*, and every account it keeps a list of. The history keeps those names,
+so an account you have since signed out of keeps its name; one never named
+there is *Account 3*, by a number the history gives each account as it first
+sees it, and keeps. Below each, when it was used and in which projects tell
+it apart, and **Name…** gives it a name of your own, kept in **Claude Code
+Account Names** by its id (on hover). A session counts under the last account
+Claude Code recorded for it, as Claude Code takes it: one resumed under
+another account counts under that one, whole. Sessions whose transcripts
+record no account are *Not recorded*: those Claude Code wrote before it began
+recording accounts, around version 2.1.318 in October 2026, those signed in
+with an API key or through a cloud provider, and those whose transcripts
+Claude Code had deleted before this version first read the history.
 
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
 the context of the Claude Code session running in this workspace is, as a
@@ -221,8 +245,9 @@ by what a request's price depends on besides its model: its speed (`fast` is
 billed higher), where it ran (`us` is billed higher), and its prompt size (up to
 100,000 tokens, up to 200,000, or more: Claude Haiku 5.5 prices a request over
 100,000 higher). Its notes say how to read each of those. It gives no prices.
-**Copy** copies the sessions, with each one's active minutes, for a
-spreadsheet.
+**Copy** copies the sessions, with each one's active minutes and account, for
+a spreadsheet. Both say in their notes which account they hold, when one is
+chosen.
 
 **What is kept, and where.** A database in this extension's own storage
 (the `claude-code-usage` folder in VS Code's global storage for LLM
@@ -244,19 +269,27 @@ Prompts, responses, thinking and tool inputs or results are never kept, and
 nothing is sent anywhere. The history outlives Claude Code's own records,
 which Claude Code deletes after 30 days by default. A history that can no
 longer be read is set aside, left as it is, and a new one started, and the
-panel says so until it is cleared; a version that converts the history to a
-newer format keeps a copy of it as it was. **Clear Claude Code Usage
+panel says so until it is cleared; a version that builds part of the history
+anew keeps a copy of it as it was, and the copies earlier versions kept are
+removed once the history is converted. **Clear Claude Code Usage
 History** removes the history and every such copy, and leaves nothing of
 them readable on disk. What another window still holds, a copy it has open or a
 read it has not finished, goes once that window lets go of it, the next
 time any window uses the history; Clear says when a copy has to wait.
 Anything still on disk is read again at the next refresh. The panel also
-remembers its range, its scope and your time zone, in the editor's own
-state.
+remembers its range, its scope, the account chosen and your time zone, in the
+editor's own state.
+
+From Claude Code's configuration file it reads only the account signed in now
+(`oauthAccount`) and the accounts it keeps a list of (`knownAccounts`): their
+ids, emails and organizations' names. Nothing else in that file is parsed,
+and the diagnostics say which file it was.
 
 Its settings are machine settings, so a repository's settings cannot turn it
-on or point it at another folder. In a dev container, though, the container's
-settings can come from the repository's `devcontainer.json`.
+on or point it at another folder; the names you give accounts are an
+application setting, which only your own settings hold. In a dev container,
+though, the container's settings can come from the repository's
+`devcontainer.json`.
 
 **Before uninstalling**, run **Clear Claude Code Usage History**: the editor
 may leave this extension's storage on disk after the extension is gone.
@@ -277,6 +310,11 @@ may leave this extension's storage on disk after the extension is gone.
 - Records dated more than a day after this machine's clock, which only a
   wrong clock writes: they are kept, and counted once this clock reaches
   them.
+- The account of a session Claude Code wrote before it recorded accounts,
+  signed in with an API key or through a cloud provider, or whose transcript
+  Claude Code had deleted before this version read it: Not recorded. A
+  session from before then that was resumed since records the account it was
+  resumed with, and counts under it whole.
 
 The records' format is internal to Claude Code and may change with it; the
 diagnostics say when lines could not be read.
