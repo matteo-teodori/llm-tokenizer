@@ -1013,8 +1013,8 @@ suite('usage history store', () => {
         assert.deepStrictEqual(again.accountNames().map(n => n.email), ['a@example.com']);
         assert.strictEqual(again.accountNumbers().size, 0);
         assert.ok(again.hasUnnumberedAccounts('claude-code'));
-        // The main transcript is searched again, a subagent's never, and a window still running that build stops.
-        assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion], [OWNERS_SINCE - 1, 3]);
+        // The main transcript is searched again; a subagent's holds what this parser would, and is its from now. A window still running that build stops.
+        assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
         assert.ok(again.outdated(3) && !again.outdated(PARSER_VERSION));
         assert.ok(!again.acquireLease('import', 'a window of that build', 3));
         // The search finds the changes again where they were: what it says replaces what was kept.
@@ -1145,8 +1145,8 @@ suite('usage history store', () => {
         assert.deepStrictEqual(again.limitHits().map(h => h.owner), [null]);
         assert.deepStrictEqual(
             [again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion],
-            [OWNERS_SINCE - 1, 3],
-            'the main transcript is searched again; a subagent is read on',
+            [OWNERS_SINCE - 1, PARSER_VERSION],
+            "the main transcript is searched again; a subagent's is this parser's",
         );
         // Of two changes given one time, only the last had it.
         const owners = Object.fromEntries(again.sessions().map(s => [s.sessionId, s.owners]));
@@ -1166,6 +1166,33 @@ suite('usage history store', () => {
         const third = ready(open());
         assert.deepStrictEqual([...third.requests()].map(r => r.owner), [A, B, null]);
         assert.deepStrictEqual([...third.accountNumbers()], numbers);
+    });
+
+    test('a history the last builds before 2.4.0 wrote, at parser 4, is undone as well, once', () => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(70) });
+            store.upsertRequests([req({ messageId: 'm1', file: MAIN, parserVersion: 4, byteOffset: 50, timestamp: at(10), owner: A })]);
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10))], new Map(), false);
+            store.numberAccounts('claude-code');
+            store.putFile(checkpoint(MAIN, 'session-a', 4));
+            store.putFile({ ...checkpoint(SUB, 'session-a', 4), kind: 'task', agentId: 'x' });
+        });
+        store.close();
+        opened.length = 0;
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '4');
+                  DROP INDEX owner_changes_session; CREATE INDEX owner_changes_session ON owner_changes (session_id);`);
+        raw.close();
+        const again = ready(open());
+        assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
+        assert.deepStrictEqual(indexColumns(again), ['session_id', 'since_ts']);
+        assert.strictEqual(again.accountNumbers().size, 0);
+        assert.ok(again.outdated(4) && !again.outdated(PARSER_VERSION));
+        assert.strictEqual(again.transaction(() => again.undoPrereleasePasses()), false, 'nothing of that build left to undo');
     });
 
     test("what a pass of a build before 2.4.0 already under way writes after the history is brought is undone by the next pass", () => {
@@ -1193,6 +1220,11 @@ suite('usage history store', () => {
         // Its session's limits go to the report's time; another session's, this build's, stay.
         assert.deepStrictEqual(store.limitHits().map(h => [h.uuid, h.owner]), [['hb', A], ['ha', null]]);
         assert.deepStrictEqual([store.getFile('claude-code', MAIN)?.parserVersion, store.getFile('claude-code', OTHER)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
+        // The subagent's file, gone or not, is this parser's now: the next pass finds nothing to undo, and leaves this build's limits be.
+        assert.strictEqual(store.getFile('claude-code', SUB)?.parserVersion, PARSER_VERSION);
+        store.transaction(() => store.insertLimitHits('claude-code', [{ uuid: 'ha2', sessionId: 'session-a', timestamp: at(66), limitType: 'five_hour', resetsAt: null, owner: A }]));
+        assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), false);
+        assert.deepStrictEqual(store.limitHits().map(h => [h.uuid, h.owner]), [['hb', A], ['ha', null], ['ha2', A]]);
     });
 
     test('a history at version 4 that a build before 2.4.0 made, with one owner per session, keeps it for a session with no request, one whose file another shares, and one set aside', () => {

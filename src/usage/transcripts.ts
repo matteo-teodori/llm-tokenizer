@@ -40,18 +40,20 @@ import type { Compaction, LimitHit, OwnerChange, SessionOwner, TranscriptKind, U
 /**
  * Bumped whenever what a line becomes changes.
  * 2: each request's `usage.speed` and `usage.inference_geo`.
- * 3: the account each request was made with, from its main transcript's
- *    `session-owner` records.
- * 4: only the owner a request's own transcript records before it, none for
+ * 3, 4: builds of 2.4.0 made before its release, and no other: the account
+ *    each request was made with, from its main transcript's `session-owner`
+ *    records, some taken by time, and changes of owner begun at an error's
+ *    placeholder.
+ * 5: only the owner a request's own transcript records before it, none for
  *    a subagent's; a change of owner begins with the next request kept or
  *    limit reached, never an error's placeholder, and of several before
- *    one, only the last. Parser 3 was only ever a build of 2.4.0 made before
- *    its release: its main transcripts are searched for their owners again,
- *    the owners it took by time dropped (see `completeSchema4` in store.ts),
- *    and its other files read on; the bump also stops a window still running
- *    one (see `outdated`).
+ *    one, only the last. What parsers 3 and 4 wrote is undone where it
+ *    differs (see `completeSchema4` in store.ts): their main transcripts are
+ *    searched for their owners again, the owners they took by time dropped,
+ *    and their other files kept as they are; the bump also stops a window
+ *    still running one (see `outdated`).
  */
-export const PARSER_VERSION = 4;
+export const PARSER_VERSION = 5;
 
 /**
  * The oldest parser whose rows this one keeps. A file it or a later one read

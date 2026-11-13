@@ -1070,30 +1070,47 @@ suite('usage transcripts', () => {
         assert.deepStrictEqual(owners(store), { a1: null, m1: A });
     });
 
-    test('a history the parser before this one read is read on from its checkpoints: no record read again, every owner as a full read gives it', async () => {
-        // That parser already read owners: only what a line becomes changed since.
-        assert.ok(PARSER_VERSION - 1 >= OWNERS_SINCE);
+    test('a history a build of 2.4.0 made before its release read, parser 3 or 4, has its main transcripts searched again: what a full read gives, no row read again', async () => {
         const dir = path.join(tmp, 'projects', 'p');
         fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
         const main = path.join(dir, 's1.jsonl');
         const agent = path.join(dir, 's1', 'subagents', 'agent-a1.jsonl');
-        fs.writeFileSync(main, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)) + line(assistant('m2', 9, { timestamp: at(5) })));
-        fs.writeFileSync(agent, line(assistant('a1', 3, { isSidechain: true, agentId: 'a1', timestamp: at(6) })));
-        const store = freshStore();
-        await importRoots(store, [tmp]);
-        const full = split(store);
-        assert.deepStrictEqual(full, { output: { [KEY_A]: 5, [KEY_B]: 9 + 3 }, limits: [] });
-        assert.ok(sqlite, 'this runtime has no node:sqlite');
-        const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
-        raw.exec(`UPDATE requests SET parser_version = ${PARSER_VERSION - 1}; UPDATE files SET parser_version = ${PARSER_VERSION - 1}`);
-        raw.close();
-        const summary = await importRoots(store, [tmp]);
-        assert.deepStrictEqual([summary.read, summary.restarted, summary.records], [2, 0, 0]);
-        assert.deepStrictEqual(split(store), full);
-        assert.deepStrictEqual(
-            [main, agent].map(f => store.getFile('claude-code', fs.realpathSync(f))?.parserVersion),
-            [PARSER_VERSION, PARSER_VERSION],
+        // Resumed under B, refused there for a bad key, then B's own request: B begins with it, not with the error.
+        const apiError = { ...(assistant('e1', 0, { timestamp: at(4) }) as Record<string, unknown>), message: { model: '<synthetic>', id: 'e1', type: 'message', role: 'assistant', content: [], usage: { input_tokens: 0, output_tokens: 0 } } };
+        fs.writeFileSync(
+            main,
+            line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)) + line(apiError) + line(assistant('m2', 9, { timestamp: at(6) })),
         );
+        // The subagent's request between the error and B's first: still A's.
+        fs.writeFileSync(agent, line(assistant('a1', 3, { isSidechain: true, agentId: 'a1', timestamp: at(5) })));
+        for (const prerelease of [3, 4]) {
+            for (const store of stores.splice(0)) {
+                store.close();
+            }
+            fs.rmSync(path.join(tmp, 'store'), { recursive: true, force: true });
+            const store = freshStore();
+            assert.ok(await importUnderLease(store, [tmp], 'window-a'));
+            const full = split(store);
+            assert.deepStrictEqual(full, { output: { [KEY_A]: 5 + 3, [KEY_B]: 9 }, limits: [] }, `parser ${prerelease}`);
+            // As that build left it: its checkpoints, the time it gave B (the error's), and itself the newest to hold the lease.
+            assert.ok(sqlite, 'this runtime has no node:sqlite');
+            const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+            raw.exec(`UPDATE requests SET parser_version = ${prerelease}; UPDATE files SET parser_version = ${prerelease};
+                      UPDATE owner_changes SET since_ts = ${Date.parse(at(4))} WHERE since_ts = ${Date.parse(at(6))};
+                      INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '${prerelease}');`);
+            raw.close();
+            assert.notDeepStrictEqual(split(store), full, `parser ${prerelease}: the error's time gave B the subagent's request`);
+            const summary = await importUnderLease(store, [tmp], 'window-a');
+            assert.ok(summary);
+            assert.deepStrictEqual([summary.restarted, summary.records], [0, 0], `parser ${prerelease}: no row read again`);
+            assert.deepStrictEqual(split(store), full, `parser ${prerelease}`);
+            assert.deepStrictEqual(
+                [main, agent].map(f => store.getFile('claude-code', fs.realpathSync(f))?.parserVersion),
+                [PARSER_VERSION, PARSER_VERSION],
+            );
+            // And done with: the next pass finds nothing of that build.
+            assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), false);
+        }
     });
 
     test("after an older parser's import, a session in two project folders gives every limit what a full read gives, whichever folder comes first", async () => {

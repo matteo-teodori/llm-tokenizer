@@ -473,14 +473,15 @@ const MIGRATE_TO_4 = OWNER_COLUMNS + OWNER_TABLES;
 
 /**
  * The first parser that keeps only the owner a request's own transcript
- * records before it (see PARSER_VERSION in transcripts.ts). A history whose
- * newest parser is older was last written by 2.3.0, which kept no owner,
- * or by a build of 2.4.0 made before its release, which took some by time.
+ * records before it, and begins a change of owner only at a use (see
+ * PARSER_VERSION in transcripts.ts). A history whose newest parser is older
+ * was last written by 2.3.0, which kept no owner, or by a build of 2.4.0
+ * made before its release, which took some by time.
  */
-const OWNERS_BY_POSITION = 4;
+const OWNERS_BY_POSITION = 5;
 
-/** The parser of the builds of 2.4.0 made before its release, and of no other build. */
-const PRERELEASE_PARSER = 3;
+/** The parsers of the builds of 2.4.0 made before its release, and of no other build. */
+const PRERELEASE_PARSERS = '3, 4';
 
 /**
  * Bring a history at version 4 to the schema and the owners 2.4.0 has.
@@ -611,9 +612,11 @@ function newestParser(db: DatabaseSync): number {
  * would not, in a transaction: the owners it took by time, a subagent's
  * request's, which this parser never gives, and a limit's, which a report
  * then takes by time; and its main transcripts' changes of owner, with the
- * times it gave them, by having each searched again, its rows kept. Of the
+ * times it gave them, by having each searched again, its rows kept. Its
+ * other files hold what this parser would: they are this parser's from
+ * then, read on as they grow, and never undone again, gone or not. Of the
  * limits, all, or (`'its sessions'`) those of the sessions whose files are
- * at its parser.
+ * at its parsers.
  */
 function undoPrerelease(db: DatabaseSync, limits: 'all' | 'its sessions'): void {
     db.exec("UPDATE requests SET owner = NULL WHERE owner IS NOT NULL AND kind != 'main'");
@@ -621,9 +624,11 @@ function undoPrerelease(db: DatabaseSync, limits: 'all' | 'its sessions'): void 
         limits === 'all'
             ? 'UPDATE limit_hits SET owner = NULL WHERE owner IS NOT NULL'
             : `UPDATE limit_hits SET owner = NULL WHERE owner IS NOT NULL
-               AND session_id IN (SELECT session_id FROM files WHERE parser_version = ${PRERELEASE_PARSER} AND session_id IS NOT NULL)`,
+               AND session_id IN (SELECT session_id FROM files WHERE parser_version IN (${PRERELEASE_PARSERS}) AND session_id IS NOT NULL)`,
     );
-    db.exec(`UPDATE files SET parser_version = ${OWNERS_SINCE - 1} WHERE kind = 'main' AND parser_version = ${PRERELEASE_PARSER}`);
+    db.exec(`UPDATE files SET parser_version = ${OWNERS_SINCE - 1} WHERE kind = 'main' AND parser_version IN (${PRERELEASE_PARSERS})`);
+    // The others' rows are now what this parser keeps: done with, gone or not.
+    db.exec(`UPDATE files SET parser_version = ${PARSER_VERSION} WHERE kind != 'main' AND parser_version IN (${PRERELEASE_PARSERS})`);
 }
 
 /**
@@ -1890,14 +1895,15 @@ export class UsageStore {
      * Undo what a pass of a build of 2.4.0 made before its release wrote
      * after this history was brought to this parser (see `completeSchema4`):
      * only one already under way then can have, before it next looked at
-     * the lease, and only it writes its parser. Call inside `transaction`,
-     * holding the import lease, before a pass.
+     * the lease, and only such builds write their parsers, every file of
+     * which the undo leaves at another. Call inside `transaction`, holding
+     * the import lease, before a pass.
      *
      * @returns whether it found any.
      */
     undoPrereleasePasses(): boolean {
         this.assertWritable();
-        const found = this.db.prepare(`SELECT EXISTS (SELECT 1 FROM files WHERE parser_version = ${PRERELEASE_PARSER}) AS any`).get() as { any: number };
+        const found = this.db.prepare(`SELECT EXISTS (SELECT 1 FROM files WHERE parser_version IN (${PRERELEASE_PARSERS})) AS any`).get() as { any: number };
         if (found.any) {
             undoPrerelease(this.db, 'its sessions');
         }
