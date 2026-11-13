@@ -216,11 +216,11 @@ suite('usage panel', () => {
         // Another window holds the import, or it failed: no pass ran here.
         UsagePanel.show(context, service, log);
         await until(() => page.posted.length > 0);
-        assert.ok(!page.posted.at(-1)?.controls.includes('refreshed '), 'stamped though no pass ran');
+        assert.ok(!page.posted.at(-1)?.status.includes('refreshed '), 'stamped though no pass ran');
 
         fake.passes = {} as ImportSummary;
         page.send({ type: 'refresh' });
-        await until(() => page.posted.at(-1)?.controls.includes('refreshed ') === true);
+        await until(() => page.posted.at(-1)?.status.includes('refreshed ') === true);
     });
 
     test('a time its zone cannot place is a dash, and the update still goes out', async () => {
@@ -312,6 +312,26 @@ suite('usage panel', () => {
         await until(() => asked.includes('all'));
         assert.deepStrictEqual(asked, [gone, 'all']);
         assert.strictEqual((context.globalState.get('llm-tokenizer.claudeCodeUsage.panel') as { account?: string }).account, 'all');
+    });
+
+    test('a name given in the settings shows at once', async () => {
+        const id = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const { service, fake } = fakeService();
+        fake.report = quietReport({
+            accountsSeen: [
+                { key: `${id}/`, owner: { accountUuid: id, organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1 },
+                { key: 'none', owner: null, sessions: 1, firstTs: 1, lastTs: 2, ordinal: null },
+            ],
+        });
+        UsagePanel.show(context, service, log);
+        await until(() => page.posted.some(p => p.controls.includes('>Account 1</option>')));
+        const config = vscode.workspace.getConfiguration('llm-tokenizer');
+        try {
+            await config.update('claudeCodeAccountNames', { [id]: 'Work' }, vscode.ConfigurationTarget.Global);
+            await until(() => page.posted.at(-1)?.controls.includes('>Work</option>') === true);
+        } finally {
+            await config.update('claudeCodeAccountNames', undefined, vscode.ConfigurationTarget.Global);
+        }
     });
 
     test('Name… asks for a name and keeps it in the setting by account id; empty takes it out, Escape changes nothing', async () => {

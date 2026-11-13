@@ -90,7 +90,7 @@ function view(overrides: Partial<PanelView> = {}): PanelView {
     };
 }
 
-const text = (f: PanelFragments) => f.controls + f.body + f.diagnostics;
+const text = (f: PanelFragments) => f.controls + f.status + f.body + f.diagnostics;
 
 interface FakeRow {
     values: Record<string, string>;
@@ -306,6 +306,8 @@ function runPage(fragments: PanelFragments): {
     click(action: string): string;
     clickOn(dataset: Record<string, string>): void;
     choose(account: string): void;
+    /** Run the timers that are due. */
+    elapse(): void;
     message(origin: string, fragments: PanelFragments): void;
 } {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
@@ -314,6 +316,9 @@ function runPage(fragments: PanelFragments): {
     const posted: { type: string; text?: string }[] = [];
     const listeners: Record<string, (e: unknown) => void> = {};
     const element = () => ({ innerHTML: '', open: false });
+    // Timers that run only when the test says time has passed.
+    const timers = new Map<number, () => void>();
+    let timer = 0;
     vm.runInNewContext(script, {
         acquireVsCodeApi: () => ({ postMessage: (m: { type: string }) => posted.push(m) }),
         document: {
@@ -323,6 +328,8 @@ function runPage(fragments: PanelFragments): {
             activeElement: null,
         },
         window: { origin: ORIGIN, addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
+        setTimeout: (fn: () => void) => (timers.set(++timer, fn), timer),
+        clearTimeout: (id: number) => timers.delete(id),
         Intl,
     });
     return {
@@ -334,6 +341,11 @@ function runPage(fragments: PanelFragments): {
         },
         clickOn: dataset => listeners.click({ target: { closest: () => ({ dataset }) } }),
         choose: account => listeners.change({ target: { matches: (selector: string) => selector === 'select[data-account-filter]', value: account } }),
+        elapse: () => {
+            const due = [...timers.values()];
+            timers.clear();
+            due.forEach(fn => fn());
+        },
     };
 }
 
@@ -418,14 +430,16 @@ suite('usage page', () => {
         assert.ok(all.includes('class="hero-value">≥1.3K<'), 'the hero');
         assert.ok(all.includes('2026-10-09: ≥1,278 processed'), 'a day');
         assert.strictEqual((reading.body.match(/<td class="num">≥1,278<\/td>/g) ?? []).length, 2, 'a project and a session');
-        assert.ok(reading.controls.includes('<button type="button" data-action="refresh" aria-disabled="true">Reading…</button>'));
+        assert.ok(reading.status.includes('<button type="button" data-action="refresh" aria-disabled="true">Reading…</button>'));
+        // Apart from the choices: a pass that reads never rebuilds the range, the scope or the account under a choice in progress.
+        assert.strictEqual(reading.controls, renderFragments(view()).controls);
 
         // A count of files not known yet, or none at all.
         assert.ok(renderFragments(view({ reading: { by: 'this window', files: 40 } })).body.includes('records: 40 files so far.'));
         assert.ok(renderFragments(view({ reading: { by: 'this window' } })).body.includes('Still reading Claude Code&#39;s records. These totals'));
 
         const done = renderFragments(view());
-        assert.ok(!text(done).includes('≥') && !done.body.includes('Still reading') && done.controls.includes('>Refresh</button>'));
+        assert.ok(!text(done).includes('≥') && !done.body.includes('Still reading') && done.status.includes('>Refresh</button>'));
     });
 
     test("another window's reading is said too, with no count, and its totals are lower bounds", () => {
@@ -1024,13 +1038,16 @@ suite('usage page', () => {
         // What tells them apart, below each: when it was used and in which projects.
         assert.ok(body.includes('<div class="account-hint">2026-10-01 – 2026-10-09 · one, two</div>'));
         assert.ok(body.includes(`<div class="account-hint">2026-10-03 – 2026-10-04 · ${HOSTILE_ESCAPED}</div>`));
-        assert.ok(body.includes('<div class="account-hint">no account in its transcripts</div>'));
+        // The sessions that record none, told apart the same way.
+        assert.ok(body.includes('<div class="account-hint">2026-09-01 – 2026-09-30 · old</div>'));
         // Its ids on hover, whole, as the setting keys names by them.
         assert.ok(body.includes(`Account ${ID_A}\nOrganization a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d`));
-        // A button to name each recorded account, by its id; none for the sessions that record none.
-        assert.ok(body.includes(`data-action="nameAccount" data-account="${ID_A}"`) && body.includes(`data-action="nameAccount" data-account="${ID_B}"`));
+        // A button to name each recorded account, by its id, its row's key and its name; none for the sessions that record none.
+        assert.ok(body.includes(`data-action="nameAccount" data-account="${ID_A}" data-key="${KEY_A}" aria-label="Name a@example.com (${HOSTILE_ESCAPED})"`), body);
+        assert.ok(body.includes(`data-action="nameAccount" data-account="${ID_B}" data-key="${ID_B}/" aria-label="Name Account 2"`));
         assert.strictEqual((body.match(/data-action="nameAccount"/g) ?? []).length, 2);
-        assert.ok(body.includes('Not recorded: sessions Claude Code wrote before it recorded accounts, from version 2.1.318 or so'));
+        assert.ok(body.includes('Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so'));
+        assert.ok(body.includes('and those Claude Code had deleted before this version first read them.'));
         // Sorted as the other tables, by the label as shown.
         assert.ok(body.includes('data-k-label="a@example.com (') && body.includes('data-k-label="Account 2"'));
     });
@@ -1059,7 +1076,12 @@ suite('usage page', () => {
         assert.ok(renderFragments(view({ account: gone, report: accountsReport({ account: gone }) })).controls.includes(`<option value="${gone}" selected>`));
 
         const page = runPage(renderFragments(view({ report: accountsReport() })));
+        // Through the list by the arrow keys: only where it settles is sent.
+        page.choose(`${ID_B}/`);
+        page.choose('none');
         page.choose(KEY_A);
+        assert.strictEqual(page.posted.length, 1, 'sent before the choice settled');
+        page.elapse();
         page.clickOn({ action: 'nameAccount', account: ID_B });
         // Posted from the page's own context: compared as the editor receives them.
         assert.deepStrictEqual(JSON.parse(JSON.stringify(page.posted.slice(1))), [
@@ -1082,9 +1104,15 @@ suite('usage page', () => {
         assert.ok(fragments.body.includes('Each for its whole account, whichever project hit them'));
         assert.deepStrictEqual([fragments.copy.header.at(-1), fragments.copy.rows[0]?.at(-1)], ['account', 'Account 2']);
         assert.ok(fragments.copy.notes.some(n => n.startsWith('account is the Claude account a session was signed in to')));
-        // One account's limits only: no need to say whose.
-        const one = renderFragments(view({ report: accountsReport({ limitWindows: [both.limitWindows[0]] }) }));
-        assert.ok(one.body.includes('<li><span>five hour limit') && one.body.includes('For the whole account, whichever project'));
+        // One account alone hit any, with others on the page: still whose.
+        const one = renderFragments(view({ report: accountsReport({ limitWindows: [both.limitWindows[1]] }) }));
+        assert.ok(one.body.includes('<li><span>Account 2: five hour limit') && one.body.includes('Each for its whole account'));
+        // One account chosen, or a history of one: no need to say whose.
+        const chosen = renderFragments(view({ account: `${ID_B}/`, report: accountsReport({ account: `${ID_B}/`, limitWindows: [both.limitWindows[1]] }) }));
+        assert.ok(chosen.body.includes('<li><span>five hour limit') && chosen.body.includes('For the whole account, whichever project'));
+        const alone = accountsReport({ limitWindows: [both.limitWindows[1]] });
+        const single = renderFragments(view({ report: { ...alone, accountsSeen: alone.accountsSeen.slice(1, 2) } }));
+        assert.ok(single.body.includes('<li><span>five hour limit'));
 
         const filtered = renderFragments(view({ account: `${ID_B}/`, report: accountsReport({ account: `${ID_B}/` }) }));
         assert.ok(filtered.csv.notes.some(n => n.startsWith('range: ') && n.endsWith(', account Account 2')), filtered.csv.notes.join('|'));
@@ -1099,12 +1127,38 @@ suite('usage page', () => {
         assert.ok(none.includes('<dt>Account names</dt><dd>no Claude Code configuration file found</dd>'));
     });
 
+    test("focus on the account filter, or on an account's Name…, returns to it after an update; a pass rewrites only the status line", () => {
+        const page = livePage(renderFragments(view({ report: accountsReport() })), []);
+        page.document.activeElement = { matches: (s: string) => s === 'select[data-account-filter]', getAttribute: () => null };
+        page.update(renderFragments(view({ report: accountsReport(), zone: 'UTC' })), []);
+        assert.deepStrictEqual(page.focused, ['select[data-account-filter]']);
+        // Two organizations of one account share its id: the row's key finds the right button.
+        page.document.activeElement = {
+            matches: (s: string) => s === 'button',
+            closest: () => null,
+            getAttribute: (name: string) => ({ 'data-action': 'nameAccount', 'data-account': ID_B, 'data-key': `${ID_B}/` })[name] ?? null,
+        };
+        page.update(renderFragments(view({ report: accountsReport() })), []);
+        assert.deepStrictEqual(page.focused.at(-1), `button[data-action="nameAccount"][data-key="${ID_B}/"]`);
+        // A pass that reads, and ends: the status line is rewritten, the choices are left as they are.
+        page.written.length = 0;
+        page.update(renderFragments(view({ report: accountsReport(), reading: { by: 'this window', files: 3 } })), []);
+        page.update(renderFragments(view({ report: accountsReport(), refreshedAt: Date.UTC(2026, 9, 9, 13) })), []);
+        assert.ok(page.written.includes('status') && !page.written.includes('choices'), page.written.join(','));
+    });
+
+    test('accounts past the caps are counted: the list says how many, the filter how many more', () => {
+        const { body, controls } = renderFragments(view({ report: accountsReport({ omitted: { ...report().omitted, accounts: 3, accountsSeen: 1_204 } }) }));
+        assert.ok(body.includes('…and 3 smaller accounts, counted in the totals but not listed.'));
+        assert.ok(controls.includes('<option disabled>…and 1,204 more, with fewer sessions</option>'));
+    });
+
     test('names you give stand in place of the email, and say what Claude Code calls the account on hover', () => {
         const { body, controls } = renderFragments(view({ report: accountsReport(), givenNames: { [ID_A]: 'Work', [ID_B]: '<b>Old</b>' } }));
         assert.ok(body.includes(`>Work (${HOSTILE_ESCAPED})</span>`));
         assert.ok(body.includes(`Claude Code calls it a@example.com (${HOSTILE_ESCAPED})`));
         assert.ok(body.includes('>&lt;b&gt;Old&lt;/b&gt;</span>') && !body.includes('<b>Old</b>'));
-        assert.ok(body.includes(`data-account="${ID_A}" title="Rename this account in this panel">Rename…</button>`));
+        assert.ok(body.includes(`data-account="${ID_A}" data-key="${KEY_A}" aria-label="Rename Work (${HOSTILE_ESCAPED})" title="Rename this account in this panel">Rename…</button>`));
         assert.ok(controls.includes('>&lt;b&gt;Old&lt;/b&gt;</option>'));
     });
 

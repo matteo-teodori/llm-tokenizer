@@ -75,7 +75,10 @@ export interface LastImport {
 
 /** What one post carries: the fragments, and the rows the page's exports are built from. */
 export interface PanelFragments {
+    /** The range, scope and account: changed only by a choice, so that a choice in progress is never rebuilt under it. */
     controls: string;
+    /** Refresh and when the page was refreshed: changed whenever a pass reads or ends. */
+    status: string;
     body: string;
     diagnostics: string;
     /** Every input of a hand-made cost calculation, by day and model; never a price. */
@@ -105,12 +108,12 @@ function emptyState(view: PanelView): string | undefined {
                 <h2>Claude Code usage is off</h2>
                 <p>Turned on, LLM Tokenizer reads Claude Code's own session records ${view.where ? escapeHtml(view.where) : 'on this machine'},
                 in the projects folder of its configuration folder (<code>~/.claude</code> by default), and shows how many tokens Claude Code processed: by day, account, project, session and model.
-                From Claude Code's configuration file (<code>~/.claude.json</code> by default) it reads only the Claude accounts it names.</p>
+                From Claude Code's configuration file (<code>~/.claude.json</code> by default, or <code>.claude.json</code> in its configuration folder) it reads only the Claude accounts it names.</p>
                 <p>Kept, in a database in this extension's own storage:</p>
                 <ul>
                     <li>each request's token counts, model, effort, speed, where it ran, time and Claude Code version, and its ids: message, request, session, and the subagent or workflow run it came from;</li>
                     <li>the folder each session started in;</li>
-                    <li>the Claude account and organization each session was signed in to, by id, and the email and organization name Claude Code gave each account;</li>
+                    <li>the Claude account and organization each session was signed in to, by id, and for each account its number in the history, and the email and organization name Claude Code last gave it, with when;</li>
                     <li>each transcript's path, size, file id and how far it was read, with a hash of the last 64 bytes read, to tell what changed;</li>
                     <li>compactions' sizes, and the usage limits reached, with when they reset;</li>
                     <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
@@ -206,7 +209,7 @@ function mark(view: PanelView, provenance: UsageTotals['provenance']): '' | '≥
     return view.reading ? '≥' : totalPrefix(provenance);
 }
 
-/** The range and scope buttons, and the refresh line. */
+/** The range and scope buttons, and the account filter. */
 function controls(view: PanelView): string {
     const report = view.report;
     const since = report?.coverage.start != null ? ` ${view.formatDate(report.coverage.start)}` : '';
@@ -214,6 +217,15 @@ function controls(view: PanelView): string {
         `<button type="button" data-range="${key}" aria-pressed="${view.range === key}">${RANGE_LABELS[key]}${key === 'coverage' ? escapeHtml(since) : ''}</button>`;
     const scope = (key: 'all' | 'workspace', label: string) =>
         `<button type="button" data-scope="${key}" aria-pressed="${view.scope === key}">${label}</button>`;
+    return `
+        <div class="segmented" role="group" aria-label="Range">${(['today', '7d', '30d', 'coverage'] as const).map(range).join('')}</div>
+        <div class="segmented" role="group" aria-label="Scope">${scope('all', 'All projects')}${scope('workspace', 'This workspace')}</div>
+        ${accountFilter(view)}`;
+}
+
+/** Refresh, and the line that says when the page was refreshed and how new its newest record is. */
+function status(view: PanelView): string {
+    const report = view.report;
     const newest = report?.coverage.newest != null ? `newest record ${escapeHtml(view.formatTime(report.coverage.newest))}` : '';
     const refreshed = view.refreshedAt !== undefined ? `refreshed ${escapeHtml(view.formatTime(view.refreshedAt))}` : '';
     // Busy while a pass reads, rather than a click that seems to do nothing:
@@ -222,9 +234,6 @@ function controls(view: PanelView): string {
         ? '<button type="button" data-action="refresh" aria-disabled="true">Reading…</button>'
         : '<button type="button" data-action="refresh">Refresh</button>';
     return `
-        <div class="segmented" role="group" aria-label="Range">${(['today', '7d', '30d', 'coverage'] as const).map(range).join('')}</div>
-        <div class="segmented" role="group" aria-label="Scope">${scope('all', 'All projects')}${scope('workspace', 'This workspace')}</div>
-        ${accountFilter(view)}
         ${refresh}
         <span class="muted">${[refreshed, newest].filter(Boolean).join(' · ')}${view.where ? ` · ${escapeHtml(view.where)}` : ''}</span>`;
 }
@@ -239,8 +248,9 @@ function labelsOf(view: PanelView): Map<string, AccountLabel> {
     return view.report ? accountLabels(view.report.accountsSeen, view.report.accountNames, view.givenNames) : new Map<string, AccountLabel>();
 }
 
+/** A key's label; one past the lists' caps, or no longer in the history, by the first digits of its account's id. */
 function labelOf(labels: Map<string, AccountLabel>, key: string): string {
-    return labels.get(key)?.label ?? (key === NOT_RECORDED ? 'Not recorded' : 'An account no longer in the history');
+    return labels.get(key)?.label ?? (key === NOT_RECORDED ? 'Not recorded' : `Account ${key.slice(0, 8)}`);
 }
 
 /**
@@ -260,9 +270,10 @@ function accountFilter(view: PanelView): string {
     }
     const option = (key: string, label: string) =>
         `<option value="${escapeHtml(key)}"${key === view.account ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+    const more = report.omitted.accountsSeen;
     return `<select class="account-filter" data-account-filter aria-label="Account">${option(ALL_ACCOUNTS, 'All accounts')}${keys
         .map(key => option(key, labelOf(labels, key)))
-        .join('')}</select>`;
+        .join('')}${more > 0 ? `<option disabled>…and ${more.toLocaleString('en-US')} more, with fewer sessions</option>` : ''}</select>`;
 }
 
 /**
@@ -465,10 +476,10 @@ function limitWindows(report: UsageReport, view: PanelView): string {
     }
     // Newest first: the page in view on opening is the latest limits.
     const windows = [...report.limitWindows].reverse();
-    // A limit is an account's: where the windows are more than one
-    // account's, each says whose.
+    // A limit is an account's: where the page holds more than one account's
+    // sessions, each says whose, though one account alone hit any.
     const labels = labelsOf(view);
-    const whose = new Set(windows.map(w => w.account)).size > 1;
+    const whose = new Set(windows.map(w => w.account)).size > 1 || (view.account === ALL_ACCOUNTS && report.accountsSeen.length > 1);
     const pages = pagesOf(windows).map(
         (page, i) =>
             `<ul class="page plain-list"${i > 0 ? ' inert' : ''}>${page
@@ -576,9 +587,10 @@ function accounts(report: UsageReport, view: PanelView): string {
             }),
             'processed',
         )}
+        ${capNote(report.omitted.accounts, 'accounts')}
         <p class="note">An account is the Claude account and organization a session was signed in to, as Claude Code records it, its subagents' tokens included; its name is the one Claude Code gave it while this history was kept, or the one you give it.${
             unrecorded
-                ? ' Not recorded: sessions Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in October 2026, and those signed in with an API key or through a cloud provider.'
+                ? ' Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in October 2026, those signed in with an API key or through a cloud provider, and those Claude Code had deleted before this version first read them.'
                 : ''
         }</p>
     </section>`;
@@ -590,9 +602,9 @@ function accounts(report: UsageReport, view: PanelView): string {
  * which tell apart an account with no name. Every id and date on hover.
  */
 function accountCell(view: PanelView, row: AccountRow, label: AccountLabel | undefined, firstTs: number | null, lastTs: number | null, current: boolean): string {
-    const name = label?.label ?? (row.owner ? 'An account no longer in the history' : 'Not recorded');
+    const name = label?.label ?? (row.owner ? `Account ${row.key.slice(0, 8)}` : 'Not recorded');
     const span = firstTs !== null && lastTs !== null ? `${view.formatDate(firstTs)} – ${view.formatDate(lastTs)}` : '';
-    const hint = row.owner ? [span, row.projects.join(', ')].filter(Boolean).join(' · ') : 'no account in its transcripts';
+    const hint = [span, row.projects.join(', ')].filter(Boolean).join(' · ');
     const title = row.owner
         ? [
               name,
@@ -603,11 +615,18 @@ function accountCell(view: PanelView, row: AccountRow, label: AccountLabel | und
               firstTs !== null && lastTs !== null ? `Requests from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
               row.projects.length > 0 ? `In ${row.projects.join(', ')}` : '',
           ]
-        : ['Sessions whose transcripts record no account'];
+        : [
+              'Sessions whose transcripts record no account',
+              firstTs !== null && lastTs !== null ? `Requests from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
+              row.projects.length > 0 ? `In ${row.projects.join(', ')}` : '',
+          ];
+    // Its account's id names it in the setting; its key finds the button
+    // again after an update, as one account's organizations share the id.
+    const verb = label?.named ? 'Rename' : 'Name';
     const button = row.owner
-        ? `<button type="button" class="name" data-action="nameAccount" data-account="${escapeHtml(row.owner.accountUuid)}" title="${
-              label?.named ? 'Rename this account in this panel' : 'Name this account in this panel'
-          }">${label?.named ? 'Rename…' : 'Name…'}</button>`
+        ? `<button type="button" class="name" data-action="nameAccount" data-account="${escapeHtml(row.owner.accountUuid)}" data-key="${escapeHtml(
+              row.key,
+          )}" aria-label="${escapeHtml(`${verb} ${name}`)}" title="${verb} this account in this panel">${verb}…</button>`
         : '';
     return `<div class="account-line"><span class="account-name" title="${escapeHtml(title.filter(Boolean).join('\n'))}">${escapeHtml(name)}</span>${
         current ? '<span class="badge">signed in now</span>' : ''
@@ -829,6 +848,7 @@ export function renderFragments(view: PanelView): PanelFragments {
             : `${banner(view)}<p class="muted">Reading Claude Code's records…</p>`);
     return {
         controls: empty ? '' : controls(view),
+        status: empty ? '' : status(view),
         body,
         diagnostics: empty && view.status === 'off' ? '' : diagnostics(view),
         csv: csvRows(view),
@@ -924,6 +944,9 @@ function exportNotes(view: PanelView): string[] {
     ];
 }
 
+/** How long the account filter's value must stay put before it is sent. */
+export const ACCOUNT_SETTLE_MS = 250;
+
 /** The page: rendered once; everything in it after that arrives as fragments. */
 export function renderUsagePage(nonce: string, csp: string, first: PanelFragments): string {
     return `<!DOCTYPE html>
@@ -946,6 +969,8 @@ body {
 }
 .wrap { max-width: 960px; margin: 0 auto; }
 #controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 18px; }
+/* Two regions, updated apart, laid out as one row. */
+#choices, #status { display: contents; }
 .segmented { display: inline-flex; }
 button {
     padding: 3px 10px;
@@ -1063,19 +1088,21 @@ table.page { table-layout: fixed; }
 </head>
 <body>
 <div class="wrap">
-<div id="controls">${first.controls}</div>
+<div id="controls"><div id="choices">${first.controls}</div><div id="status">${first.status}</div></div>
 <main id="body">${first.body}</main>
 <div id="diagnostics-slot">${first.diagnostics}</div>
 </div>
 <script nonce="${nonce}">
 (function () {
     const vscode = acquireVsCodeApi();
+    const ACCOUNT_SETTLE_MS = ${ACCOUNT_SETTLE_MS};
     let exports = ${embed({ csv: first.csv, copy: first.copy })};
     const sorts = {};
     // The page each list's strip is at, by its id: kept across updates, as sorts are.
     const at = {};
 ${PAGE_TEXT_HELPERS}
-    const controls = document.getElementById('controls');
+    const controls = document.getElementById('choices');
+    const statusLine = document.getElementById('status');
     const body = document.getElementById('body');
     const slot = document.getElementById('diagnostics-slot');
 
@@ -1204,7 +1231,7 @@ ${PAGE_TEXT_HELPERS}
         return out.join('\\n');
     }
 
-    let shown = { controls: null, body: null, diagnostics: null };
+    let shown = { controls: null, status: null, body: null, diagnostics: null };
     function show(fragments) {
         // Focus is restored to the same control, found again by what it does,
         // and in which table: two share their sort keys.
@@ -1217,10 +1244,10 @@ ${PAGE_TEXT_HELPERS}
             // share their sort keys, and every page has a header.
             const strip = attribute === 'data-sort-key' && focused.closest('.pages[id]');
             const pager = attribute === 'data-page' && focused.closest('nav[data-pages]');
-            // An account's Name… is found again by its account: every row has one.
-            const account = focused.getAttribute('data-account');
+            // An account's Name… is found again by its row's key: every row has one.
+            const key = focused.getAttribute('data-key');
             const button = attribute
-                ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' + (account ? '[data-account="' + account + '"]' : '')
+                ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' + (key ? '[data-key="' + key + '"]' : '')
                 : null;
             selector = () =>
                 !button ? null
@@ -1239,6 +1266,7 @@ ${PAGE_TEXT_HELPERS}
         }
         // A region whose page has not changed is left as it is, focus and all.
         if (fragments.controls !== shown.controls) { controls.innerHTML = fragments.controls; }
+        if (fragments.status !== shown.status) { statusLine.innerHTML = fragments.status; }
         if (fragments.body !== shown.body) { body.innerHTML = fragments.body; }
         if (fragments.diagnostics !== shown.diagnostics) {
             const open = document.getElementById('diagnostics');
@@ -1247,7 +1275,7 @@ ${PAGE_TEXT_HELPERS}
             const details = document.getElementById('diagnostics');
             if (details && wasOpen) { details.open = true; }
         }
-        shown = { controls: fragments.controls, body: fragments.body, diagnostics: fragments.diagnostics };
+        shown = { controls: fragments.controls, status: fragments.status, body: fragments.body, diagnostics: fragments.diagnostics };
         exports = { csv: fragments.csv, copy: fragments.copy };
         arrange();
         const restore = selector();
@@ -1290,10 +1318,15 @@ ${PAGE_TEXT_HELPERS}
         }
     });
 
+    // An account chosen is sent once the choice has settled: moving through
+    // the list by the arrow keys changes the value at each step, and each
+    // would otherwise read the history again.
+    let choosing;
     document.addEventListener('change', e => {
         const select = e.target;
         if (select && select.matches && select.matches('select[data-account-filter]')) {
-            vscode.postMessage({ type: 'setAccount', account: select.value });
+            clearTimeout(choosing);
+            choosing = setTimeout(() => vscode.postMessage({ type: 'setAccount', account: select.value }), ACCOUNT_SETTLE_MS);
         }
     });
 
