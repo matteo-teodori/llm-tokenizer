@@ -170,20 +170,7 @@ export function givenNames(setting: unknown): Record<string, string> {
  */
 export function accountLabels(seen: readonly AccountSeen[], names: readonly AccountName[], given: Readonly<Record<string, string>>): Map<string, AccountLabel> {
     const named = new Map(names.map(n => [accountKey(n), n]));
-    // An account's email, wherever one of its organizations gave it, the
-    // first given; else the one its personal organization's name holds.
-    const emails = new Map<string, string>();
-    const withEmail = new Set<string>();
-    for (const n of names) {
-        if (n.email !== null && !withEmail.has(n.accountUuid)) {
-            emails.set(n.accountUuid, n.email);
-            withEmail.add(n.accountUuid);
-        }
-        const personal = n.email === null ? PERSONAL.exec(n.organizationName ?? '')?.[1] : undefined;
-        if (personal !== undefined && !emails.has(n.accountUuid)) {
-            emails.set(n.accountUuid, personal);
-        }
-    }
+    const emails = emailsOf(names);
     const labels = new Map<string, AccountLabel>();
     for (const s of seen) {
         if (!s.owner) {
@@ -209,6 +196,33 @@ export function accountLabels(seen: readonly AccountSeen[], names: readonly Acco
         }
     }
     return tellApart(labels, seen);
+}
+
+/**
+ * Each account's email, wherever one of its organizations gave it, the
+ * first given; else the one its personal organization's name holds.
+ */
+function emailsOf(names: readonly AccountName[]): Map<string, string> {
+    const emails = new Map<string, string>();
+    const withEmail = new Set<string>();
+    for (const n of names) {
+        if (n.email !== null && !withEmail.has(n.accountUuid)) {
+            emails.set(n.accountUuid, n.email);
+            withEmail.add(n.accountUuid);
+        }
+        const personal = n.email === null ? PERSONAL.exec(n.organizationName ?? '')?.[1] : undefined;
+        if (personal !== undefined && !emails.has(n.accountUuid)) {
+            emails.set(n.accountUuid, personal);
+        }
+    }
+    return emails;
+}
+
+/** What a name you give an account stands in place of: its email, as its labels show it, else its number. */
+export function nameReplaces(accountUuid: string, seen: readonly AccountSeen[], names: readonly AccountName[]): string {
+    const email = emailsOf(names).get(accountUuid);
+    const ordinal = seen.find(s => s.owner?.accountUuid === accountUuid)?.ordinal;
+    return email ?? (ordinal != null ? `Account ${ordinal}` : 'its number');
 }
 
 /** The name Claude Code gives a personal account's organization, and the email in it. */

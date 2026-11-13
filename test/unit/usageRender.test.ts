@@ -233,7 +233,14 @@ interface Motion {
 }
 
 /** The page's script over a DOM that holds `strips`, swapped for new ones by each update. */
-function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: ReturnType<typeof fakePager>[] = [], motion: Motion = {}) {
+function livePage(
+    fragments: PanelFragments,
+    firstStrips: FakeStrip[],
+    pagers: ReturnType<typeof fakePager>[] = [],
+    motion: Motion = {},
+    /** What a selector finds, where a test says. */
+    found?: (selector: string) => unknown,
+) {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
     const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
     assert.ok(script);
@@ -259,11 +266,14 @@ function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: R
                           }
                           strips = nextStrips;
                       },
+                      // No controls in these slots: the choices are other tests'.
+                      querySelector: () => null,
+                      querySelectorAll: () => [],
                   }),
         querySelectorAll: (selector: string) => (selector === '.pages' ? strips : []),
         querySelector: (selector: string) => {
             const pager = /^nav\[data-pages="([^"]+)"\]$/.exec(selector);
-            return pager ? (pagers.find(p => p.dataset.pages === pager[1]) ?? null) : { focus: () => focused.push(selector) };
+            return found?.(selector) ?? (pager ? (pagers.find(p => p.dataset.pages === pager[1]) ?? null) : { focus: () => focused.push(selector) });
         },
         // Kept apart by phase: scrollend does not bubble, so only a listener
         // that captures it hears it from a strip.
@@ -301,32 +311,101 @@ function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: R
 /** The page's origin, as the editor's webview gives it. */
 const ORIGIN = 'vscode-webview://0123abcd';
 
-function runPage(fragments: PanelFragments): {
-    posted: { type: string; text?: string; account?: string }[];
+/** A select as the page's script sees one: its options, and a value only one of them can have. */
+interface FakeSelect {
+    options: { value: string; textContent: string; disabled: boolean }[];
+    value: string;
+    /** How many times its options were replaced. */
+    replaced: number;
+    isConnected: boolean;
+    matches(selector: string): boolean;
+    replaceChildren(...options: { value: string; textContent: string; disabled: boolean }[]): void;
+}
+
+function fakeSelect(options: { value: string; label: string; disabled?: true }[], value: string): FakeSelect {
+    let current = value;
+    const select: FakeSelect = {
+        options: options.map(o => ({ value: o.value, textContent: o.label, disabled: o.disabled === true })),
+        get value() {
+            return current;
+        },
+        set value(v: string) {
+            current = select.options.some(o => o.value === v) ? v : '';
+        },
+        replaced: 0,
+        isConnected: true,
+        matches: selector => selector === 'select[data-account-filter]',
+        replaceChildren(...options) {
+            select.options = options;
+            select.replaced++;
+            // As a browser does: new options, the first selected.
+            current = options[0]?.value ?? '';
+        },
+    };
+    return select;
+}
+
+/** A range or scope button, as the page's script sees one. */
+function fakeButton(dataset: Record<string, string>, pressed: boolean, textContent = '') {
+    const attributes: Record<string, string> = { 'aria-pressed': String(pressed) };
+    return {
+        dataset,
+        textContent,
+        getAttribute: (name: string) => attributes[name] ?? null,
+        setAttribute: (name: string, value: string) => (attributes[name] = value),
+    };
+}
+
+/** The controls region, with what the page's script looks for in it, and how often it was rebuilt. */
+function fakeControls(select: FakeSelect | null, buttons: ReturnType<typeof fakeButton>[]) {
+    const region = {
+        rebuilt: 0,
+        set innerHTML(_: string) {
+            region.rebuilt++;
+        },
+        get innerHTML() {
+            return '';
+        },
+        querySelector: (selector: string) => (selector === 'select[data-account-filter]' ? select : null),
+        querySelectorAll: (selector: string) => buttons.filter(b => (selector === 'button[data-range]' ? 'range' in b.dataset : selector === 'button[data-scope]' ? 'scope' in b.dataset : false)),
+    };
+    return region;
+}
+
+function runPage(
+    fragments: PanelFragments,
+    dom: { choices?: ReturnType<typeof fakeControls> } = {},
+): {
+    posted: { type: string; text?: string; account?: string; choice?: number }[];
     click(action: string): string;
     clickOn(dataset: Record<string, string>): void;
-    choose(account: string): void;
+    choose(account: string, on?: FakeSelect): void;
     /** Run the timers that are due. */
     elapse(): void;
-    message(origin: string, fragments: PanelFragments): void;
+    message(origin: string, fragments: PanelFragments, choice?: number): void;
+    /** Focus moved: onto `element`, from where it was. */
+    focus(element: unknown): void;
 } {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
     const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
     assert.ok(script);
     const posted: { type: string; text?: string }[] = [];
     const listeners: Record<string, (e: unknown) => void> = {};
-    const element = () => ({ innerHTML: '', open: false });
+    const element = () => ({ innerHTML: '', open: false, querySelector: () => null, querySelectorAll: () => [] });
     // Timers that run only when the test says time has passed.
     const timers = new Map<number, () => void>();
     let timer = 0;
+    const document = {
+        getElementById: (id: string) => (id === 'choices' && dom.choices ? dom.choices : element()),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
+        activeElement: null as unknown,
+        createElement: () => ({ value: '', textContent: '', disabled: false }),
+    };
     vm.runInNewContext(script, {
         acquireVsCodeApi: () => ({ postMessage: (m: { type: string }) => posted.push(m) }),
-        document: {
-            getElementById: element,
-            querySelectorAll: () => [],
-            addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[name] = fn),
-            activeElement: null,
-        },
+        document,
         window: { origin: ORIGIN, addEventListener: (name: string, fn: (e: unknown) => void) => (listeners[`window:${name}`] = fn) },
         setTimeout: (fn: () => void) => (timers.set(++timer, fn), timer),
         clearTimeout: (id: number) => timers.delete(id),
@@ -334,17 +413,30 @@ function runPage(fragments: PanelFragments): {
     });
     return {
         posted,
-        message: (origin: string, fragments: PanelFragments) => listeners['window:message']({ origin, data: { type: 'data', fragments } }),
+        message: (origin: string, fragments: PanelFragments, choice?: number) =>
+            listeners['window:message']({ origin, data: { type: 'data', fragments, ...(choice === undefined ? {} : { choice }) } }),
         click: action => {
             listeners.click({ target: { closest: () => ({ dataset: { action } }) } });
             return posted.at(-1)?.text ?? '';
         },
         clickOn: dataset => listeners.click({ target: { closest: () => ({ dataset }) } }),
-        choose: account => listeners.change({ target: { matches: (selector: string) => selector === 'select[data-account-filter]', value: account } }),
+        choose: (account, on) => {
+            if (on) {
+                on.value = account;
+            }
+            listeners.change({ target: on ?? { matches: (selector: string) => selector === 'select[data-account-filter]', value: account } });
+        },
         elapse: () => {
             const due = [...timers.values()];
             timers.clear();
             due.forEach(fn => fn());
+        },
+        focus: target => {
+            const from = document.activeElement;
+            document.activeElement = target;
+            if (from) {
+                listeners.focusout({ target: from });
+            }
         },
     };
 }
@@ -981,6 +1073,24 @@ suite('usage page', () => {
         assert.deepStrictEqual(page.focused, ['nav[data-pages="sessions"] button[data-page="next"]']);
     });
 
+    test("focus on an account's Name… returns to its row's, on the page the row is on now", () => {
+        const accounts = fakeStrip('accounts', 'processed', ['label', 'processed'], Array.from({ length: 15 }, (_, i) => ({ label: `a${i}`, processed: String(i) })));
+        const focusedOn: number[] = [];
+        const page = livePage(renderFragments(view()), [accounts], [], {}, selector =>
+            selector === 'button[data-action="nameAccount"][data-key="k"]'
+                ? { closest: (s: string) => (s === '.pages > .page' ? accounts.children[1] : null), focus: () => focusedOn.push(1) }
+                : undefined,
+        );
+        page.document.activeElement = {
+            matches: (s: string) => s === 'button',
+            closest: () => null,
+            getAttribute: (name: string) => (name === 'data-action' ? 'nameAccount' : name === 'data-key' ? 'k' : null),
+        };
+        page.update(renderFragments(view({ zone: 'UTC' })), [accounts]);
+        // Its row went to the second page, which an update leaves out of reach: the list turns there first.
+        assert.deepStrictEqual([accounts.reachable(), focusedOn], [[1], [1]]);
+    });
+
     test("a session's or a project's tokens name their models on hover, each with its share, cut", () => {
         const models = (shares: number[]) => shares.map((n, i) => ({ model: i === 0 ? HOSTILE : `claude-model-${i}`, variant: i === 0 ? '1m' : null, totals: totals(n) }));
         const session = { ...report().sessions[0], totals: totals(1_000), models: models([996, 4]) };
@@ -1025,6 +1135,7 @@ suite('usage page', () => {
     const KEY_A = '0f1e2d3c-4b5a-4968-8776-655443322110/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
     const ID_A = '0f1e2d3c-4b5a-4968-8776-655443322110';
     const ID_B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+    const ID_C = '11111111-2222-4333-8444-555555555555';
 
     test('the Accounts section names each account, says when it was used and where, and which one Claude Code is signed in to', () => {
         const fragments = renderFragments(view({ report: accountsReport() }));
@@ -1085,9 +1196,82 @@ suite('usage page', () => {
         page.clickOn({ action: 'nameAccount', account: ID_B });
         // Posted from the page's own context: compared as the editor receives them.
         assert.deepStrictEqual(JSON.parse(JSON.stringify(page.posted.slice(1))), [
-            { type: 'setAccount', account: KEY_A },
+            { type: 'setAccount', account: KEY_A, choice: 1 },
             { type: 'nameAccount', account: ID_B },
         ]);
+    });
+
+    test('the account filter is never rebuilt under a choice: brought up to date in place, its value the newest chosen until the host has applied it', () => {
+        const first = renderFragments(view({ report: accountsReport() }));
+        const options = first.choices?.account?.options ?? [];
+        assert.deepStrictEqual(options.map(o => o.value), ['all', KEY_A, `${ID_B}/`, 'none']);
+        const select = fakeSelect(options, 'all');
+        const coverage = fakeButton({ range: 'coverage' }, false, first.choices?.since);
+        const today = fakeButton({ range: 'today' }, false, 'Today');
+        const month = fakeButton({ range: '30d' }, true, '30 days');
+        const all = fakeButton({ scope: 'all' }, true, 'All projects');
+        const region = fakeControls(select, [today, month, coverage, all]);
+        const page = runPage(first, { choices: region });
+        const as = (account: string, overrides: Partial<PanelView> = {}) => renderFragments(view({ account, report: accountsReport({ account }), ...overrides }));
+
+        // Down the closed list on Windows, a step every 300 ms, the host
+        // answering each in 150: A is sent, B chosen, and A's update comes.
+        page.choose(KEY_A, select);
+        page.elapse();
+        page.choose(`${ID_B}/`, select);
+        page.message(ORIGIN, as(KEY_A), 1);
+        assert.strictEqual(select.value, `${ID_B}/`, "the update for the last choice sent moved the select back under the next");
+        page.elapse();
+        // A pass's update, made before the host had B: B stays.
+        page.message(ORIGIN, as(KEY_A), 1);
+        assert.strictEqual(select.value, `${ID_B}/`);
+        page.choose('none', select);
+        page.elapse();
+        assert.deepStrictEqual(
+            page.posted.filter(p => p.type === 'setAccount').map(p => [p.account, p.choice]),
+            [[KEY_A, 1], [`${ID_B}/`, 2], ['none', 3]],
+            'three steps down from every account end on none',
+        );
+        page.message(ORIGIN, as('none'), 3);
+        assert.strictEqual(select.value, 'none');
+        // The host applied the last choice and then chose otherwise, as when
+        // the account chosen is gone after a Clear: its choice is shown.
+        page.message(ORIGIN, as('all'), 3);
+        assert.strictEqual(select.value, 'all');
+        assert.deepStrictEqual([region.rebuilt, select.replaced], [0, 0], 'the controls were rebuilt for a choice');
+
+        // While the history is read, an account found and the day the
+        // history starts moved back: in place, the list once out of use.
+        page.focus(select);
+        const found = accountsReport({
+            // Before the sessions that record none, which are always last.
+            accountsSeen: [
+                ...accountsReport().accountsSeen.slice(0, 2),
+                { key: `${ID_C}/`, owner: { accountUuid: ID_C, organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 3, organizationOrdinal: 1, organizations: 1 },
+                ...accountsReport().accountsSeen.slice(2),
+            ],
+            coverage: { ...accountsReport().coverage, start: Date.UTC(2026, 8, 1) },
+        });
+        page.message(ORIGIN, renderFragments(view({ report: found, range: 'coverage' })), 3);
+        assert.deepStrictEqual([select.replaced, select.options.length], [0, 4], 'the options changed under the focused select');
+        assert.deepStrictEqual([coverage.textContent, coverage.getAttribute('aria-pressed'), month.getAttribute('aria-pressed')], [
+            renderFragments(view({ report: found })).choices?.since,
+            'true',
+            'false',
+        ]);
+        page.focus(null);
+        page.elapse();
+        assert.deepStrictEqual([select.replaced, select.options.map(o => o.value).at(-2), select.value], [1, `${ID_C}/`, 'all']);
+        assert.strictEqual(region.rebuilt, 0);
+        // New options while a choice waits to be sent: it stays chosen.
+        page.choose(KEY_A, select);
+        page.message(ORIGIN, as('all'), 3);
+        assert.deepStrictEqual([select.replaced, select.value], [2, KEY_A]);
+        page.elapse();
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(page.posted.at(-1))), { type: 'setAccount', account: KEY_A, choice: 4 });
+        // The filter gone, or back: then, and only then, rebuilt.
+        page.message(ORIGIN, renderFragments(view()), 3);
+        assert.strictEqual(region.rebuilt, 1);
     });
 
     test("a session's account is on hover and in Copy; a limit says whose it is once there are two; one account's export says which", () => {
@@ -1122,7 +1306,19 @@ suite('usage page', () => {
         const filtered = renderFragments(view({ account: `${ID_B}/`, report: accountsReport({ account: `${ID_B}/` }) }));
         assert.ok(filtered.csv.notes.some(n => n.startsWith('range: ') && n.endsWith(', account Account 2')), filtered.csv.notes.join('|'));
         const empty = renderFragments(view({ account: `${ID_B}/`, report: accountsReport({ account: `${ID_B}/`, totals: emptyTotals() }) }));
-        assert.ok(empty.body.includes('No session of Account 2 falls in this range.'), empty.body);
+        assert.ok(empty.body.includes('No request made with Account 2 falls in this range.'), empty.body);
+        const unrecorded = renderFragments(view({ account: 'none', report: accountsReport({ account: 'none', totals: emptyTotals() }) }));
+        assert.ok(unrecorded.body.includes('No request of a session that records no account falls in this range.'), unrecorded.body);
+        assert.ok(unrecorded.csv.notes.some(n => n.endsWith(', the sessions that record no account')), unrecorded.csv.notes.join('|'));
+        // An organization's name is its admin's: a comma in it never starts a cell of the CSV's notes.
+        const named = accountsReport({
+            account: KEY_A,
+            accountNames: [{ accountUuid: ID_A, organizationUuid: KEY_A.split('/')[1], email: 'me@client.example', organizationName: 'x,=HYPERLINK("https://evil.example/x"' }],
+        });
+        const page = runPage(renderFragments(view({ account: KEY_A, report: named })));
+        const range = page.click('export').split('\n').find(l => l.startsWith('# range: ')) ?? '';
+        assert.ok(range.includes('me@client.example (x;=HYPERLINK('), range);
+        assert.deepStrictEqual(range.split(',').filter(cell => /^\s*[=+\-@]/.test(cell)), [], range);
     });
 
     test('the diagnostics say which configuration file names the accounts, or that none does', () => {
@@ -1155,7 +1351,7 @@ suite('usage page', () => {
     test('accounts past the caps are counted: the list says how many, the filter how many more', () => {
         const { body, controls } = renderFragments(view({ report: accountsReport({ omitted: { ...report().omitted, accounts: 3, accountsSeen: 1_204 } }) }));
         assert.ok(body.includes('…and 3 smaller accounts, counted in the totals but not listed.'));
-        assert.ok(controls.includes('<option disabled>…and 1,204 more, with fewer sessions</option>'));
+        assert.ok(controls.includes('<option value="" disabled>…and 1,204 more, with fewer sessions</option>'));
     });
 
     test('names you give stand in place of the email, and say what Claude Code calls the account on hover', () => {
@@ -1199,7 +1395,11 @@ suite('usage panel messages', () => {
         assert.deepStrictEqual(parsePanelMessage({ type: 'reloadWindow', command: 'x' }), { type: 'reloadWindow' });
         const account = '0f1e2d3c-4b5a-4968-8776-655443322110';
         for (const filter of ['all', 'none', `${account}/`, `${account}/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d`]) {
-            assert.deepStrictEqual(parsePanelMessage({ type: 'setAccount', account: filter }), { type: 'setAccount', account: filter });
+            assert.deepStrictEqual(parsePanelMessage({ type: 'setAccount', account: filter, choice: 7 }), { type: 'setAccount', account: filter, choice: 7 });
+        }
+        // A choice the page did not number, or numbered as no count is: none.
+        for (const choice of [undefined, -1, 1.5, '3', Number.MAX_SAFE_INTEGER + 2]) {
+            assert.deepStrictEqual(parsePanelMessage({ type: 'setAccount', account: 'all', choice }), { type: 'setAccount', account: 'all', choice: 0 }, String(choice));
         }
         assert.deepStrictEqual(parsePanelMessage({ type: 'nameAccount', account }), { type: 'nameAccount', account });
         for (const bad of [

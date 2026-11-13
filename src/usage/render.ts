@@ -73,10 +73,29 @@ export interface LastImport {
     elapsedMs: number;
 }
 
+/**
+ * The range, scope and account as chosen, and what the account filter
+ * offers: what the page brings its controls up to date from, in place.
+ */
+export interface Choices {
+    range: RangeKey;
+    scope: 'all' | 'workspace';
+    /** The text of the button for everything held: `Since` and the day the history starts. */
+    since: string;
+    /** The account filter, where the page shows one. */
+    account: { value: string; options: { value: string; label: string; disabled?: true }[] } | null;
+}
+
 /** What one post carries: the fragments, and the rows the page's exports are built from. */
 export interface PanelFragments {
-    /** The range, scope and account: changed only by a choice, so that a choice in progress is never rebuilt under it. */
+    /**
+     * The range, scope and account, as the page first shows them; after
+     * that, `choices` brings them up to date in place, so that a control in
+     * use is never rebuilt under it. Rebuilt from this only when the account
+     * filter comes or goes.
+     */
     controls: string;
+    choices: Choices | null;
     /** Refresh and when the page was refreshed: changed whenever a pass reads or ends. */
     status: string;
     body: string;
@@ -209,18 +228,35 @@ function mark(view: PanelView, provenance: UsageTotals['provenance']): '' | '≥
     return view.reading ? '≥' : totalPrefix(provenance);
 }
 
-/** The range and scope buttons, and the account filter. */
-function controls(view: PanelView): string {
+/** The range and scope chosen, the account, and what the filter offers. */
+function choicesOf(view: PanelView): Choices {
     const report = view.report;
-    const since = report?.coverage.start != null ? ` ${view.formatDate(report.coverage.start)}` : '';
+    return {
+        range: view.range,
+        scope: view.scope,
+        since: `${RANGE_LABELS.coverage}${report?.coverage.start != null ? ` ${view.formatDate(report.coverage.start)}` : ''}`,
+        account: accountFilter(view),
+    };
+}
+
+/** The range and scope buttons, and the account filter. */
+function controls(choices: Choices): string {
     const range = (key: RangeKey) =>
-        `<button type="button" data-range="${key}" aria-pressed="${view.range === key}">${RANGE_LABELS[key]}${key === 'coverage' ? escapeHtml(since) : ''}</button>`;
+        `<button type="button" data-range="${key}" aria-pressed="${choices.range === key}">${escapeHtml(key === 'coverage' ? choices.since : RANGE_LABELS[key])}</button>`;
     const scope = (key: 'all' | 'workspace', label: string) =>
-        `<button type="button" data-scope="${key}" aria-pressed="${view.scope === key}">${label}</button>`;
+        `<button type="button" data-scope="${key}" aria-pressed="${choices.scope === key}">${label}</button>`;
+    const filter = choices.account
+        ? `<select class="account-filter" data-account-filter aria-label="Account">${choices.account.options
+              .map(
+                  o =>
+                      `<option value="${escapeHtml(o.value)}"${o.value === choices.account?.value && !o.disabled ? ' selected' : ''}${o.disabled ? ' disabled' : ''}>${escapeHtml(o.label)}</option>`,
+              )
+              .join('')}</select>`
+        : '';
     return `
         <div class="segmented" role="group" aria-label="Range">${(['today', '7d', '30d', 'coverage'] as const).map(range).join('')}</div>
         <div class="segmented" role="group" aria-label="Scope">${scope('all', 'All projects')}${scope('workspace', 'This workspace')}</div>
-        ${accountFilter(view)}`;
+        ${filter}`;
 }
 
 /** Refresh, and the line that says when the page was refreshed and how new its newest record is. */
@@ -254,26 +290,29 @@ function labelOf(labels: Map<string, AccountLabel>, key: string): string {
 }
 
 /**
- * The account filter, once the history has seen two: every account by when
- * it was first used, and the sessions that record none. One chosen that the
- * history no longer holds, after a Clear, is still offered while it is.
+ * The account filter, once the history has seen two: every account by its
+ * number, and the sessions that record none. One chosen that the history no
+ * longer holds, after a Clear, is still offered while it is.
  */
-function accountFilter(view: PanelView): string {
+function accountFilter(view: PanelView): Choices['account'] {
     const report = view.report;
     if (!hasAccounts(report) || (report.accountsSeen.length < 2 && view.account === ALL_ACCOUNTS)) {
-        return '';
+        return null;
     }
     const labels = labelsOf(view);
     const keys = report.accountsSeen.map(a => a.key);
     if (view.account !== ALL_ACCOUNTS && !keys.includes(view.account)) {
         keys.push(view.account);
     }
-    const option = (key: string, label: string) =>
-        `<option value="${escapeHtml(key)}"${key === view.account ? ' selected' : ''}>${escapeHtml(label)}</option>`;
     const more = report.omitted.accountsSeen;
-    return `<select class="account-filter" data-account-filter aria-label="Account">${option(ALL_ACCOUNTS, 'All accounts')}${keys
-        .map(key => option(key, labelOf(labels, key)))
-        .join('')}${more > 0 ? `<option disabled>…and ${more.toLocaleString('en-US')} more, with fewer sessions</option>` : ''}</select>`;
+    return {
+        value: view.account,
+        options: [
+            { value: ALL_ACCOUNTS, label: 'All accounts' },
+            ...keys.map(key => ({ value: key, label: labelOf(labels, key) })),
+            ...(more > 0 ? [{ value: '', label: `…and ${more.toLocaleString('en-US')} more, with fewer sessions`, disabled: true as const }] : []),
+        ],
+    };
 }
 
 /**
@@ -842,17 +881,21 @@ export function renderFragments(view: PanelView): PanelFragments {
                             ? // A range the reading has not reached yet is not one without requests.
                               'Nothing has been read in this range yet.'
                             : view.account !== ALL_ACCOUNTS
-                              ? `No session of ${escapeHtml(labelOf(labelsOf(view), view.account))} falls in this range${
-                                    view.scope === 'workspace' ? ' in a folder of this workspace' : ''
-                                }.`
+                              ? `${
+                                    view.account === NOT_RECORDED
+                                        ? 'No request of a session that records no account'
+                                        : `No request made with ${escapeHtml(labelOf(labelsOf(view), view.account))}`
+                                } falls in this range${view.scope === 'workspace' ? ' in a folder of this workspace' : ''}.`
                               : view.scope === 'workspace'
                                 ? 'No session in this range started in a folder of this workspace.'
                                 : 'No requests fall in this range.'
                   }</p></section>`
                 : `${banner(view)}${overview(report, view)}${accounts(report, view)}${projects(report, view)}${sessions(report, view)}`
             : `${banner(view)}<p class="muted">Reading Claude Code's records…</p>`);
+    const choices = empty ? null : choicesOf(view);
     return {
-        controls: empty ? '' : controls(view),
+        controls: choices ? controls(choices) : '',
+        choices,
         status: empty ? '' : status(view),
         body,
         diagnostics: empty && view.status === 'off' ? '' : diagnostics(view),
@@ -943,12 +986,25 @@ function exportNotes(view: PanelView): string[] {
     return [
         `extension: LLM Tokenizer ${view.extensionVersion}`,
         `time zone: ${view.zone}`,
-        `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}${
-            view.account !== ALL_ACCOUNTS ? `, account ${labelOf(labelsOf(view), view.account)}` : ''
-        }`,
+        `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}${accountNote(view)}`,
         'each request is its record with the largest output per message.id',
         `history since: ${report?.coverage.start !== null && report?.coverage.start !== undefined ? new Date(report.coverage.start).toISOString() : ''}`,
     ];
+}
+
+/**
+ * The account an export holds, when one is chosen, for its range note. A
+ * label is another program's text, an organization's name its admin's: its
+ * commas would split the CSV's note line into cells, the one after a comma
+ * free to start a formula, so they are written as semicolons.
+ */
+function accountNote(view: PanelView): string {
+    if (view.account === ALL_ACCOUNTS) {
+        return '';
+    }
+    return view.account === NOT_RECORDED
+        ? ', the sessions that record no account'
+        : `, account ${labelOf(labelsOf(view), view.account).replace(/,/g, ';')}`;
 }
 
 /** How long the account filter's value must stay put before it is sent. */
@@ -1238,7 +1294,80 @@ ${PAGE_TEXT_HELPERS}
         return out.join('\\n');
     }
 
-    let shown = { controls: null, status: null, body: null, diagnostics: null };
+    // The range and scope buttons, and the account filter, as the page shows
+    // them: never rebuilt, so that one in use is not replaced under it, but
+    // brought up to date in place, unless the account filter comes or goes.
+    let choices = ${embed(first.choices)};
+    function showChoices(fragments) {
+        const next = fragments.choices;
+        const select = controls.querySelector('select[data-account-filter]');
+        if (!next || !choices || !next.account !== !select) {
+            if (JSON.stringify(next) !== JSON.stringify(choices)) { controls.innerHTML = fragments.controls; }
+            choices = next;
+            return;
+        }
+        controls.querySelectorAll('button[data-range]').forEach(button => {
+            press(button, button.dataset.range === next.range);
+            if (button.dataset.range === 'coverage' && button.textContent !== next.since) { button.textContent = next.since; }
+        });
+        controls.querySelectorAll('button[data-scope]').forEach(button => press(button, button.dataset.scope === next.scope));
+        if (select && next.account) { updateSelect(select, next.account); }
+        choices = next;
+    }
+
+    function press(button, pressed) {
+        if (button.getAttribute('aria-pressed') !== String(pressed)) { button.setAttribute('aria-pressed', String(pressed)); }
+    }
+
+    // An account chosen is sent once the choice has settled: moving through
+    // the list by the arrow keys changes the value at each step, and each
+    // would otherwise read the history again. Each choice sent is numbered,
+    // and the select keeps it until an update says the host has applied it:
+    // one that comes before, for an earlier choice or a pass, never moves the
+    // select back under the next step.
+    let choosing;
+    let sent = 0;
+    let applied = 0;
+    // What the account filter offers now, waiting for it to lose focus.
+    let deferred = null;
+    function updateSelect(select, account) {
+        // Not while it is in use: an open list would close under the
+        // pointer, and the next arrow key start from somewhere else.
+        if (document.activeElement === select) {
+            deferred = account;
+            return;
+        }
+        deferred = null;
+        const options = Array.from(select.options);
+        const same = options.length === account.options.length &&
+            account.options.every((o, i) => options[i].value === o.value && options[i].textContent === o.label && options[i].disabled === !!o.disabled);
+        if (!same) {
+            const value = select.value;
+            select.replaceChildren(...account.options.map(o => {
+                const option = document.createElement('option');
+                option.value = o.value;
+                option.textContent = o.label;
+                option.disabled = !!o.disabled;
+                return option;
+            }));
+            select.value = value;
+        }
+        if (choosing === undefined && applied >= sent && select.value !== account.value) {
+            select.value = account.value;
+        }
+    }
+
+    document.addEventListener('focusout', e => {
+        const select = e.target;
+        if (deferred && select && select.matches && select.matches('select[data-account-filter]')) {
+            // Once focus has gone where it goes.
+            setTimeout(() => {
+                if (deferred && select.isConnected && document.activeElement !== select) { updateSelect(select, deferred); }
+            }, 0);
+        }
+    });
+
+    let shown = { status: null, body: null, diagnostics: null };
     function show(fragments) {
         // Focus is restored to the same control, found again by what it does,
         // and in which table: two share their sort keys.
@@ -1272,7 +1401,7 @@ ${PAGE_TEXT_HELPERS}
             selector = () => 'select[data-account-filter]';
         }
         // A region whose page has not changed is left as it is, focus and all.
-        if (fragments.controls !== shown.controls) { controls.innerHTML = fragments.controls; }
+        showChoices(fragments);
         if (fragments.status !== shown.status) { statusLine.innerHTML = fragments.status; }
         if (fragments.body !== shown.body) { body.innerHTML = fragments.body; }
         if (fragments.diagnostics !== shown.diagnostics) {
@@ -1282,13 +1411,19 @@ ${PAGE_TEXT_HELPERS}
             const details = document.getElementById('diagnostics');
             if (details && wasOpen) { details.open = true; }
         }
-        shown = { controls: fragments.controls, status: fragments.status, body: fragments.body, diagnostics: fragments.diagnostics };
+        shown = { status: fragments.status, body: fragments.body, diagnostics: fragments.diagnostics };
         exports = { csv: fragments.csv, copy: fragments.copy };
         arrange();
         const restore = selector();
         if (restore) {
             const again = document.querySelector(restore);
-            if (again && again !== document.activeElement) { again.focus(); }
+            if (again && again !== document.activeElement) {
+                // On a page of its list that is not in view, as a row an
+                // update moved: that page first, where it can take focus.
+                const page = again.closest && again.closest('.pages > .page');
+                if (page && page.inert) { turn(page.parentElement, pagesIn(page.parentElement).indexOf(page), false); }
+                again.focus();
+            }
         }
     }
 
@@ -1325,15 +1460,15 @@ ${PAGE_TEXT_HELPERS}
         }
     });
 
-    // An account chosen is sent once the choice has settled: moving through
-    // the list by the arrow keys changes the value at each step, and each
-    // would otherwise read the history again.
-    let choosing;
     document.addEventListener('change', e => {
         const select = e.target;
         if (select && select.matches && select.matches('select[data-account-filter]')) {
             clearTimeout(choosing);
-            choosing = setTimeout(() => vscode.postMessage({ type: 'setAccount', account: select.value }), ACCOUNT_SETTLE_MS);
+            choosing = setTimeout(() => {
+                choosing = undefined;
+                sent += 1;
+                vscode.postMessage({ type: 'setAccount', account: select.value, choice: sent });
+            }, ACCOUNT_SETTLE_MS);
         }
     });
 
@@ -1341,7 +1476,10 @@ ${PAGE_TEXT_HELPERS}
         // The editor's own messages come from this page's origin; another
         // frame in the window could post here too.
         if (e.origin !== window.origin) { return; }
-        if (e.data && e.data.type === 'data') { show(e.data.fragments); }
+        if (e.data && e.data.type === 'data') {
+            if (typeof e.data.choice === 'number') { applied = e.data.choice; }
+            show(e.data.fragments);
+        }
     });
 
     arrange();

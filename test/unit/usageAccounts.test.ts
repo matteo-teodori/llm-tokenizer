@@ -12,6 +12,7 @@ import {
     isAccountFilter,
     isAccountId,
     isAccountKey,
+    nameReplaces,
     numberAccounts,
     showable,
     type AccountSeen,
@@ -182,6 +183,14 @@ suite('usage accounts: keys and labels', () => {
         // A name you gave that reads as another's label once told apart.
         const told = [...accountLabels([seenAs(ownerOf(B), 1), seenAs(ownerOf(C), 2), seenAs(ownerOf(A), 3)], [], { [B]: 'Work', [C]: 'Work', [A]: `Work · ${B.slice(0, 8)}` }).values()].map(l => l.label);
         assert.deepStrictEqual(told, [`Work · ${B}`, `Work · ${C}`, `Work · ${B.slice(0, 8)}`]);
+    });
+
+    test('a name you give stands in place of the email, as its labels show it, else of its number', () => {
+        const seen = [seenAs(ownerOf(A, ORG_A), 2)];
+        assert.strictEqual(nameReplaces(A, seen, [{ accountUuid: A, organizationUuid: ORG_A2, email: 'a@example.com', organizationName: 'Beta' }]), 'a@example.com');
+        assert.strictEqual(nameReplaces(A, seen, [{ accountUuid: A, organizationUuid: ORG_A, email: null, organizationName: "p@example.com's Organization" }]), 'p@example.com');
+        assert.strictEqual(nameReplaces(A, seen, []), 'Account 2');
+        assert.strictEqual(nameReplaces(B, seen, []), 'its number');
     });
 
     test("a personal organization's name gives its email where nothing else does, and a long email is cut before its organization", () => {

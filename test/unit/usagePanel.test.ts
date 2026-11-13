@@ -29,6 +29,8 @@ function fakePanel() {
     const messages = new vscode.EventEmitter<unknown>();
     const pages: string[] = [];
     const posted: PanelFragments[] = [];
+    /** The number of the page's last account choice each post carried back. */
+    const choices: (number | undefined)[] = [];
     let gone = false;
     const panel = {
         visible: true,
@@ -39,8 +41,9 @@ function fakePanel() {
             set html(value: string) {
                 pages.push(value);
             },
-            postMessage: (message: { type: string; fragments: PanelFragments }) => {
+            postMessage: (message: { type: string; fragments: PanelFragments; choice?: number }) => {
                 posted.push(message.fragments);
+                choices.push(message.choice);
                 return Promise.resolve(true);
             },
             onDidReceiveMessage: messages.event,
@@ -59,7 +62,7 @@ function fakePanel() {
         panel.visible = visible;
         viewState.fire({ webviewPanel: panel as unknown as vscode.WebviewPanel });
     };
-    return { panel, pages, posted, setVisible, send: (message: unknown) => messages.fire(message), disposed: () => gone };
+    return { panel, pages, posted, choices, setVisible, send: (message: unknown) => messages.fire(message), disposed: () => gone };
 }
 
 /** The service as the panel uses it; `counts` records each use. */
@@ -292,6 +295,45 @@ suite('usage panel', () => {
         assert.deepStrictEqual(reopened[0], { range: '30d', zone: 'Asia/Tokyo', scope: 'workspace', account: 'none' });
     });
 
+    test("each update carries back the number of the page's last account choice, counted afresh by a page just loaded", async () => {
+        const { service } = fakeService();
+        UsagePanel.show(context, service, log);
+        page.send({ type: 'ready', zone: 'UTC' });
+        await settle();
+        assert.strictEqual(page.choices.at(-1), 0);
+        page.send({ type: 'setAccount', account: 'none', choice: 5 });
+        await until(() => page.choices.at(-1) === 5);
+        // The same view, a new choice: posted all the same, so that the page knows.
+        page.send({ type: 'setAccount', account: 'none', choice: 6 });
+        await until(() => page.choices.at(-1) === 6);
+        page.send({ type: 'ready', zone: 'UTC' });
+        await until(() => page.choices.at(-1) === 0);
+    });
+
+    test('an update carries the choice its view was made from, not one made while its report was read', async () => {
+        const { service, fake } = fakeService();
+        const waiting: (() => void)[] = [];
+        fake.reportFor = () => new Promise<UsageReport>(resolve => waiting.push(() => resolve(quietReport())));
+        UsagePanel.show(context, service, log);
+        await until(() => waiting.length > 0);
+        waiting.splice(0).forEach(go => go());
+        await settle();
+        page.send({ type: 'setAccount', account: 'none', choice: 1 });
+        await until(() => waiting.length > 0);
+        // The next choice, while the first one's report is read.
+        page.send({ type: 'setAccount', account: 'all', choice: 2 });
+        await settle();
+        const before = page.choices.length;
+        waiting.splice(0).forEach(go => go());
+        await until(() => page.choices.length > before);
+        assert.strictEqual(page.choices[before], 1);
+        for (let i = 0; i < 5 && page.choices.at(-1) !== 2; i++) {
+            waiting.splice(0).forEach(go => go());
+            await settle();
+        }
+        assert.strictEqual(page.choices.at(-1), 2);
+    });
+
     test('an account the history no longer holds, after a Clear, gives way to every account, once the history is read', async () => {
         const { service, fake } = fakeService();
         const asked: (string | undefined)[] = [];
@@ -377,6 +419,44 @@ suite('usage panel', () => {
         } finally {
             Object.assign(workspace, { getConfiguration: originals.getConfiguration });
             Object.assign(window, { showInputBox: originals.showInputBox });
+        }
+    });
+
+    test("Name… says the name stands in place of the email, beside its organization, never one organization's whole label", async () => {
+        const id = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const acme = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+        const beta = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
+        const { service, fake } = fakeService();
+        const row = (organizationUuid: string, organization: number) => ({
+            key: `${id}/${organizationUuid}`,
+            owner: { accountUuid: id, organizationUuid },
+            sessions: 1,
+            firstTs: 1,
+            lastTs: 2,
+            ordinal: 2,
+            organizationOrdinal: organization,
+            organizations: 2,
+        });
+        fake.report = quietReport({
+            accountsSeen: [row(acme, 1), row(beta, 2)],
+            accountNames: [
+                { accountUuid: id, organizationUuid: acme, email: 'a@example.com', organizationName: 'Acme' },
+                { accountUuid: id, organizationUuid: beta, email: null, organizationName: 'Beta' },
+            ],
+        });
+        const asked: vscode.InputBoxOptions[] = [];
+        const window = vscode.window as unknown as Record<string, unknown>;
+        const original = window.showInputBox;
+        window.showInputBox = (options: vscode.InputBoxOptions) => (asked.push(options), Promise.resolve(undefined));
+        try {
+            UsagePanel.show(context, service, log);
+            await until(() => page.posted.length > 0 || page.pages.length > 1);
+            await settle();
+            page.send({ type: 'nameAccount', account: id });
+            await until(() => asked.length === 1);
+            assert.strictEqual(asked[0]?.prompt, 'Shown in Claude Code Usage in place of a@example.com, beside its organization. Leave it empty to show a@example.com again.');
+        } finally {
+            Object.assign(window, { showInputBox: original });
         }
     });
 

@@ -15,7 +15,7 @@ import * as vscode from 'vscode';
 import { contentSecurityPolicy, createNonce } from '../html';
 import { logoIcon } from '../logo';
 import { modelById } from '../tokenizer/registry';
-import { ALL_ACCOUNTS, MAX_GIVEN_NAME, accountLabels, givenNames, isAccountFilter, isAccountId, showable } from './accounts';
+import { ALL_ACCOUNTS, MAX_GIVEN_NAME, accountLabels, givenNames, isAccountFilter, isAccountId, nameReplaces, showable } from './accounts';
 import { isTimeZone, localMinute } from './aggregate';
 import { renderFragments, renderUsagePage, type PanelFragments, type PanelView } from './render';
 import { RANGE_KEYS, type RangeKey, type UsageReport } from './report';
@@ -87,7 +87,8 @@ export type PanelMessage =
     | { type: 'refresh' }
     | { type: 'setRange'; range: RangeKey }
     | { type: 'setScope'; scope: 'all' | 'workspace' }
-    | { type: 'setAccount'; account: string }
+    /** `choice`: the page's number for it, which the updates after it carry back. */
+    | { type: 'setAccount'; account: string; choice: number }
     | { type: 'nameAccount'; account: string }
     | { type: 'copy'; text: string }
     | { type: 'export'; text: string }
@@ -112,7 +113,9 @@ export function parsePanelMessage(raw: unknown): PanelMessage | undefined {
         case 'setScope':
             return m.scope === 'all' || m.scope === 'workspace' ? { type: 'setScope', scope: m.scope } : undefined;
         case 'setAccount':
-            return isAccountFilter(m.account) ? { type: 'setAccount', account: m.account } : undefined;
+            return isAccountFilter(m.account)
+                ? { type: 'setAccount', account: m.account, choice: Number.isSafeInteger(m.choice) && (m.choice as number) >= 0 ? (m.choice as number) : 0 }
+                : undefined;
         case 'nameAccount':
             return isAccountId(m.account) ? { type: 'nameAccount', account: m.account } : undefined;
         case 'copy':
@@ -149,6 +152,8 @@ export class UsagePanel implements vscode.Disposable {
     private lastFragments: PanelFragments | undefined;
     /** The report last shown: what Name… says an account is called now. */
     private lastReport: UsageReport | undefined;
+    /** The page's number for the last account it chose, which each update carries back (see the page's `updateSelect`). */
+    private choice = 0;
     private refreshedAt: number | undefined;
     private updating = Promise.resolve();
 
@@ -250,6 +255,8 @@ export class UsagePanel implements vscode.Disposable {
         switch (message.type) {
             case 'ready':
                 this.state.zone = message.zone;
+                // A page counts its choices from its start.
+                this.choice = 0;
                 await this.saveState();
                 // A page brought back from hidden starts empty: always answer.
                 await this.update(true);
@@ -273,6 +280,7 @@ export class UsagePanel implements vscode.Disposable {
                 return;
             case 'setAccount':
                 this.state.account = message.account;
+                this.choice = message.choice;
                 await this.saveState();
                 await this.update(false);
                 return;
@@ -308,20 +316,23 @@ export class UsagePanel implements vscode.Disposable {
     }
 
     /**
-     * Ask for a name for an account, in place of the one Claude Code gives it,
-     * or of its number: kept in the setting, by the account's id, where an
-     * empty one takes it out again.
+     * Ask for a name for an account, in place of its email, as Claude Code
+     * gives it, or of its number: kept in the setting, by the account's id,
+     * where an empty one takes it out again. The prompt names what the name
+     * replaces, never one organization's whole label: the name stands for
+     * the account, beside each of its organizations.
      */
     private async nameAccount(account: string): Promise<void> {
         const given = readGivenNames();
         const report = this.lastReport;
-        const label = report
-            ? [...accountLabels(report.accountsSeen, report.accountNames, given)].find(([key]) => key.startsWith(`${account}/`))?.[1]
-            : undefined;
-        const otherwise = label?.named ? (label.claudeName ?? 'its number') : (label?.label ?? 'its number');
+        const replaces = report ? nameReplaces(account, report.accountsSeen, report.accountNames) : 'its number';
+        const plain = report ? accountLabels(report.accountsSeen, report.accountNames, {}) : undefined;
+        const organized = report?.accountsSeen.some(a => a.owner?.accountUuid === account && plain?.get(a.key)?.label.startsWith(`${replaces} (`)) ?? false;
         const typed = await vscode.window.showInputBox({
             title: 'Name a Claude account',
-            prompt: `Shown in Claude Code Usage in place of ${otherwise}. Leave it empty to show that again.`,
+            prompt: `Shown in Claude Code Usage in place of ${replaces}${organized ? ', beside its organization' : ''}. Leave it empty to show ${
+                replaces === 'its number' ? 'that' : replaces
+            } again.`,
             value: given[account] ?? '',
             validateInput: value => ([...value.trim()].length > MAX_GIVEN_NAME ? `At most ${MAX_GIVEN_NAME} characters.` : undefined),
         });
@@ -375,13 +386,16 @@ export class UsagePanel implements vscode.Disposable {
     private update(force: boolean): Promise<void> {
         this.updating = this.updating
             .then(async () => {
+                // The page's last choice the view is made from: taken with
+                // the state, before the report is waited for.
+                const choice = this.choice;
                 const fragments = renderFragments(await this.view());
                 this.lastFragments = fragments;
-                const serialised = JSON.stringify(fragments);
+                const serialised = JSON.stringify([fragments, choice]);
                 if (force || serialised !== this.lastPosted) {
                     this.lastPosted = serialised;
                     if (this.panel.visible) {
-                        await this.panel.webview.postMessage({ type: 'data', fragments });
+                        await this.panel.webview.postMessage({ type: 'data', fragments, choice });
                     } else {
                         // A hidden page drops what is posted to it, and comes
                         // back from its HTML: that is what is brought up to date.
