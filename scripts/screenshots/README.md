@@ -7,8 +7,10 @@ update the README's alt texts to the figures they then show.
 Everything shown is invented. `demo.mjs` writes a home holding the demo
 workspace, acme-storefront (the files git tracks in `workspace/`), and 30 days
 of Claude Code records for it and four other invented projects, from a seeded
-generator, on three invented Claude accounts, which a Claude Code
-configuration file of its own names. No one's own usage is read, and
+generator, on three invented Claude accounts, two of which a Claude Code
+configuration file of its own names (the third the panel numbers). Sessions
+record their account from 4 November 2026, when Claude Code began to, and
+never in the first six of the 30 days. No one's own usage is read, and
 `capture.mjs` checks that.
 
 ## Prerequisites
@@ -17,8 +19,9 @@ configuration file of its own names. No one's own usage is read, and
 - `npm ci` at the repository's root, and `npm test` once, which downloads the
   VS Code build under `.vscode-test/`: `vscode-darwin-arm64-<version>` on
   Apple silicon, `vscode-darwin-<version>` on Intel. Use the newest one
-  there: older ones, from earlier releases' tests, draw an older workbench,
-  and `capture.mjs` refuses them.
+  there: an older one, from an earlier stable run or the floor run, draws an
+  older workbench, and `capture.mjs` refuses one in `.vscode-test` older than
+  the newest there.
 - Here: `npm ci --ignore-scripts` (playwright-core, pinned by
   `package-lock.json`; nothing here is part of the extension).
 
@@ -92,6 +95,7 @@ display, and `--force-color-profile=srgb` in sRGB.
 GIF's at 1280 by 800), and `Page.captureScreenshot` keeps the scale, where
 Playwright's own capture does not: the pages are 2880 by 1800, the status
 crops 1000 by 460, cut out of a whole capture with the item still hovered, the
-GIF's frames 2560 by 1600, and each webview is checked to draw at 2x. No row of
-a table or a chart is cut by a page's bottom edge. ffmpeg halves the GIF's nine frames to 1280 by 800 with a box
-filter and a palette per frame, each held as long as `gif.txt` says.
+GIF's frames 2560 by 1600, and each webview is checked to draw at 2x. No row
+of a table or a chart is cut by a page's bottom edge. ffmpeg halves the GIF's
+twelve frames to 1280 by 800 with a box filter and a palette per frame, each
+held as long as `gif.txt` says.

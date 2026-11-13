@@ -86,17 +86,27 @@ const ACCOUNTS = {
     personal: { accountUuid: '7a9b8c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d', organizationUuid: '3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b', email: 'dana@example.com', organization: "dana@example.com's Organization" },
     client: { accountUuid: '2b4d6f80-1a3c-4e5f-8a7b-9c0d1e2f3a4b', organizationUuid: '6c5b4a39-2817-4f6e-9d5c-4b3a29180f7e' },
 };
-/** The first days, before Claude Code recorded accounts: their sessions record none. */
+/**
+ * Claude Code recorded a session's account from version 2.1.318, which came
+ * out around 4 November 2026: a session begun before then records none, as
+ * the panel's note says, and so does one of the demo's first days whenever
+ * it is made.
+ */
+const RECORDED_FROM = Date.UTC(2026, 10, 4);
 const UNRECORDED_DAYS = 6;
-/** The account a session was signed in to, by its project and how many days ago it began. */
-function accountOf(project, daysAgo) {
-    if (daysAgo >= 30 - UNRECORDED_DAYS) {
+/**
+ * The account a session was signed in to, by its project and how many days
+ * ago it began. The client's is the last first used, in the last few days,
+ * so that it is the one the panel numbers 3.
+ */
+function accountOf(project, daysAgo, start) {
+    if (daysAgo >= 30 - UNRECORDED_DAYS || start < RECORDED_FROM) {
         return null;
     }
     if (project === 'design-system' || project === 'mobile-app') {
         return ACCOUNTS.personal;
     }
-    if (project === 'data-pipeline' && daysAgo >= 12 && daysAgo <= 18) {
+    if (project === 'data-pipeline' && daysAgo >= 1 && daysAgo <= 3) {
         return ACCOUNTS.client;
     }
     return ACCOUNTS.work;
@@ -216,7 +226,7 @@ function session({ project, start, minutes, count, model, live }) {
     const sessionId = live ?? uuid();
     const dir = join(claude, 'projects', projectDir);
     const main = join(dir, `${sessionId}.jsonl`);
-    const account = accountOf(project, Math.floor((today - Math.floor(start / DAY) * DAY) / DAY));
+    const account = accountOf(project, Math.floor((today - Math.floor(start / DAY) * DAY) / DAY), start);
     const base = { sessionId, version: account ? OWNER_VERSION : VERSION, cwd };
     // As Claude Code writes it: with the session's metadata, its account's ids only.
     const owner = account && { type: 'session-owner', accountUuid: account.accountUuid, organizationUuid: account.organizationUuid, sessionId };

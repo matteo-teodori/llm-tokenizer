@@ -51,8 +51,8 @@ for (const managed of ['/Library/Application Support/ClaudeCode', '/etc/claude-c
     }
 }
 // The images show VS Code as it is now: the newest build `npm test` has
-// downloaded. One that an earlier release's tests left beside it draws an
-// older workbench around the same panel.
+// downloaded. One that an earlier stable run or the floor run left beside it
+// draws an older workbench around the same panel.
 const versionOf = dotApp => JSON.parse(readFileSync(join(dotApp, 'Contents', 'Resources', 'app', 'product.json'), 'utf8')).version;
 const newer = (a, b) => {
     const [x, y] = [a, b].map(v => v.split('.').map(Number));
