@@ -5,9 +5,10 @@
  * It is the only long-term copy of the history: Claude Code deletes its own
  * session records after `cleanupPeriodDays` (30 by default), so nothing here
  * may be treated as a cache that can be thrown away and rebuilt. Hence
- * forward-only migrations with a backup before each, a read-only mode for a
- * database a newer version created, and, for a corrupt file, a new history
- * started beside it, which is left as it is rather than deleted.
+ * forward-only migrations, with a backup before each that builds a table
+ * anew, a read-only mode for a database a newer version created, and, for a
+ * corrupt file, a new history started beside it, which is left as it is
+ * rather than deleted.
  *
  * Measured, on the stand-in schema: a full import of about 4 GB of records in
  * 6.49 s on the engines floor's runtime, a day-by-model GROUP BY in 65 ms. On
@@ -26,7 +27,7 @@ import * as path from 'path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 import { BUCKET_MS } from './aggregate';
-import { copiesBeside, currentHistory, linkWhole, ownFiles, removeQuietly } from './historyFiles';
+import { backupsBeside, copiesBeside, currentHistory, linkWhole, ownFiles, removeQuietly } from './historyFiles';
 import { isComplete } from './provenance';
 import type {
     BucketSums,
@@ -391,18 +392,26 @@ const DATA_TABLES = ['files', 'read_guards', 'requests', 'paths', 'sessions', 'c
 
 /**
  * Migrations by the version they produce. Forward-only, each in one
- * transaction after a backup. Version 1 creates the schema; version 2 keeps
- * each request's speed and where it ran, which its price depends on. A row
- * read before has neither, until its file is read again. Version 3 keeps
- * each path once (see MIGRATE_TO_3), and is the one that is not additive:
- * the file is compacted after it, and a build before it told to stop
- * writing. On 229,000 requests it took 3.1 to 3.8 s, backup included.
+ * transaction. Version 1 creates the schema; version 2 keeps each request's
+ * speed and where it ran, which its price depends on. A row read before has
+ * neither, until its file is read again. Version 3 keeps each path once (see
+ * MIGRATE_TO_3), and is the one that is not additive: the file is compacted
+ * after it, and a build before it told to stop writing. On 229,000 requests
+ * it took 3.1 to 3.8 s, backup included.
  */
 const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
     1: db => db.exec(SCHEMA),
     2: db => db.exec('ALTER TABLE requests ADD COLUMN speed TEXT; ALTER TABLE requests ADD COLUMN inference_geo TEXT;'),
     3: db => db.exec(MIGRATE_TO_3),
 };
+
+/**
+ * The migrations that build a table anew: each is backed up before, and the
+ * file compacted after. The others only add a table or a column, in a
+ * transaction SQLite undoes whole if it fails, and a backup would only copy
+ * the history: 174 MB, on the heaviest measured.
+ */
+const REBUILDS: ReadonlySet<number> = new Set([3]);
 
 /**
  * The comparator of `accounting.ts`, as the upsert's condition: the incoming
@@ -567,10 +576,15 @@ export class UsageStore {
             return from;
         }
         let migrated = false;
+        let rebuilt = false;
+        // Each backup this run made or found: the only ones kept once it is through.
+        const backups = new Set<string>();
         for (let version = from + 1; version <= SCHEMA_VERSION; version++) {
             // The first migration creates the schema; there is nothing to keep.
-            if (from > 0) {
-                backUp(db, `${file}.bak-v${version - 1}`);
+            if (from > 0 && REBUILDS.has(version)) {
+                const backup = `${file}.bak-v${version - 1}`;
+                backUp(db, backup);
+                backups.add(path.basename(backup));
             }
             db.exec('BEGIN IMMEDIATE');
             try {
@@ -590,13 +604,23 @@ export class UsageStore {
                 db.exec(`PRAGMA user_version = ${version}`);
                 db.exec('COMMIT');
                 migrated = true;
+                rebuilt ||= REBUILDS.has(version);
             } catch (error) {
                 db.exec('ROLLBACK');
                 throw error;
             }
         }
-        if (migrated) {
+        if (rebuilt) {
             compact(db);
+        }
+        if (migrated) {
+            // The backups earlier migrations left are the history as it was
+            // then, each as large as it was, and kept until Clear: 371 MB of
+            // them, on the heaviest measured. Once one has gone through, only
+            // the backup it started from is worth keeping.
+            for (const older of backupsBeside(file, backups)) {
+                removeQuietly(older);
+            }
         }
         return SCHEMA_VERSION;
     }

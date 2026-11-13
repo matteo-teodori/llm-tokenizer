@@ -511,7 +511,7 @@ suite('usage history store', () => {
         }
     }
 
-    test('a version 1 history gains the speed and where each request ran, then keeps each path once, after a backup at each step, and keeps every row', () => {
+    test('a version 1 history gains the speed and where each request ran, then keeps each path once, after a backup, and keeps every row', () => {
         // Only development builds made one.
         const store = ready(open());
         store.transaction(() => store.upsertRequests([req({ messageId: 'kept', input: 5 })]));
@@ -523,9 +523,11 @@ suite('usage history store', () => {
         assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.input, r.speed, r.inferenceGeo, r.file]), [['kept', 5, null, null, req().file]]);
         migrated.transaction(() => migrated.upsertRequests([req({ messageId: 'new', requestId: 'req_2', speed: 'fast', inferenceGeo: 'us' })]));
         assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.speed, r.inferenceGeo]).sort(), [['kept', null, null], ['new', 'fast', 'us']]);
-        // Each backup is the history as that step found it.
-        assert.deepStrictEqual(backedUp(`${file}.bak-v1`), [1, [['kept', req().file]]]);
+        // Backed up only before the step that builds a table anew, as that
+        // step found it: the steps that only add are undone whole if they fail.
+        assert.ok(!fs.existsSync(`${file}.bak-v1`));
         assert.deepStrictEqual(backedUp(`${file}.bak-v2`), [2, [['kept', req().file]]]);
+        assert.ok(!fs.existsSync(`${file}.bak-v3`));
     });
 
     test("a migration's backup is made whole or not at all: a copy cut short is never taken for it", () => {
@@ -625,6 +627,27 @@ suite('usage history store', () => {
         // The backup is the history as it was.
         const backup = backedUp(`${file}.bak-v2`) as [number, string[][]];
         assert.deepStrictEqual([backup[0], backup[1].length, backup[1].find(r => r[0] === 'm1')], [2, 2_000, ['m1', paths[1]]]);
+    });
+
+    test('once a migration goes through, the backups earlier ones left go, and nothing else', () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ messageId: 'kept' })]));
+        store.close();
+        opened.length = 0;
+        asSchema(file, 2);
+        // What an earlier build left beside it, a backup a crash cut short, and another history's backup.
+        const base = path.basename(file);
+        for (const name of [`${base}.bak-v1`, `${base}.bak-v1.0123456789ab`, 'usage-0000000000000000000a.sqlite.bak-v1']) {
+            fs.writeFileSync(path.join(path.dirname(file), name), 'a copy');
+        }
+        const migrated = ready(open());
+        assert.deepStrictEqual([...migrated.requests()].map(r => r.messageId), ['kept']);
+        assert.deepStrictEqual(
+            fs.readdirSync(path.dirname(file)).filter(name => name.includes('.bak-v')).sort(),
+            ['usage-0000000000000000000a.sqlite.bak-v1', `${base}.bak-v1.0123456789ab`, `${base}.bak-v2`],
+        );
+        // The one this migration started from is the history as it was.
+        assert.deepStrictEqual(backedUp(`${file}.bak-v2`), [2, [['kept', req().file]]]);
     });
 
     test("a migration's log that another window's read holds on to is emptied at the next request", () => {
