@@ -18,9 +18,10 @@
 import { RANKED_BARS_CSS, THEME_TOKENS_CSS, rankedBars, type RankedValue } from '../charts';
 import { PAGE_TEXT_HELPERS, embed, escapeHtml } from '../html';
 import { formatNumber } from '../utils';
+import { ALL_ACCOUNTS, NOT_RECORDED, accountLabels, type AccountLabel } from './accounts';
 import type { UsageTotals } from './aggregate';
 import { totalPrefix } from './provenance';
-import { ACTIVE_PAUSE_MS, type ModelRow, type RangeKey, type UsageReport } from './report';
+import { ACTIVE_PAUSE_MS, type AccountRow, type ModelRow, type RangeKey, type UsageReport } from './report';
 import type { Reading, UsageStatus } from './usageService';
 
 /** What the panel shows besides the report: status, scope, and diagnostics. */
@@ -30,6 +31,10 @@ export interface PanelView {
     reading: Reading | undefined;
     range: RangeKey;
     scope: 'all' | 'workspace';
+    /** The account filter: ALL_ACCOUNTS, or one account's key. */
+    account: string;
+    /** The names you gave accounts, by account id, from the setting. */
+    givenNames: Readonly<Record<string, string>>;
     zone: string;
     /** "on <host>" in a remote window, empty locally. */
     where: string;
@@ -39,6 +44,8 @@ export interface PanelView {
     modelLabel(id: string): string;
     /** Each root considered, as shown: `~`-relative, with what chose it in words. */
     roots: { path: string; source: string; exists: boolean; notAbsolute?: true }[];
+    /** Claude Code's configuration files the account names are read from, as shown: `~`-relative. */
+    accountFiles: string[];
     historyDisabled: boolean;
     lastImport: LastImport | undefined;
     sqliteRuntime: { node: string; electron: string | null } | undefined;
@@ -97,11 +104,13 @@ function emptyState(view: PanelView): string | undefined {
             <section class="empty-state">
                 <h2>Claude Code usage is off</h2>
                 <p>Turned on, LLM Tokenizer reads Claude Code's own session records ${view.where ? escapeHtml(view.where) : 'on this machine'},
-                in the projects folder of its configuration folder (<code>~/.claude</code> by default), and shows how many tokens Claude Code processed: by day, project, session and model.</p>
+                in the projects folder of its configuration folder (<code>~/.claude</code> by default), and shows how many tokens Claude Code processed: by day, account, project, session and model.
+                From Claude Code's configuration file (<code>~/.claude.json</code> by default) it reads only the Claude accounts it names.</p>
                 <p>Kept, in a database in this extension's own storage:</p>
                 <ul>
                     <li>each request's token counts, model, effort, speed, where it ran, time and Claude Code version, and its ids: message, request, session, and the subagent or workflow run it came from;</li>
                     <li>the folder each session started in;</li>
+                    <li>the Claude account and organization each session was signed in to, by id, and the email and organization name Claude Code gave each account;</li>
                     <li>each transcript's path, size, file id and how far it was read, with a hash of the last 64 bytes read, to tell what changed;</li>
                     <li>compactions' sizes, and the usage limits reached, with when they reset;</li>
                     <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
@@ -215,8 +224,45 @@ function controls(view: PanelView): string {
     return `
         <div class="segmented" role="group" aria-label="Range">${(['today', '7d', '30d', 'coverage'] as const).map(range).join('')}</div>
         <div class="segmented" role="group" aria-label="Scope">${scope('all', 'All projects')}${scope('workspace', 'This workspace')}</div>
+        ${accountFilter(view)}
         ${refresh}
         <span class="muted">${[refreshed, newest].filter(Boolean).join(' · ')}${view.where ? ` · ${escapeHtml(view.where)}` : ''}</span>`;
+}
+
+/** Whether the history has seen any account: until it has, nothing on the page speaks of them. */
+function hasAccounts(report: UsageReport | undefined): report is UsageReport {
+    return report !== undefined && report.accountsSeen.some(a => a.owner !== null);
+}
+
+/** Every account's label, by key: see accounts.ts. */
+function labelsOf(view: PanelView): Map<string, AccountLabel> {
+    return view.report ? accountLabels(view.report.accountsSeen, view.report.accountNames, view.givenNames) : new Map<string, AccountLabel>();
+}
+
+function labelOf(labels: Map<string, AccountLabel>, key: string): string {
+    return labels.get(key)?.label ?? (key === NOT_RECORDED ? 'Not recorded' : 'An account no longer in the history');
+}
+
+/**
+ * The account filter, once the history has seen two: every account by when
+ * it was first used, and the sessions that record none. One chosen that the
+ * history no longer holds, after a Clear, is still offered while it is.
+ */
+function accountFilter(view: PanelView): string {
+    const report = view.report;
+    if (!hasAccounts(report) || (report.accountsSeen.length < 2 && view.account === ALL_ACCOUNTS)) {
+        return '';
+    }
+    const labels = labelsOf(view);
+    const keys = report.accountsSeen.map(a => a.key);
+    if (view.account !== ALL_ACCOUNTS && !keys.includes(view.account)) {
+        keys.push(view.account);
+    }
+    const option = (key: string, label: string) =>
+        `<option value="${escapeHtml(key)}"${key === view.account ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+    return `<select class="account-filter" data-account-filter aria-label="Account">${option(ALL_ACCOUNTS, 'All accounts')}${keys
+        .map(key => option(key, labelOf(labels, key)))
+        .join('')}</select>`;
 }
 
 /**
@@ -419,12 +465,16 @@ function limitWindows(report: UsageReport, view: PanelView): string {
     }
     // Newest first: the page in view on opening is the latest limits.
     const windows = [...report.limitWindows].reverse();
+    // A limit is an account's: where the windows are more than one
+    // account's, each says whose.
+    const labels = labelsOf(view);
+    const whose = new Set(windows.map(w => w.account)).size > 1;
     const pages = pagesOf(windows).map(
         (page, i) =>
             `<ul class="page plain-list"${i > 0 ? ' inert' : ''}>${page
                 .map(
                     w =>
-                        `<li><span>${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
+                        `<li><span>${whose ? `${escapeHtml(labelOf(labels, w.account))}: ` : ''}${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
                             w.hits === 1 ? 'request' : 'requests'
                         } refused from ${escapeHtml(view.formatTime(w.firstTs))}</span><span class="reason">${
                             w.resetsAt !== null ? `reset ${escapeHtml(view.formatTime(w.resetsAt * 1000))}` : ''
@@ -437,7 +487,7 @@ function limitWindows(report: UsageReport, view: PanelView): string {
         ${sectionHead('Usage limits reached', 'limits', windows.length)}
         ${strip('limits', 'Usage limits reached', windows.length, pages)}
         ${report.omitted.limitWindows > 0 ? `<p class="truncation">…and ${report.omitted.limitWindows.toLocaleString('en-US')} earlier ones, not listed.</p>` : ''}
-        <p class="note">For the whole account, whichever project hit them, newest first.</p>
+        <p class="note">${whose ? 'Each for its whole account' : 'For the whole account'}, whichever project hit them, newest first.</p>
     </section>`;
 }
 
@@ -485,6 +535,85 @@ function table(
         ${strip(id, title, rows.length, pages, ` data-sort="${initial}" data-ascending="false"`)}`;
 }
 
+/**
+ * The accounts the range's tokens went through, with what tells each apart:
+ * its name, when it was used, and in which projects. Shown once the history
+ * has seen an account, and while every account is: one chosen is the whole
+ * page.
+ */
+function accounts(report: UsageReport, view: PanelView): string {
+    if (view.account !== ALL_ACCOUNTS || !report.accounts.some(a => a.owner !== null)) {
+        return '';
+    }
+    const total = report.totals.processed;
+    const labels = labelsOf(view);
+    const seen = new Map(report.accountsSeen.map(a => [a.key, a]));
+    const current = new Set(report.currentAccounts);
+    const unrecorded = report.accounts.some(a => a.owner === null);
+    return `
+    <section class="panel">
+        ${table(
+            'accounts',
+            'Accounts',
+            [
+                { key: 'label', label: 'Account' },
+                { key: 'sessions', label: 'Sessions', numeric: true, width: '14%' },
+                { key: 'processed', label: 'Processed', numeric: true, width: '22%' },
+                { key: 'share', label: 'Share', numeric: true, width: '12%' },
+            ],
+            report.accounts.map(a => {
+                const label = labels.get(a.key);
+                const used = seen.get(a.key);
+                return {
+                    keys: { label: labelOf(labels, a.key), sessions: a.sessions, processed: a.totals.processed, share: a.totals.processed },
+                    cells: [
+                        accountCell(view, a, label, used?.firstTs ?? null, used?.lastTs ?? null, current.has(a.key)),
+                        a.sessions.toLocaleString('en-US'),
+                        processedCell(view, a.totals, a.models),
+                        total > 0 ? cut(a.totals.processed / total, 1) : '—',
+                    ],
+                };
+            }),
+            'processed',
+        )}
+        <p class="note">An account is the Claude account and organization a session was signed in to, as Claude Code records it, its subagents' tokens included; its name is the one Claude Code gave it while this history was kept, or the one you give it.${
+            unrecorded
+                ? ' Not recorded: sessions Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in October 2026, and those signed in with an API key or through a cloud provider.'
+                : ''
+        }</p>
+    </section>`;
+}
+
+/**
+ * An account's cell: its label, whether Claude Code is signed in to it now,
+ * a button to name it, and, below, when it was used and in which projects,
+ * which tell apart an account with no name. Every id and date on hover.
+ */
+function accountCell(view: PanelView, row: AccountRow, label: AccountLabel | undefined, firstTs: number | null, lastTs: number | null, current: boolean): string {
+    const name = label?.label ?? (row.owner ? 'An account no longer in the history' : 'Not recorded');
+    const span = firstTs !== null && lastTs !== null ? `${view.formatDate(firstTs)} – ${view.formatDate(lastTs)}` : '';
+    const hint = row.owner ? [span, row.projects.join(', ')].filter(Boolean).join(' · ') : 'no account in its transcripts';
+    const title = row.owner
+        ? [
+              name,
+              label?.named && label.claudeName ? `Claude Code calls it ${label.claudeName}` : '',
+              current ? 'Claude Code is signed in to it now' : '',
+              `Account ${row.owner.accountUuid}`,
+              row.owner.organizationUuid ? `Organization ${row.owner.organizationUuid}` : 'No organization',
+              firstTs !== null && lastTs !== null ? `Requests from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
+              row.projects.length > 0 ? `In ${row.projects.join(', ')}` : '',
+          ]
+        : ['Sessions whose transcripts record no account'];
+    const button = row.owner
+        ? `<button type="button" class="name" data-action="nameAccount" data-account="${escapeHtml(row.owner.accountUuid)}" title="${
+              label?.named ? 'Rename this account in this panel' : 'Name this account in this panel'
+          }">${label?.named ? 'Rename…' : 'Name…'}</button>`
+        : '';
+    return `<div class="account-line"><span class="account-name" title="${escapeHtml(title.filter(Boolean).join('\n'))}">${escapeHtml(name)}</span>${
+        current ? '<span class="badge">signed in now</span>' : ''
+    }${button}</div><div class="account-hint">${escapeHtml(hint)}</div>`;
+}
+
 function projects(report: UsageReport, view: PanelView): string {
     const total = report.totals.processed;
     return `
@@ -514,6 +643,7 @@ function projects(report: UsageReport, view: PanelView): string {
 }
 
 function sessions(report: UsageReport, view: PanelView): string {
+    const labels = hasAccounts(report) ? labelsOf(view) : undefined;
     return `
     <section class="panel">
         ${table(
@@ -543,7 +673,9 @@ function sessions(report: UsageReport, view: PanelView): string {
                         compactions: s.compactions.length,
                     },
                     cells: [
-                        `<span title="${escapeHtml(`Session ${s.sessionId}`)}">${escapeHtml(s.firstTs !== null ? view.formatTime(s.firstTs) : '—')}</span>`,
+                        `<span title="${escapeHtml(`Session ${s.sessionId}${labels ? `\nAccount: ${labelOf(labels, s.account)}` : ''}`)}">${escapeHtml(
+                            s.firstTs !== null ? view.formatTime(s.firstTs) : '—',
+                        )}</span>`,
                         `<span title="${escapeHtml(s.label)}">${escapeHtml(s.label)}</span>`,
                         between ? `<span title="${escapeHtml(between)}">${formatActive(s.activeMs)}</span>` : formatActive(s.activeMs),
                         s.totals.coverage.requests.toLocaleString('en-US'),
@@ -648,6 +780,12 @@ function diagnostics(view: PanelView): string {
     if (view.recoveredFrom) {
         rows.push(['Set aside', escapeHtml(view.recoveredFrom)]);
     }
+    rows.push([
+        'Account names',
+        view.accountFiles.length > 0
+            ? `from ${view.accountFiles.map(f => `<span class="path">${escapeHtml(f)}</span>`).join(', ')}`
+            : "no Claude Code configuration file found",
+    ]);
     rows.push(['Time zone', escapeHtml(view.zone)]);
     return `
     <details class="panel" id="diagnostics">
@@ -679,11 +817,15 @@ export function renderFragments(view: PanelView): PanelFragments {
                           : view.reading
                             ? // A range the reading has not reached yet is not one without requests.
                               'Nothing has been read in this range yet.'
-                            : view.scope === 'workspace'
-                              ? 'No session in this range started in a folder of this workspace.'
-                              : 'No requests fall in this range.'
+                            : view.account !== ALL_ACCOUNTS
+                              ? `No session of ${escapeHtml(labelOf(labelsOf(view), view.account))} falls in this range${
+                                    view.scope === 'workspace' ? ' in a folder of this workspace' : ''
+                                }.`
+                              : view.scope === 'workspace'
+                                ? 'No session in this range started in a folder of this workspace.'
+                                : 'No requests fall in this range.'
                   }</p></section>`
-                : `${banner(view)}${overview(report, view)}${projects(report, view)}${sessions(report, view)}`
+                : `${banner(view)}${overview(report, view)}${accounts(report, view)}${projects(report, view)}${sessions(report, view)}`
             : `${banner(view)}<p class="muted">Reading Claude Code's records…</p>`);
     return {
         controls: empty ? '' : controls(view),
@@ -749,6 +891,7 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
 
 function copyRows(view: PanelView): PanelFragments['copy'] {
     const report = view.report;
+    const labels = labelsOf(view);
     const rows = (report?.sessions ?? []).map(s => [
         s.firstTs !== null ? view.formatTime(s.firstTs) : '',
         s.label,
@@ -756,13 +899,15 @@ function copyRows(view: PanelView): PanelFragments['copy'] {
         String(s.totals.coverage.requests),
         String(s.totals.processed),
         String(Math.round(s.activeMs / 60_000)),
+        labelOf(labels, s.account),
     ]);
     const notes = exportNotes(view);
     notes.push(`active_minutes is the time between a session's requests in the range, pauses of over ${ACTIVE_PAUSE_MS / 60_000} minutes left out`);
     if (report && report.omitted.sessions > 0) {
         notes.push(`${report.omitted.sessions} smaller sessions are counted in the totals but not listed`);
     }
-    return { header: ['started', 'project', 'session', 'requests', 'processed', 'active_minutes'], rows, notes };
+    notes.push("account is the Claude account a session was signed in to, as the panel names it; Not recorded where its transcripts record none");
+    return { header: ['started', 'project', 'session', 'requests', 'processed', 'active_minutes', 'account'], rows, notes };
 }
 
 /** The `# key: value` lines every export opens with. */
@@ -771,7 +916,9 @@ function exportNotes(view: PanelView): string[] {
     return [
         `extension: LLM Tokenizer ${view.extensionVersion}`,
         `time zone: ${view.zone}`,
-        `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}`,
+        `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}${
+            view.account !== ALL_ACCOUNTS ? `, account ${labelOf(labelsOf(view), view.account)}` : ''
+        }`,
         'each request is its record with the largest output per message.id',
         `history since: ${report?.coverage.start !== null && report?.coverage.start !== undefined ? new Date(report.coverage.start).toISOString() : ''}`,
     ];
@@ -871,6 +1018,22 @@ table.page td, table.page th button { overflow-wrap: anywhere; }
 table.page th button { max-width: 100%; }
 table.page td.label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 0 12px; }
+select.account-filter {
+    max-width: 22em;
+    padding: 2px 6px;
+    font: inherit;
+    color: var(--vscode-dropdown-foreground, var(--ink));
+    background: var(--vscode-dropdown-background, var(--surface));
+    border: 1px solid var(--vscode-dropdown-border, var(--hairline));
+    border-radius: 3px;
+}
+select.account-filter:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+/* An account's name, and what tells it apart below it: each line cut, its title whole. */
+.account-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.account-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.account-line .badge { flex: none; color: var(--ink-muted); font-size: 0.85em; }
+.account-line button.name { flex: none; margin-left: auto; padding: 0 6px; font-size: 0.85em; }
+.account-hint { overflow: hidden; text-overflow: ellipsis; color: var(--ink-muted); font-size: 0.85em; }
 .section-head h2 { margin: 0; }
 .pager { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-muted); font-size: 0.9em; font-variant-numeric: tabular-nums; }
 .pager button { padding: 0 9px; }
@@ -1054,7 +1217,11 @@ ${PAGE_TEXT_HELPERS}
             // share their sort keys, and every page has a header.
             const strip = attribute === 'data-sort-key' && focused.closest('.pages[id]');
             const pager = attribute === 'data-page' && focused.closest('nav[data-pages]');
-            const button = attribute ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' : null;
+            // An account's Name… is found again by its account: every row has one.
+            const account = focused.getAttribute('data-account');
+            const button = attribute
+                ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' + (account ? '[data-account="' + account + '"]' : '')
+                : null;
             selector = () =>
                 !button ? null
                 : strip ? '#' + strip.id + ' > .page:nth-child(' + ((at[strip.id] || 0) + 1) + ') ' + button
@@ -1067,6 +1234,8 @@ ${PAGE_TEXT_HELPERS}
             selector = () => '#' + id;
         } else if (focused && focused.matches('#diagnostics > summary')) {
             selector = () => '#diagnostics > summary';
+        } else if (focused && focused.matches('select[data-account-filter]')) {
+            selector = () => 'select[data-account-filter]';
         }
         // A region whose page has not changed is left as it is, focus and all.
         if (fragments.controls !== shown.controls) { controls.innerHTML = fragments.controls; }
@@ -1091,7 +1260,9 @@ ${PAGE_TEXT_HELPERS}
     document.addEventListener('click', e => {
         const button = e.target.closest('button');
         if (!button) { return; }
-        if (button.dataset.range) {
+        if (button.dataset.action === 'nameAccount') {
+            vscode.postMessage({ type: 'nameAccount', account: button.dataset.account });
+        } else if (button.dataset.range) {
             vscode.postMessage({ type: 'setRange', range: button.dataset.range });
         } else if (button.dataset.scope) {
             vscode.postMessage({ type: 'setScope', scope: button.dataset.scope });
@@ -1116,6 +1287,13 @@ ${PAGE_TEXT_HELPERS}
             vscode.postMessage({ type: 'export', text: lines(exports.csv, ',', csv) });
         } else if (button.dataset.action) {
             vscode.postMessage({ type: button.dataset.action });
+        }
+    });
+
+    document.addEventListener('change', e => {
+        const select = e.target;
+        if (select && select.matches && select.matches('select[data-account-filter]')) {
+            vscode.postMessage({ type: 'setAccount', account: select.value });
         }
     });
 

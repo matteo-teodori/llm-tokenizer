@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
 
+import { escapeHtml } from '../../src/html';
 import { emptyTotals, type UsageTotals } from '../../src/usage/aggregate';
 import { parsePanelMessage } from '../../src/usage/panel';
 import { cutPercent, renderFragments, renderUsagePage, type PanelFragments, type PanelView } from '../../src/usage/render';
@@ -10,6 +11,7 @@ import type { UsageReport } from '../../src/usage/report';
 
 /** Every way a transcript string could carry markup, in one. */
 const HOSTILE = '<img src=x onerror=alert(1)>"\'&';
+const HOSTILE_ESCAPED = escapeHtml(HOSTILE);
 
 function totals(processed: number, partial = false): UsageTotals {
     const t = emptyTotals();
@@ -67,12 +69,15 @@ function view(overrides: Partial<PanelView> = {}): PanelView {
         reading: undefined,
         range: '7d',
         scope: 'all',
+        account: 'all',
+        givenNames: {},
         zone: 'Europe/Rome',
         where: '',
         remote: false,
         report: report(),
         modelLabel: id => id,
         roots: [{ path: `~/${HOSTILE}`, source: 'default', exists: true }],
+        accountFiles: [`~/.claude${HOSTILE}.json`],
         historyDisabled: false,
         lastImport: undefined,
         sqliteRuntime: undefined,
@@ -232,7 +237,7 @@ function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: R
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
     const script = /<script nonce="n0nce">([\s\S]*)<\/script>/.exec(html)?.[1];
     assert.ok(script);
-    const posted: { type: string; text?: string }[] = [];
+    const posted: { type: string; text?: string; account?: string }[] = [];
     const listeners: Record<string, (e: unknown) => void> = {};
     let strips = firstStrips;
     let nextStrips = firstStrips;
@@ -297,8 +302,10 @@ function livePage(fragments: PanelFragments, firstStrips: FakeStrip[], pagers: R
 const ORIGIN = 'vscode-webview://0123abcd';
 
 function runPage(fragments: PanelFragments): {
-    posted: { type: string; text?: string }[];
+    posted: { type: string; text?: string; account?: string }[];
     click(action: string): string;
+    clickOn(dataset: Record<string, string>): void;
+    choose(account: string): void;
     message(origin: string, fragments: PanelFragments): void;
 } {
     const html = renderUsagePage('n0nce', "default-src 'none'", fragments);
@@ -325,6 +332,8 @@ function runPage(fragments: PanelFragments): {
             listeners.click({ target: { closest: () => ({ dataset: { action } }) } });
             return posted.at(-1)?.text ?? '';
         },
+        clickOn: dataset => listeners.click({ target: { closest: () => ({ dataset }) } }),
+        choose: account => listeners.change({ target: { matches: (selector: string) => selector === 'select[data-account-filter]', value: account } }),
     };
 }
 
@@ -391,7 +400,7 @@ suite('usage page', () => {
         const kept = /Tokenizer\) keeps:\r?\n([\s\S]*?)\r?\n\r?\n/.exec(readme)?.[1];
         assert.ok(kept, "the README's list of what is kept was not found");
         const items = kept.split(/^- /m).map(item => item.replace(/\s+/g, ' ').trim()).filter(Boolean);
-        assert.strictEqual(items.length, 5, kept);
+        assert.strictEqual(items.length, 6, kept);
         const off = renderFragments(view({ status: 'off', report: undefined })).body.replace(/\s+/g, ' ');
         for (const item of items) {
             assert.ok(off.includes(item), `the off page does not say: ${item}`);
@@ -601,7 +610,7 @@ suite('usage page', () => {
         assert.ok(csv.includes(`"'=cmd|""/c calc""!A1"`), 'a model id was left able to run as a formula');
 
         const copied = page.click('copy');
-        assert.ok(copied.split('\n').some(l => l.split('\t').length === 6 && l.includes(HOSTILE)), 'a session row lost its columns');
+        assert.ok(copied.split('\n').some(l => l.split('\t').length === 7 && l.includes(HOSTILE)), 'a session row lost its columns');
     });
 
     test('Copy guards formulas as the CSV does: pasted, a cell is read the same way', () => {
@@ -972,6 +981,133 @@ suite('usage page', () => {
         assert.ok(bare.includes('<td class="num">1,278</td>'));
     });
 
+    /** A report of three accounts: one Claude Code is signed in to now, one it never named, and the sessions that record none. */
+    function accountsReport(overrides: Partial<UsageReport> = {}): UsageReport {
+        const base = report();
+        const t = base.totals;
+        const A = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const ORG = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+        const B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+        const ownerA = { accountUuid: A, organizationUuid: ORG };
+        const ownerB = { accountUuid: B, organizationUuid: null };
+        const half = { ...t, processed: Math.floor(t.processed / 2) };
+        return report({
+            accounts: [
+                { key: `${A}/${ORG}`, owner: ownerA, sessions: 2, totals: half, models: [], projects: ['one', 'two'] },
+                { key: `${B}/`, owner: ownerB, sessions: 1, totals: { ...t, processed: 300 }, models: [], projects: [HOSTILE] },
+                { key: 'none', owner: null, sessions: 4, totals: { ...t, processed: 100 }, models: [], projects: ['old'] },
+            ],
+            accountsSeen: [
+                { key: `${A}/${ORG}`, owner: ownerA, sessions: 2, firstTs: Date.UTC(2026, 9, 1, 9), lastTs: Date.UTC(2026, 9, 9, 11) },
+                { key: `${B}/`, owner: ownerB, sessions: 1, firstTs: Date.UTC(2026, 9, 3, 9), lastTs: Date.UTC(2026, 9, 4, 9) },
+                { key: 'none', owner: null, sessions: 4, firstTs: Date.UTC(2026, 8, 1, 9), lastTs: Date.UTC(2026, 8, 30, 9) },
+            ],
+            accountNames: [{ accountUuid: A, organizationUuid: ORG, email: `a@example.com`, organizationName: HOSTILE }],
+            currentAccounts: [`${A}/${ORG}`],
+            sessions: [{ ...base.sessions[0], account: `${B}/` }],
+            ...overrides,
+        });
+    }
+    const KEY_A = '0f1e2d3c-4b5a-4968-8776-655443322110/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+    const ID_A = '0f1e2d3c-4b5a-4968-8776-655443322110';
+    const ID_B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+
+    test('the Accounts section names each account, says when it was used and where, and which one Claude Code is signed in to', () => {
+        const fragments = renderFragments(view({ report: accountsReport() }));
+        const body = fragments.body;
+        assert.ok(body.includes('<h2>Accounts</h2>'));
+        // Before the projects: the larger grouping first.
+        assert.ok(body.indexOf('<h2>Accounts</h2>') < body.indexOf('<h2>Projects</h2>'));
+        // Claude Code's own label, escaped; the one it never named numbered by first use.
+        assert.ok(body.includes(`a@example.com (${HOSTILE_ESCAPED})</span><span class="badge">signed in now</span>`), body);
+        assert.ok(body.includes('>Account 2</span>') && body.includes('>Not recorded</span>'));
+        // What tells them apart, below each: when it was used and in which projects.
+        assert.ok(body.includes('<div class="account-hint">2026-10-01 – 2026-10-09 · one, two</div>'));
+        assert.ok(body.includes(`<div class="account-hint">2026-10-03 – 2026-10-04 · ${HOSTILE_ESCAPED}</div>`));
+        assert.ok(body.includes('<div class="account-hint">no account in its transcripts</div>'));
+        // Its ids on hover, whole, as the setting keys names by them.
+        assert.ok(body.includes(`Account ${ID_A}\nOrganization a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d`));
+        // A button to name each recorded account, by its id; none for the sessions that record none.
+        assert.ok(body.includes(`data-action="nameAccount" data-account="${ID_A}"`) && body.includes(`data-action="nameAccount" data-account="${ID_B}"`));
+        assert.strictEqual((body.match(/data-action="nameAccount"/g) ?? []).length, 2);
+        assert.ok(body.includes('Not recorded: sessions Claude Code wrote before it recorded accounts, from version 2.1.318 or so'));
+        // Sorted as the other tables, by the label as shown.
+        assert.ok(body.includes('data-k-label="a@example.com (') && body.includes('data-k-label="Account 2"'));
+    });
+
+    test('no account is spoken of until the history has seen one, nor its section once one is chosen', () => {
+        const none = renderFragments(view());
+        assert.ok(!none.body.includes('<h2>Accounts</h2>') && !none.controls.includes('data-account-filter'));
+        assert.ok(!none.body.includes('Account:'), 'a session says an account when there is none to say');
+        const chosen = renderFragments(view({ account: KEY_A, report: accountsReport({ account: KEY_A }) }));
+        assert.ok(!chosen.body.includes('<h2>Accounts</h2>'));
+        assert.ok(chosen.controls.includes(`<option value="${KEY_A}" selected>`));
+    });
+
+    test('the account filter offers every account by first use, those with none last, and posts the one chosen', () => {
+        const { controls } = renderFragments(view({ report: accountsReport() }));
+        const options = [...controls.matchAll(/<option value="([^"]*)"( selected)?>([^<]*)<\/option>/g)].map(m => [m[1], m[3], Boolean(m[2])]);
+        assert.deepStrictEqual(options, [
+            ['all', 'All accounts', true],
+            [KEY_A, `a@example.com (${HOSTILE_ESCAPED})`, false],
+            [`${ID_B}/`, 'Account 2', false],
+            ['none', 'Not recorded', false],
+        ]);
+        assert.ok(controls.includes('<select class="account-filter" data-account-filter aria-label="Account">'));
+        // One the history no longer holds, while it is chosen, is still offered.
+        const gone = `${ID_B}/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d`;
+        assert.ok(renderFragments(view({ account: gone, report: accountsReport({ account: gone }) })).controls.includes(`<option value="${gone}" selected>`));
+
+        const page = runPage(renderFragments(view({ report: accountsReport() })));
+        page.choose(KEY_A);
+        page.clickOn({ action: 'nameAccount', account: ID_B });
+        // Posted from the page's own context: compared as the editor receives them.
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(page.posted.slice(1))), [
+            { type: 'setAccount', account: KEY_A },
+            { type: 'nameAccount', account: ID_B },
+        ]);
+    });
+
+    test("a session's account is on hover and in Copy; a limit says whose it is once there are two; one account's export says which", () => {
+        const both = accountsReport({
+            limitWindows: [
+                { account: KEY_A, limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, 10), date: '2026-10-09' },
+                { account: `${ID_B}/`, limitType: 'five_hour', resetsAt: null, hits: 2, firstTs: Date.UTC(2026, 9, 9, 11), date: '2026-10-09' },
+            ],
+        });
+        const fragments = renderFragments(view({ report: both }));
+        assert.ok(fragments.body.includes('\nAccount: Account 2"'), 'the session');
+        assert.ok(fragments.body.includes('<li><span>Account 2: five hour limit, 2 requests refused from'));
+        assert.ok(fragments.body.includes(`<li><span>a@example.com (${HOSTILE_ESCAPED}): five hour limit, 1 request refused`));
+        assert.ok(fragments.body.includes('Each for its whole account, whichever project hit them'));
+        assert.deepStrictEqual([fragments.copy.header.at(-1), fragments.copy.rows[0]?.at(-1)], ['account', 'Account 2']);
+        assert.ok(fragments.copy.notes.some(n => n.startsWith('account is the Claude account a session was signed in to')));
+        // One account's limits only: no need to say whose.
+        const one = renderFragments(view({ report: accountsReport({ limitWindows: [both.limitWindows[0]] }) }));
+        assert.ok(one.body.includes('<li><span>five hour limit') && one.body.includes('For the whole account, whichever project'));
+
+        const filtered = renderFragments(view({ account: `${ID_B}/`, report: accountsReport({ account: `${ID_B}/` }) }));
+        assert.ok(filtered.csv.notes.some(n => n.startsWith('range: ') && n.endsWith(', account Account 2')), filtered.csv.notes.join('|'));
+        const empty = renderFragments(view({ account: `${ID_B}/`, report: accountsReport({ account: `${ID_B}/`, totals: emptyTotals() }) }));
+        assert.ok(empty.body.includes('No session of Account 2 falls in this range.'), empty.body);
+    });
+
+    test('the diagnostics say which configuration file names the accounts, or that none does', () => {
+        const named = renderFragments(view()).diagnostics;
+        assert.ok(named.includes(`<dt>Account names</dt><dd>from <span class="path">~/.claude${HOSTILE_ESCAPED}.json</span></dd>`), named);
+        const none = renderFragments(view({ accountFiles: [] })).diagnostics;
+        assert.ok(none.includes('<dt>Account names</dt><dd>no Claude Code configuration file found</dd>'));
+    });
+
+    test('names you give stand in place of the email, and say what Claude Code calls the account on hover', () => {
+        const { body, controls } = renderFragments(view({ report: accountsReport(), givenNames: { [ID_A]: 'Work', [ID_B]: '<b>Old</b>' } }));
+        assert.ok(body.includes(`>Work (${HOSTILE_ESCAPED})</span>`));
+        assert.ok(body.includes(`Claude Code calls it a@example.com (${HOSTILE_ESCAPED})`));
+        assert.ok(body.includes('>&lt;b&gt;Old&lt;/b&gt;</span>') && !body.includes('<b>Old</b>'));
+        assert.ok(body.includes(`data-account="${ID_A}" title="Rename this account in this panel">Rename…</button>`));
+        assert.ok(controls.includes('>&lt;b&gt;Old&lt;/b&gt;</option>'));
+    });
+
     test("a session's active time is shown, sorts as a number, is explained, and is copied", () => {
         const s = report().sessions[0];
         const quick = { ...s, sessionId: 'quick', activeMs: 20_000 };
@@ -987,8 +1123,9 @@ suite('usage page', () => {
         assert.ok(body.includes('title="Requests from 2026-10-09 10:00 to 2026-10-09 11:30"'));
         assert.ok(body.includes("Active is a session's time between requests in this range, its subagents' included, leaving out every pause of over 15 minutes"));
         assert.ok(!/>Span</.test(body) && !body.includes('first request to its last'));
-        assert.strictEqual(fragments.copy.header.at(-1), 'active_minutes');
-        assert.deepStrictEqual(fragments.copy.rows.map(r => r.at(-1)), ['0', '125']);
+        const active = fragments.copy.header.indexOf('active_minutes');
+        assert.ok(active > 0);
+        assert.deepStrictEqual(fragments.copy.rows.map(r => r[active]), ['0', '125']);
         assert.ok(fragments.copy.notes.some(n => n.startsWith('active_minutes is the time between')));
     });
 });
@@ -1001,6 +1138,11 @@ suite('usage panel messages', () => {
         assert.deepStrictEqual(parsePanelMessage({ type: 'clear', extra: 1 }), { type: 'clear' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'turnOn' }), { type: 'turnOn' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'reloadWindow', command: 'x' }), { type: 'reloadWindow' });
+        const account = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        for (const filter of ['all', 'none', `${account}/`, `${account}/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d`]) {
+            assert.deepStrictEqual(parsePanelMessage({ type: 'setAccount', account: filter }), { type: 'setAccount', account: filter });
+        }
+        assert.deepStrictEqual(parsePanelMessage({ type: 'nameAccount', account }), { type: 'nameAccount', account });
         for (const bad of [
             null,
             'clear',
@@ -1008,6 +1150,12 @@ suite('usage panel messages', () => {
             { type: 'ready' },
             { type: 'setRange', range: 'forever' },
             { type: 'setScope', scope: 'everything' },
+            { type: 'setAccount', account: 'everyone' },
+            { type: 'setAccount', account: '0f1e2d3c-4b5a-4968-8776-655443322110' },
+            { type: 'setAccount' },
+            { type: 'nameAccount', account: '0f1e2d3c-4b5a-4968-8776-655443322110/' },
+            { type: 'nameAccount', account: 'none' },
+            { type: 'nameAccount', account: ['0f1e2d3c-4b5a-4968-8776-655443322110'] },
             { type: 'copy', text: 42 },
             { type: 'export', text: 'x'.repeat((16 << 20) + 1) },
             { type: 'openFile', path: '/etc/passwd' },

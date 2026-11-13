@@ -265,20 +265,99 @@ suite('usage panel', () => {
         await until(() => page.posted.length === sent + 2);
     });
 
-    test('its range, scope and the reader\'s zone are kept for the next time it opens', async () => {
-        const { service } = fakeService();
+    test('its range, scope, account and the reader\'s zone are kept for the next time it opens', async () => {
+        const { service, fake } = fakeService();
+        fake.report = quietReport({ accountsSeen: [{ key: 'none', owner: null, sessions: 1, firstTs: 1, lastTs: 1 }] });
         UsagePanel.show(context, service, log);
         page.send({ type: 'ready', zone: 'Asia/Tokyo' });
         page.send({ type: 'setRange', range: '30d' });
         page.send({ type: 'setScope', scope: 'workspace' });
+        page.send({ type: 'setAccount', account: 'none' });
         await settle();
         page.panel.dispose();
 
         page = fakePanel();
-        const reopened: { range?: string; scope?: string; zone?: string }[] = [];
-        UsagePanel.show(context, { ...service, report: (range: string, zone: string, folders: string[] | null) => (reopened.push({ range, zone, scope: folders ? 'workspace' : 'all' }), Promise.resolve(undefined)) } as unknown as UsageService, log);
+        const reopened: { range?: string; scope?: string; zone?: string; account?: string }[] = [];
+        UsagePanel.show(
+            context,
+            {
+                ...service,
+                report: (range: string, zone: string, folders: string[] | null, account?: string) => (
+                    reopened.push({ range, zone, scope: folders ? 'workspace' : 'all', account }), Promise.resolve(undefined)
+                ),
+            } as unknown as UsageService,
+            log,
+        );
         await until(() => reopened.length > 0);
-        assert.deepStrictEqual(reopened[0], { range: '30d', zone: 'Asia/Tokyo', scope: 'workspace' });
+        assert.deepStrictEqual(reopened[0], { range: '30d', zone: 'Asia/Tokyo', scope: 'workspace', account: 'none' });
+    });
+
+    test('an account the history no longer holds, after a Clear, gives way to every account, once the history is read', async () => {
+        const { service, fake } = fakeService();
+        const asked: (string | undefined)[] = [];
+        const gone = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b/';
+        (service as unknown as { report: unknown }).report = (_range: string, _zone: string, _folders: unknown, account?: string) => (
+            asked.push(account), Promise.resolve(quietReport({ account: account ?? 'all' }))
+        );
+        // While it is read, the account may only not be reached yet.
+        fake.reading = { by: 'this window', files: 3 };
+        UsagePanel.show(context, service, log);
+        page.send({ type: 'setAccount', account: gone });
+        await until(() => asked.includes(gone));
+        await settle();
+        assert.ok(!asked.includes('all'), JSON.stringify(asked));
+        fake.reading = undefined;
+        asked.length = 0;
+        page.send({ type: 'setRange', range: '30d' });
+        await until(() => asked.includes('all'));
+        assert.deepStrictEqual(asked, [gone, 'all']);
+        assert.strictEqual((context.globalState.get('llm-tokenizer.claudeCodeUsage.panel') as { account?: string }).account, 'all');
+    });
+
+    test('Name… asks for a name and keeps it in the setting by account id; empty takes it out, Escape changes nothing', async () => {
+        const id = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const { service, fake } = fakeService();
+        fake.report = quietReport({
+            accountsSeen: [{ key: `${id}/`, owner: { accountUuid: id, organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2 }],
+            accountNames: [{ accountUuid: id, organizationUuid: null, email: 'a@example.com', organizationName: null }],
+        });
+        const updates: unknown[][] = [];
+        const asked: vscode.InputBoxOptions[] = [];
+        const answers: (string | undefined)[] = ['  Work ', '', undefined];
+        let stored: Record<string, unknown> | undefined = { 'something-else': 'kept', [id.toUpperCase()]: 'Old' };
+        const workspace = vscode.workspace as unknown as Record<string, unknown>;
+        const window = vscode.window as unknown as Record<string, unknown>;
+        const originals = { getConfiguration: workspace.getConfiguration, showInputBox: window.showInputBox };
+        workspace.getConfiguration = () => ({
+            get: (key: string) => (key === 'claudeCodeAccountNames' ? stored : undefined),
+            inspect: () => ({ globalValue: stored }),
+            update: (key: string, value: unknown, target: unknown) => (
+                updates.push([key, value, target]), (stored = value as Record<string, unknown> | undefined), Promise.resolve()
+            ),
+        });
+        window.showInputBox = (options: vscode.InputBoxOptions) => (asked.push(options), Promise.resolve(answers.shift()));
+        try {
+            UsagePanel.show(context, service, log);
+            await until(() => page.posted.length > 0 || page.pages.length > 1);
+            await settle();
+            page.send({ type: 'nameAccount', account: id });
+            await until(() => updates.length === 1);
+            assert.deepStrictEqual(updates[0], ['claudeCodeAccountNames', { 'something-else': 'kept', [id]: 'Work' }, vscode.ConfigurationTarget.Global]);
+            // What it would show otherwise, and the name given before, case and all.
+            assert.ok(asked[0]?.prompt?.includes('in place of a@example.com.'), asked[0]?.prompt);
+            assert.strictEqual(asked[0]?.value, 'Old');
+            assert.strictEqual(asked[0]?.validateInput?.('x'.repeat(61)), 'At most 60 characters.');
+            page.send({ type: 'nameAccount', account: id });
+            await until(() => updates.length === 2);
+            assert.deepStrictEqual(updates[1], ['claudeCodeAccountNames', { 'something-else': 'kept' }, vscode.ConfigurationTarget.Global]);
+            page.send({ type: 'nameAccount', account: id });
+            await until(() => asked.length === 3);
+            await settle();
+            assert.strictEqual(updates.length, 2);
+        } finally {
+            Object.assign(workspace, { getConfiguration: originals.getConfiguration });
+            Object.assign(window, { showInputBox: originals.showInputBox });
+        }
     });
 
     test('each action the page can ask for does what it says, and nothing else', async () => {

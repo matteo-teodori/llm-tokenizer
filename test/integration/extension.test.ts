@@ -306,22 +306,31 @@ suite('extension', () => {
             rescan: false,
             download: true,
             usage: false,
+            usagePanel: false,
         });
         for (const key of ['ignoreGitignoredFiles', 'defaultModel', 'statusBarDisplay', 'enableProjectScan']) {
             assert.deepStrictEqual(
                 settingsChangeEffects(changed(`${CONFIG}.${key}`)),
-                { rescan: true, download: false, usage: false },
+                { rescan: true, download: false, usage: false, usagePanel: false },
                 key,
             );
         }
         // Claude Code usage reads no workspace file, so it never rescans.
         for (const key of ['llm-tokenizer.enableClaudeCodeUsage', 'llm-tokenizer.claudeCodeDataDirectory', 'claudeCode.environmentVariables']) {
-            assert.deepStrictEqual(settingsChangeEffects(changed(key)), { rescan: false, download: false, usage: true }, key);
+            assert.deepStrictEqual(settingsChangeEffects(changed(key)), { rescan: false, download: false, usage: true, usagePanel: false }, key);
         }
+        // A name given to an account only changes what the panel shows: no import.
+        assert.deepStrictEqual(settingsChangeEffects(changed('llm-tokenizer.claudeCodeAccountNames')), {
+            rescan: false,
+            download: false,
+            usage: false,
+            usagePanel: true,
+        });
         assert.deepStrictEqual(settingsChangeEffects(changed('editor.fontSize')), {
             rescan: false,
             download: false,
             usage: false,
+            usagePanel: false,
         });
 
         // A setting added later must be given an effect here too, or changing
@@ -331,7 +340,7 @@ suite('extension', () => {
         };
         for (const key of Object.keys(manifest.contributes.configuration.properties)) {
             const effects = settingsChangeEffects(changed(key));
-            assert.ok(effects.rescan || effects.download || effects.usage, `changing ${key} has no effect`);
+            assert.ok(effects.rescan || effects.download || effects.usage || effects.usagePanel, `changing ${key} has no effect`);
         }
     });
 
