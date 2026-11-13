@@ -11,6 +11,7 @@ import { inFolders, queryReport, reportSessions, type ReportQuery } from '../../
 import { buildReport, rangeSince, rangeUntil, type RangeKey } from '../../src/usage/report';
 import { createHistory, currentHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
+import { PARSER_VERSION } from '../../src/usage/transcripts';
 import type { UsageRequest } from '../../src/usage/types';
 import { WorkerHost } from '../../src/workerHost';
 
@@ -1311,6 +1312,52 @@ suite('usage worker queries', () => {
         }
         const badImport = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], signedInFiles: [''] });
         assert.deepStrictEqual(badImport.type === 'failed' && badImport.failure, 'bad-request');
+    });
+
+    test('through the worker: accounts are numbered once this window has read the history whole, by first use, whatever it read first', async () => {
+        const X = '1a2b3c4d-0000-4000-8000-000000000001';
+        const Y = '5e6f7a8b-0000-4000-8000-000000000002';
+        const Z = '9c0d1e2f-0000-4000-8000-000000000003';
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const root = path.join(tmp, 'root');
+        const projects = path.join(root, 'projects', 'p');
+        fs.mkdirSync(projects, { recursive: true });
+        const owner = (sessionId: string, accountUuid: string) => ({ type: 'session-owner', accountUuid, organizationUuid: '', sessionId });
+        const session = (name: string, accountUuid: string, at: string) => {
+            const file = path.join(projects, `${name}.jsonl`);
+            fs.writeFileSync(file, line(owner(name, accountUuid)) + line(assistantRecord(name, `m-${name}`, at, 10)));
+            return file;
+        };
+        // X is read first, but Y was used first.
+        const x = session('x', X, '2026-10-09T12:00:00Z');
+        session('y', Y, '2026-10-09T10:00:00Z');
+        const worker = host();
+        const numbers = async () => {
+            const answer = await worker.send(ask(storeFile));
+            assert.ok(answer.type === 'report');
+            return Object.fromEntries(answer.report.accountsSeen.map(a => [a.key, a.ordinal]));
+        };
+        // A pass over a few files: some accounts' first uses, not others'.
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [x] })).type, 'imported');
+        assert.deepStrictEqual(await numbers(), { [`${X}/`]: null });
+        // A whole pass, while another window holds the history: nothing read here, nothing numbered.
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const opened = UsageStore.open(sqlite, historyIn(storeFile));
+        assert.ok(opened.status === 'ready');
+        assert.ok(opened.store.acquireLease('import', 'another window', PARSER_VERSION));
+        const held = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        assert.ok(held.type === 'imported' && held.leaseHeldElsewhere, JSON.stringify(held).slice(0, 200));
+        assert.deepStrictEqual(await numbers(), { [`${X}/`]: null });
+        opened.store.releaseLease('import', 'another window');
+        opened.store.close();
+        // Read whole here: numbered as they were first used.
+        const whole = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        assert.ok(whole.type === 'imported' && whole.summary && !whole.summary.cancelled, JSON.stringify(whole).slice(0, 200));
+        assert.deepStrictEqual(await numbers(), { [`${Y}/`]: 1, [`${X}/`]: 2 });
+        // After that, a pass over a few files numbers a new account at once.
+        const z = session('z', Z, '2026-10-09T13:00:00Z');
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [z] })).type, 'imported');
+        assert.deepStrictEqual(await numbers(), { [`${Y}/`]: 1, [`${X}/`]: 2, [`${Z}/`]: 3 });
     });
 
     test('a history set aside is named once, by its file name, in the next answer', async () => {
