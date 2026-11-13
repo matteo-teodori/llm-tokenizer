@@ -269,7 +269,8 @@ Tokenizer) keeps:
   last gave it, with when;
 - each transcript's path, size, file id and how far it was read, with a hash
   of the last 64 bytes read, to tell what changed;
-- compactions' sizes, and the usage limits reached, with when they reset;
+- compactions' sizes, and the usage limits reached, with when they reset and
+  the account that reached each, by id;
 - the window's process id and this machine's name, which each import writes
   so that two windows never import at once.
 

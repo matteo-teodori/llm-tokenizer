@@ -38,10 +38,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   the page shows more than one account.
 - **Copy Sessions** adds each session's `account`, and both exports' notes
   say which account they hold when one is chosen.
-- **Updating reads only what it must.** Picking up the accounts of sessions
-  read before searches the main transcripts' earlier bytes for them alone:
-  on 12.6 GB of transcripts, 1.4 s, where reading every file again took
-  21 s and would have rewritten every request.
+- **Updating reads only what it must.** Picking up the accounts of requests
+  read before searches the main transcripts' earlier bytes for owner
+  records, and the time of the request after each, alone: on 12.6 GB of
+  transcripts, 1.5 s, where reading every file again took 22 s and would
+  have rewritten every request.
 - **Old copies of the history go.** A version that only adds to the history
   no longer copies all of it first, and once the history is converted, the
   copies earlier versions kept are removed: 371 MB on the heaviest history

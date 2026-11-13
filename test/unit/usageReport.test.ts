@@ -893,6 +893,42 @@ suite('usage report', () => {
             );
         });
 
+        test("an account no request was made under is not the history's: one changed again before any request, and a session quit before it asked anything", async () => {
+            const C = '11111111-2222-4333-8444-555555555555';
+            const D = '22222222-3333-4444-8555-666666666666';
+            transcript('-repo-one', 'u1.jsonl', [
+                owner('u1', A, ORG_A),
+                userRecord('u1', '/repo/one', '2026-10-09T10:00:00Z'),
+                assistantRecord('u1', 'm-u1', '2026-10-09T10:00:01Z', 10),
+                // Resumed under B, then under C, before it asked anything.
+                owner('u1', B),
+                owner('u1', C),
+                userRecord('u1', '/repo/one', '2026-10-09T11:00:00Z'),
+                assistantRecord('u1', 'm-u2', '2026-10-09T11:00:01Z', 20),
+            ]);
+            // Started under D, and quit before a request.
+            transcript('-repo-one', 'u2.jsonl', [owner('u2', D), userRecord('u2', '/repo/one', '2026-10-09T12:00:00Z')]);
+            // Under E, refused at once: a limit reached, and no request.
+            const E = '33333333-4444-4555-8666-777777777777';
+            transcript('-repo-one', 'u3.jsonl', [owner('u3', E), userRecord('u3', '/repo/one', '2026-10-09T13:00:00Z'), limitHit('u3', 'hit-e', '2026-10-09T13:00:01Z')]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const before = queryReport(store, query());
+            assert.deepStrictEqual(
+                before.accountsSeen.map(a => [a.key, a.sessions, a.firstTs]),
+                [
+                    [keyA, 1, Date.parse('2026-10-09T10:00:01Z')],
+                    [`${C}/`, 1, Date.parse('2026-10-09T11:00:01Z')],
+                    [`${E}/`, 1, Date.parse('2026-10-09T13:00:01Z')],
+                ],
+            );
+            store.transaction(() => store.numberAccounts('claude-code'));
+            const report = queryReport(store, query());
+            assert.deepStrictEqual(report.accounts.map(a => [a.key, a.totals.output]), [[`${C}/`, 20], [keyA, 10]]);
+            assert.deepStrictEqual(report.limitWindows.map(w => w.account), [`${E}/`]);
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [keyA]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
+        });
+
         test('one account chosen narrows a range too, and a request whose session the history has no row for counts under the owner it records, or none', async () => {
             const store = await history();
             // The last 7 days from the 10th: every one of these.
@@ -1090,6 +1126,49 @@ suite('usage report', () => {
         assert.deepStrictEqual([limited.accountsSeen.some(a => a.key === zKey), limited.omitted.accountsSeen], [true, 0]);
         const neither = buildReport({ ...base, limitHits: [] }, { ...options, maxSessions: 1 });
         assert.deepStrictEqual([neither.accountsSeen.some(a => a.key === zKey), neither.omitted.accountsSeen], [false, 1]);
+    });
+
+    test("a session's accounts are named three at most, the rest counted, so that one session cannot fill the page with them", () => {
+        const id = (i: number) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
+        const at = (i: number) => Date.UTC(2026, 9, 9, 12) + i * 1_000;
+        const owners = Array.from({ length: 300 }, (_, i) => ({ owner: { accountUuid: id(i), organizationUuid: null }, sinceTs: at(i) }));
+        const sums = owners.map((o, i) => ({
+            bucket: Math.floor(at(i) / BUCKET_MS),
+            sessionId: 's',
+            model: 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: o.owner,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: at(i),
+            lastTs: at(i),
+            input: 1,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        }));
+        const report = buildReport(
+            {
+                sums,
+                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners }],
+                compactions: [],
+                limitHits: [],
+                coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },
+            },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual([report.sessions[0].accounts, report.sessions[0].moreAccounts], [[`${id(0)}/`, `${id(1)}/`, `${id(2)}/`], 297]);
+        assert.deepStrictEqual([report.accountsSeen.length, report.omitted.accountsSeen], [200, 100]);
     });
 
     test('a missing counter makes the report a lower bound', () => {

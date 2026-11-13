@@ -134,7 +134,7 @@ function emptyState(view: PanelView): string | undefined {
                     <li>the folder each session started in;</li>
                     <li>the Claude account and organization each request was made with, by id, and where each session's changed in its transcript; for each account its number in the history, and the email and organization name Claude Code last gave it, with when;</li>
                     <li>each transcript's path, size, file id and how far it was read, with a hash of the last 64 bytes read, to tell what changed;</li>
-                    <li>compactions' sizes, and the usage limits reached, with when they reset;</li>
+                    <li>compactions' sizes, and the usage limits reached, with when they reset and the account that reached each, by id;</li>
                     <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
                 </ul>
                 <p>Never kept: prompts, responses, thinking, tool inputs or results. Nothing is sent anywhere. The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Claude Code Usage History removes it.</p>
@@ -731,7 +731,7 @@ function sessions(report: UsageReport, view: PanelView): string {
                         compactions: s.compactions.length,
                     },
                     cells: [
-                        `<span title="${escapeHtml(`Session ${s.sessionId}${labels ? `\n${accountsLine(labels, s.accounts)}` : ''}`)}">${escapeHtml(
+                        `<span title="${escapeHtml(`Session ${s.sessionId}${labels ? `\n${accountsLine(labels, s.accounts, s.moreAccounts)}` : ''}`)}">${escapeHtml(
                             s.firstTs !== null ? view.formatTime(s.firstTs) : '—',
                         )}</span>`,
                         `<span title="${escapeHtml(s.label)}">${escapeHtml(s.label)}</span>`,
@@ -752,8 +752,9 @@ function sessions(report: UsageReport, view: PanelView): string {
 }
 
 /** The accounts a session's requests were made with, as its hover says: one resumed under another names both, the first used first. */
-function accountsLine(labels: Map<string, AccountLabel>, keys: string[]): string {
-    return `${keys.length > 1 ? 'Accounts' : 'Account'}: ${keys.map(key => labelOf(labels, key)).join(', then ')}`;
+function accountsLine(labels: Map<string, AccountLabel>, keys: string[], more: number): string {
+    const named = keys.map(key => labelOf(labels, key)).join(', then ');
+    return `${keys.length + more > 1 ? 'Accounts' : 'Account'}: ${named}${more > 0 ? `, and ${more.toLocaleString('en-US')} more` : ''}`;
 }
 
 /** The most models a row's Processed cell names on hover; the rest are counted. */
@@ -967,7 +968,7 @@ function copyRows(view: PanelView): PanelFragments['copy'] {
         String(s.totals.coverage.requests),
         String(s.totals.processed),
         String(Math.round(s.activeMs / 60_000)),
-        s.accounts.map(key => labelOf(labels, key)).join('; '),
+        [...s.accounts.map(key => labelOf(labels, key)), ...(s.moreAccounts > 0 ? [`and ${s.moreAccounts.toLocaleString('en-US')} more`] : [])].join('; '),
     ]);
     const notes = exportNotes(view);
     notes.push(`active_minutes is the time between a session's requests in the range, pauses of over ${ACTIVE_PAUSE_MS / 60_000} minutes left out`);

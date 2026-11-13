@@ -377,8 +377,11 @@ export interface ReadResult {
      */
     ownerChanges: OwnerChange[];
     /**
-     * Each session's first request in this read, by its time: what gives an
-     * owner change an earlier read left at the file's end its time.
+     * Each session's first request in this read, by its time, where it
+     * comes before any change of the session's owner in this read: what
+     * gives the change an earlier read left at the file's end its time. A
+     * change read first instead leaves that one with none, as one no
+     * request was ever made under.
      */
     firstRequestTs: Map<string, number>;
     newestVersion: string | null;
@@ -394,8 +397,10 @@ interface Reading {
     result: ReadResult;
     /** The owner each session's records are under at this point of the file. */
     inForce: Map<string, SessionOwner>;
-    /** Owner changes no request has followed yet, by session: the next one gives them its time. */
+    /** Owner changes no request has followed yet, by session: the next one gives the last of them its time. */
     pending: Map<string, OwnerChange[]>;
+    /** Sessions whose owner changed in this read: their requests no longer settle an earlier read's change. */
+    changed: Set<string>;
 }
 
 /**
@@ -463,7 +468,7 @@ export function readTranscript(
         result.checkpoint.offset = start;
         // Bytes an older parser read are searched from the start, owners and all.
         const scan = start > 0 && previous !== undefined && needsOwnerScan(file, previous);
-        const reading: Reading = { result, inForce: new Map(start > 0 && !scan ? (inForce ?? []) : []), pending: new Map() };
+        const reading: Reading = { result, inForce: new Map(start > 0 && !scan ? (inForce ?? []) : []), pending: new Map(), changed: new Set() };
 
         if (scan) {
             // Before the lines read on from the checkpoint, so that these are
@@ -765,12 +770,19 @@ function parseOwner(r: Record<string, unknown>, offset: number, file: Transcript
     reading.result.ownerChanges.push(change);
     reading.pending.set(sessionId, [...(reading.pending.get(sessionId) ?? []), change]);
     reading.inForce.set(sessionId, owner);
+    reading.changed.add(sessionId);
 }
 
-/** A session's request at `timestamp`: the owner changes that wait for one begin then. */
+/**
+ * A session's request at `timestamp`: the last owner change that waits for
+ * one begins then. Those before it were never in force for a request, a
+ * session resumed under one account and then another before it asked
+ * anything, and keep no time: no account is counted as used for them.
+ */
 function settlePending(reading: Reading, sessionId: string, timestamp: number): void {
-    for (const change of reading.pending.get(sessionId) ?? []) {
-        change.sinceTs = timestamp;
+    const pending = reading.pending.get(sessionId);
+    if (pending && pending.length > 0) {
+        pending[pending.length - 1].sinceTs = timestamp;
     }
     reading.pending.delete(sessionId);
 }
@@ -799,12 +811,14 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         return;
     }
     settlePending(reading, sessionId, timestamp);
-    if (!result.firstRequestTs.has(sessionId)) {
+    if (!result.firstRequestTs.has(sessionId) && !reading.changed.has(sessionId)) {
         result.firstRequestTs.set(sessionId, timestamp);
     }
-    // The account it was made with: the session's owner at this point of
-    // its main transcript. A subagent's transcript records none; its
-    // requests are given theirs by time, when they are written.
+    // The account it was made with, where its own transcript says: the
+    // session's owner at this point of it. Where none does, a subagent's
+    // transcript among them, a report goes by the time of the request and
+    // the session's owners (see report.ts), never fixed here by what has
+    // been read so far.
     const owner = reading.inForce.get(sessionId) ?? null;
 
     // A refused request records which limit it hit. Measured, all 657 such

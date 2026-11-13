@@ -30,6 +30,7 @@ import { numberAccounts, type AccountNumber } from './accounts';
 import { BUCKET_MS } from './aggregate';
 import { backupsBeside, copiesBeside, currentHistory, linkWhole, ownFiles, removeQuietly } from './historyFiles';
 import { isComplete } from './provenance';
+import { OWNERS_SINCE } from './transcripts';
 import type {
     BucketSums,
     Compaction,
@@ -408,18 +409,21 @@ INSERT OR REPLACE INTO meta (key, value) VALUES ('${OLD_NEWEST_PARSER}', '${Numb
 
 /**
  * Version 4: the Claude account each request was made with, and each usage
- * limit hit, by its row in `accounts`: a request's is the owner its main
- * transcript records before it, a subagent's the one its session was under
- * at its time, from `owner_changes`, one row where a session's owner changes
- * in a main transcript, with the time of the request after it; null where
- * none is known, and it counts under its session's first owner. A row read
- * before has none until its main transcript is searched again (see
- * `OWNERS_SINCE` and `giveOwners`). `accounts` holds one row per account and
- * organization (`organization_uuid` empty where it named none): its
- * account's number in the history, and its own among the account's, given
- * once and kept (see `numberAccounts`), and the names
- * Claude Code's own configuration gave it while this history was kept, so
- * that an account signed out of since keeps its name.
+ * limit hit, by its row in `accounts`, where its main transcript records it
+ * before it: null elsewhere, as for a subagent's, and a report then takes
+ * its session's owner at its time (see report.ts). `owner_changes` holds
+ * one row where a session's owner changes in a main transcript, with the
+ * time of the request after it, null until one is read; a file read again
+ * from its start retires its rows rather than dropping them, as its
+ * requests' rows are kept: `retired` numbers each time it was, 0 for the
+ * changes it holds now. A row read before has no owner until its main
+ * transcript is searched again (see `OWNERS_SINCE` and `giveOwners`).
+ * `accounts` holds one row per account and organization
+ * (`organization_uuid` empty where it named none): its account's number in
+ * the history, and its own among the account's, given once and kept (see
+ * `numberAccounts`), and the names Claude Code's own configuration gave it
+ * while this history was kept, so that an account signed out of since keeps
+ * its name.
  *
  * Additive: the two columns are added without a row being written again.
  * `clear_accounts` empties both tables when a Clear by a build before this
@@ -427,9 +431,11 @@ INSERT OR REPLACE INTO meta (key, value) VALUES ('${OLD_NEWEST_PARSER}', '${Numb
  * `clear_paths` does `paths`: no account's email is left on disk. A schema
  * that drops either table must drop the trigger too.
  */
-const MIGRATE_TO_4 = `
+const OWNER_COLUMNS = `
 ALTER TABLE requests ADD COLUMN owner INTEGER;
 ALTER TABLE limit_hits ADD COLUMN owner INTEGER;
+`;
+const OWNER_TABLES = `
 CREATE TABLE accounts (
     id INTEGER PRIMARY KEY,
     provider TEXT NOT NULL DEFAULT 'claude-code',
@@ -450,7 +456,8 @@ CREATE TABLE owner_changes (
     project_dir TEXT NOT NULL,
     owner INTEGER NOT NULL,
     since_ts INTEGER,
-    PRIMARY KEY (provider, file, offset)
+    retired INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (provider, file, retired, offset)
 ) STRICT;
 CREATE INDEX owner_changes_session ON owner_changes (session_id);
 CREATE TRIGGER clear_accounts AFTER UPDATE OF value ON meta
@@ -460,6 +467,55 @@ BEGIN
     DELETE FROM owner_changes;
 END;
 `;
+const MIGRATE_TO_4 = OWNER_COLUMNS + OWNER_TABLES;
+
+/**
+ * Bring a history at version 4 that a build of LLM Tokenizer made before
+ * 2.4.0 was released to the schema 2.4.0 has: version 4 changed shape while
+ * it was being made, and only such builds wrote another (owners kept by
+ * session, then changes no file could retire). What they kept of owners and
+ * accounts goes, and every main transcript is searched for its owners
+ * again, its rows kept; accounts are numbered and named again by the next
+ * pass. Nothing at all for a history in this shape, which one look at the
+ * newest column tells.
+ */
+function completeSchema4(db: DatabaseSync): void {
+    const columns = (table: string) =>
+        new Set((db.prepare('SELECT name FROM pragma_table_info(?)').all(table) as { name: string }[]).map(row => row.name));
+    if (columns('owner_changes').has('retired')) {
+        return;
+    }
+    db.exec('BEGIN IMMEDIATE');
+    try {
+        if (!columns('owner_changes').has('retired')) {
+            db.exec('DROP TRIGGER IF EXISTS clear_accounts; DROP TABLE IF EXISTS owner_changes; DROP TABLE IF EXISTS accounts');
+            const sessions = columns('sessions');
+            for (const column of ['account_uuid', 'organization_uuid', 'owner_named', 'owner_mtime']) {
+                if (sessions.has(column)) {
+                    db.exec(`ALTER TABLE sessions DROP COLUMN ${column}`);
+                }
+            }
+            for (const table of ['requests', 'limit_hits']) {
+                db.exec(columns(table).has('owner') ? `UPDATE ${table} SET owner = NULL` : `ALTER TABLE ${table} ADD COLUMN owner INTEGER`);
+            }
+            db.exec(OWNER_TABLES);
+            db.exec(`UPDATE files SET parser_version = ${OWNERS_SINCE - 1} WHERE kind = 'main' AND parser_version >= ${OWNERS_SINCE}`);
+        }
+        db.exec('COMMIT');
+    } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+    }
+}
+
+/**
+ * The sessions whose requests were made with more than one account. Their
+ * requests that record none, a subagent's or one in a transcript with no
+ * owner record before it, go by their own time in a report: summed by the
+ * quarter hour, those made either side of a change of account, as when a
+ * limit is reached and the session resumed under another, would be one.
+ */
+const SWITCHED_SESSIONS = `SELECT session_id FROM owner_changes WHERE since_ts IS NOT NULL GROUP BY session_id HAVING count(DISTINCT owner) > 1`;
 
 /** Tables that hold history, and the bookkeeping of reading it: everything Clear empties. */
 const DATA_TABLES = ['files', 'read_guards', 'requests', 'paths', 'sessions', 'compactions', 'limit_hits', 'accounts', 'owner_changes'];
@@ -596,6 +652,7 @@ export class UsageStore {
                 const journal = UsageStore.configure(db, file, options);
                 schema = UsageStore.migrate(db, file, schema);
                 if (schema <= SCHEMA_VERSION) {
+                    completeSchema4(db);
                     return { status: 'ready', store: new UsageStore(db, file, false, now, alive(options)), journal };
                 }
             }
@@ -866,11 +923,13 @@ export class UsageStore {
 
     /**
      * Keep what a read of `filePath`, a main transcript, found of its
-     * sessions' owners: each change, where it is in the file, and, for a
-     * change an earlier read left at the file's end, the time of the
-     * session's first request read now, the first one after it. A file read
-     * again from its start has its earlier changes replaced. Call inside
-     * `transaction`.
+     * sessions' owners: each change, where it is in the file; and, for each
+     * session whose last change an earlier read found waits for a request,
+     * the time of its first request read now, when one came before any
+     * change in this read. A file read again from its start retires its
+     * earlier changes: they no longer say who its next lines are under, but
+     * they are still its sessions' owners for the rows read from it before,
+     * which are kept. Call inside `transaction`.
      */
     putOwnerChanges(
         provider: UsageProvider,
@@ -883,18 +942,27 @@ export class UsageStore {
         this.assertWritable();
         const file = this.pathId(filePath);
         if (fromStart) {
-            this.db.prepare('DELETE FROM owner_changes WHERE provider = ? AND file = ?').run(provider, file);
+            this.db
+                .prepare(
+                    `UPDATE owner_changes SET retired = (SELECT max(retired) + 1 FROM owner_changes WHERE provider = :provider AND file = :file)
+                     WHERE provider = :provider AND file = :file AND retired = 0`,
+                )
+                .run({ provider, file });
         } else {
+            // Before this read's own changes go in: the last of those already
+            // kept is the one the read's first request followed.
             const settle = this.db.prepare(
-                'UPDATE owner_changes SET since_ts = ? WHERE provider = ? AND file = ? AND session_id = ? AND since_ts IS NULL',
+                `UPDATE owner_changes SET since_ts = :ts
+                 WHERE provider = :provider AND file = :file AND session_id = :session AND since_ts IS NULL AND retired = 0
+                   AND offset = (SELECT max(offset) FROM owner_changes WHERE provider = :provider AND file = :file AND session_id = :session AND retired = 0)`,
             );
-            for (const [sessionId, ts] of firstRequestTs) {
-                settle.run(ts, provider, file, sessionId);
+            for (const [session, ts] of firstRequestTs) {
+                settle.run({ ts, provider, file, session });
             }
         }
         const insert = this.db.prepare(
-            `INSERT OR REPLACE INTO owner_changes (provider, file, offset, session_id, project_dir, owner, since_ts)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT OR REPLACE INTO owner_changes (provider, file, retired, offset, session_id, project_dir, owner, since_ts)
+             VALUES (?, ?, 0, ?, ?, ?, ?, ?)`,
         );
         for (const c of changes) {
             insert.run(provider, file, c.offset, c.sessionId, projectDir, this.ownerId(provider, c.owner), c.sinceTs);
@@ -907,7 +975,7 @@ export class UsageStore {
         const rows = this.db
             .prepare(
                 `SELECT o.session_id, a.account_uuid, a.organization_uuid FROM owner_changes o JOIN accounts a ON a.id = o.owner
-                 WHERE o.provider = ? AND o.file = (SELECT id FROM paths WHERE path = ?) ORDER BY o.offset`,
+                 WHERE o.provider = ? AND o.file = (SELECT id FROM paths WHERE path = ?) AND o.retired = 0 ORDER BY o.offset`,
             )
             .all(provider, filePath);
         for (const row of rows) {
@@ -917,29 +985,14 @@ export class UsageStore {
     }
 
     /**
-     * When `sessionId`'s owner changed in the main transcripts of
-     * `projectDir`, those changes a request has followed, in time order:
-     * what its subagents' requests are under, by their time.
-     */
-    ownerTimeline(provider: UsageProvider, sessionId: string, projectDir: string): { sinceTs: number; owner: SessionOwner }[] {
-        return this.db
-            .prepare(
-                `SELECT o.since_ts, a.account_uuid, a.organization_uuid FROM owner_changes o JOIN accounts a ON a.id = o.owner
-                 WHERE o.provider = ? AND o.session_id = ? AND o.project_dir = ? AND o.since_ts IS NOT NULL
-                 ORDER BY o.since_ts, o.file, o.offset`,
-            )
-            .all(provider, sessionId, projectDir)
-            .map(row => ({ sinceTs: row.since_ts as number, owner: ownerOf(row) }));
-    }
-
-    /**
-     * Give the rows an older parser read before `changes`, which a search of
-     * `filePath`'s bytes found, the owners they were made with: each request
-     * read from the file the one before it there, and the session's
-     * subagents' requests and limit hits the one in force at their time.
-     * Only rows with none, so that nothing a newer read gave is undone; those
-     * before a session's first change keep none, and count under its first
-     * owner. Call inside `transaction`.
+     * Give the requests an older parser read from `filePath`, and that have
+     * no owner, the ones `changes` say they were made with, which a search
+     * of the file's bytes found: each the owner before it there, by its byte
+     * offset. Only this file's rows, whatever order the files are read in,
+     * and only rows with none, so that nothing a newer read gave is undone.
+     * Those before a session's first change, a subagent's, and every limit
+     * hit, which keeps no place in its file, keep none: a report takes their
+     * session's owner at their time. Call inside `transaction`.
      */
     giveOwners(provider: UsageProvider, filePath: string, changes: readonly OwnerChange[]): void {
         this.assertWritable();
@@ -949,33 +1002,21 @@ export class UsageStore {
              WHERE provider = :provider AND file = :file AND session_id = :session AND owner IS NULL
                AND byte_offset > :from AND byte_offset < :to`,
         );
-        // A session's subagents are in the folder named after it, beside its transcript.
-        const subagents = this.db.prepare(
-            `UPDATE requests SET owner = :owner
-             WHERE provider = :provider AND session_id = :session AND owner IS NULL AND ts >= :from AND ts < :to
-               AND file IN (SELECT id FROM paths WHERE path > :folder AND path < :past)`,
-        );
-        const hits = this.db.prepare(
-            `UPDATE limit_hits SET owner = :owner
-             WHERE provider = :provider AND session_id = :session AND owner IS NULL AND ts >= :from AND ts < :to`,
-        );
         const bySession = new Map<string, OwnerChange[]>();
         for (const c of changes) {
             bySession.set(c.sessionId, [...(bySession.get(c.sessionId) ?? []), c]);
         }
         for (const [session, ofSession] of bySession) {
             const ordered = [...ofSession].sort((a, b) => a.offset - b.offset);
-            const folder = path.join(path.dirname(filePath), session) + path.sep;
-            const past = folder.slice(0, -1) + String.fromCharCode(path.sep.charCodeAt(0) + 1);
             ordered.forEach((c, i) => {
-                const owner = this.ownerId(provider, c.owner);
-                byPosition.run({ owner, provider, file, session, from: c.offset, to: ordered[i + 1]?.offset ?? Number.MAX_SAFE_INTEGER });
-                if (c.sinceTs === null) {
-                    return;
-                }
-                const until = ordered.slice(i + 1).find(next => next.sinceTs !== null)?.sinceTs ?? Number.MAX_SAFE_INTEGER;
-                subagents.run({ owner, provider, session, from: c.sinceTs, to: until, folder, past });
-                hits.run({ owner, provider, session, from: c.sinceTs, to: until });
+                byPosition.run({
+                    owner: this.ownerId(provider, c.owner),
+                    provider,
+                    file,
+                    session,
+                    from: c.offset,
+                    to: ordered[i + 1]?.offset ?? Number.MAX_SAFE_INTEGER,
+                });
             });
         }
     }
@@ -1022,14 +1063,15 @@ export class UsageStore {
      * Its owners are its owner changes in every main transcript of it, in
      * time order, those no request has followed yet last, and one that names
      * the owner before it left out: the first is its first owner, which the
-     * requests before any are counted under.
+     * requests before any are counted under. Of two at one time, a change a
+     * file says now comes after one it said before it was read again.
      */
     sessions(untilMs = Number.MAX_SAFE_INTEGER): StoredSession[] {
         const owners = new Map<string, OwnerSpan[]>();
         const changes = this.db
             .prepare(
                 `SELECT o.session_id, o.since_ts, a.account_uuid, a.organization_uuid FROM owner_changes o JOIN accounts a ON a.id = o.owner
-                 ORDER BY o.session_id, o.since_ts IS NULL, o.since_ts, o.file, o.offset`,
+                 ORDER BY o.session_id, o.since_ts IS NULL, o.since_ts, o.retired = 0, o.retired, o.file, o.offset`,
             )
             .all();
         for (const row of changes) {
@@ -1065,16 +1107,22 @@ export class UsageStore {
     }
 
     /**
-     * Request sums by 15-minute UTC bucket, session, model, variant, kind and
-     * effort, from `sinceMs` on and before `untilMs`. Every current UTC offset is a multiple of 15
-     * minutes, so no bucket straddles a local midnight, and the caller folds
-     * them into days in any zone exactly.
+     * Request sums by 15-minute UTC bucket, session, model, variant, kind,
+     * effort and owner, from `sinceMs` on and before `untilMs`. Every current
+     * UTC offset is a multiple of 15 minutes, so no bucket straddles a local
+     * midnight, and the caller folds them into days in any zone exactly. A
+     * session made with more than one account has each request that records
+     * none summed on its own (see SWITCHED_SESSIONS).
      */
     bucketSums(sinceMs: number, untilMs = Number.MAX_SAFE_INTEGER): BucketSums[] {
         const owners = this.owners();
+        // Looked for first: most histories have none, and their sums cost no more for it.
+        const switched = this.db.prepare(`SELECT EXISTS (${SWITCHED_SESSIONS}) AS any`).get() as { any: number };
+        const exact = switched.any ? `CASE WHEN owner IS NULL AND session_id IN (${SWITCHED_SESSIONS}) THEN ts END` : 'NULL';
         return this.db
             .prepare(
                 `SELECT ts / ${BUCKET_MS} AS bucket, session_id, model, variant, kind, effort, speed, inference_geo, owner,
+                        ${exact} AS exact,
                         CASE WHEN input IS NULL OR cache_creation IS NULL OR cache_read IS NULL THEN NULL
                              WHEN input + cache_creation + cache_read > 200000 THEN 'over-200k'
                              WHEN input + cache_creation + cache_read > 100000 THEN '100k-to-200k'
@@ -1087,7 +1135,7 @@ export class UsageStore {
                         coalesce(sum(web_fetch), 0) AS web_fetch
                  FROM requests
                  WHERE ts >= ? AND ts < ?
-                 GROUP BY bucket, session_id, model, variant, kind, effort, speed, inference_geo, prompt_size, owner`,
+                 GROUP BY bucket, session_id, model, variant, kind, effort, speed, inference_geo, prompt_size, owner, exact`,
             )
             .all(sinceMs, untilMs)
             .map(row => ({
@@ -1327,27 +1375,28 @@ export class UsageStore {
     }
 
     /**
-     * Every account and organization the history's requests were made with:
-     * each session's first owner, and every later one a request followed,
-     * with when it was first used, by first use. A session's first owner is
-     * used from its first request, the requests before any owner record
-     * included; a later one from the request after its change.
+     * Every account and organization the history's requests were made with,
+     * as its sessions' owners say: each session's first owner, once the
+     * session has a request or a limit hit, and every later one a request
+     * followed, with when it was first used, by first use. A session's first
+     * owner is used from its first request, the requests before any owner
+     * record included; a later one from the request after its change.
      */
     private usedAccounts(provider: UsageProvider): { id: number; owner: SessionOwner; ordinal: number | null }[] {
         return this.db
             .prepare(
                 `SELECT a.id, a.ordinal, a.account_uuid, a.organization_uuid,
-                        min(CASE WHEN o.n = 1 THEN coalesce(s.first_ts, o.since_ts) ELSE o.since_ts END) AS first_ts
+                        min(CASE WHEN o.n = 1 THEN coalesce(s.first_ts, o.since_ts) ELSE o.since_ts END) AS first_used
                  FROM (
                      SELECT owner, session_id, since_ts,
-                            row_number() OVER (PARTITION BY session_id ORDER BY since_ts IS NULL, since_ts, file, offset) AS n
+                            row_number() OVER (PARTITION BY session_id ORDER BY since_ts IS NULL, since_ts, retired = 0, retired, file, offset) AS n
                      FROM owner_changes WHERE provider = :provider
                  ) AS o
                  JOIN accounts a ON a.id = o.owner
                  LEFT JOIN sessions s ON s.provider = :provider AND s.session_id = o.session_id
-                 WHERE o.n = 1 OR o.since_ts IS NOT NULL
+                 WHERE (o.n = 1 AND (s.first_ts IS NOT NULL OR o.since_ts IS NOT NULL)) OR (o.n > 1 AND o.since_ts IS NOT NULL)
                  GROUP BY a.id
-                 ORDER BY first_ts IS NULL, first_ts, a.account_uuid, a.organization_uuid`,
+                 ORDER BY first_used IS NULL, first_used, a.account_uuid, a.organization_uuid`,
             )
             .all({ provider })
             .map(row => ({ id: row.id as number, owner: ownerOf(row), ordinal: row.ordinal as number | null }));

@@ -82,10 +82,10 @@ export interface UsageRequest extends TokenCounts {
     /** The parser that produced the row; a newer one always wins. */
     parserVersion: number;
     /**
-     * The account it was made with: the owner its main transcript records
-     * before it, or for a subagent's, the one its session was signed in to
-     * at its time. Null or absent where none is known yet: it then counts
-     * under its session's first owner (see `OwnerChange`).
+     * The account it was made with, where its own transcript says: the
+     * owner its main transcript records before it. Null or absent where none
+     * does, as for a subagent's: a report then takes its session's owner at
+     * its time, and its first owner before any (see `OwnerChange`).
      */
     owner?: SessionOwner | null;
 }
@@ -112,7 +112,7 @@ export interface LimitHit {
     timestamp: number;
     limitType: string;
     resetsAt: number | null;
-    /** The account that hit it, as a request's (see `UsageRequest.owner`). */
+    /** The account that hit it, as a request's (see `UsageRequest.owner`); one read before keeps none, having no place in its file. */
     owner?: SessionOwner | null;
 }
 
@@ -142,8 +142,9 @@ export interface OwnerChange {
     owner: SessionOwner;
     /**
      * The time of the session's first request after it in that transcript:
-     * where it begins for the session's subagents, whose own transcripts
-     * record no owner. Null until one has been read.
+     * where it begins for the requests that record no owner, a subagent's
+     * among them. Null until one has been read, and for good where another
+     * change came first: then no request was made under it.
      */
     sinceTs: number | null;
 }

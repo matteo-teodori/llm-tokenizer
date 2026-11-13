@@ -33,7 +33,7 @@ import {
     type TranscriptFile,
 } from './transcripts';
 import type { FileCheckpoint, ReadGuard, UsageStore } from './store';
-import type { SessionOwner, SessionSighting } from './types';
+import type { SessionSighting } from './types';
 
 const PROVIDER = 'claude-code';
 
@@ -418,17 +418,14 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     if (result.restarted === 'parser') {
         store.deleteRequestsFromFile(PROVIDER, file.path);
     }
-    // A subagent's transcript records no owner: its requests, and the limits
-    // it hit, were made with the account its session was signed in to at
-    // their time, in the main transcript beside it.
-    const timed = file.kind === 'main' ? undefined : ownerByTime(store, file);
-    const requests = [...dedupe(result.requests).values()].map(r => (timed && !r.owner ? { ...r, owner: timed(r.sessionId, r.timestamp) } : r));
+    // Each request and limit hit with the owner its own transcript records
+    // before it, where it does; a subagent's records none, and its session's
+    // owner at its time is a report's to take, from every main transcript of
+    // the session, whatever order they are read in.
+    const requests = [...dedupe(result.requests).values()];
     store.upsertRequests(requests);
     store.insertCompactions(PROVIDER, result.compactions);
-    store.insertLimitHits(
-        PROVIDER,
-        result.limitHits.map(h => (timed && !h.owner ? { ...h, owner: timed(h.sessionId, h.timestamp) } : h)),
-    );
+    store.insertLimitHits(PROVIDER, result.limitHits);
     if (file.kind === 'main') {
         store.putOwnerChanges(PROVIDER, file.path, file.projectDir, result.ownerChanges, result.firstRequestTs, result.restarted !== null);
         if (result.restarted === null && previous && previous.offset > 0 && needsOwnerScan(file, previous)) {
@@ -495,33 +492,6 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
         malformedLines: (carried?.malformedLines ?? 0) + malformed,
         newestVersion: result.newestVersion ?? carried?.newestVersion ?? null,
     });
-}
-
-/**
- * The account a subagent's request at a time was made with: its session's
- * owner then, in the main transcripts of the subagent's project folder, as
- * far as they have been read. They are read first, their path sorting
- * before the folder beside them, and a subagent runs within a turn, never
- * across a change of owner. Null before the first change with a time: the
- * request counts under the session's first owner.
- */
-function ownerByTime(store: UsageStore, file: TranscriptFile): (sessionId: string, timestamp: number) => SessionOwner | null {
-    const timelines = new Map<string, { sinceTs: number; owner: SessionOwner }[]>();
-    return (sessionId, timestamp) => {
-        let timeline = timelines.get(sessionId);
-        if (!timeline) {
-            timeline = store.ownerTimeline(PROVIDER, sessionId, file.projectDir);
-            timelines.set(sessionId, timeline);
-        }
-        let owner: SessionOwner | null = null;
-        for (const change of timeline) {
-            if (change.sinceTs > timestamp) {
-                break;
-            }
-            owner = change.owner;
-        }
-        return owner;
-    };
 }
 
 function skipReason(error: unknown): SkipReason {

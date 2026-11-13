@@ -43,6 +43,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
                 project: { kind: 'root', path: `/repo/${HOSTILE}` },
                 label: HOSTILE,
                 accounts: ['none'],
+                moreAccounts: 0,
                 firstTs: Date.UTC(2026, 9, 9, 10),
                 lastTs: Date.UTC(2026, 9, 9, 11, 30),
                 activeMs: 47 * 60_000,

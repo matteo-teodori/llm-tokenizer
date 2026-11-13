@@ -233,6 +233,7 @@ suite('usage panel', () => {
             project: { kind: 'root' as const, path: '/repo' },
             label: 'repo',
             accounts: ['none'],
+            moreAccounts: 0,
             firstTs: 9e15,
             lastTs: 9e15,
             activeMs: 0,
