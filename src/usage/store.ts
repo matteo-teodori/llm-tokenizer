@@ -153,7 +153,9 @@ export interface FileCheckpoint {
 export interface StoredSession extends SessionSighting {
     provider: UsageProvider;
     owners: OwnerSpan[];
-    /** When it first and last reached a usage limit its transcript records no owner before: a report gives those by their time. */
+    /** When it first and last reached a usage limit before the report's end, whatever the limit's owner. */
+    hits: { firstTs: number; lastTs: number } | null;
+    /** The same, of the limits its transcript records no owner before: a report gives those by their time. */
     unownedHits: { firstTs: number; lastTs: number } | null;
 }
 
@@ -1226,8 +1228,8 @@ export class UsageStore {
      * the owner before it left out: the first is its first owner, which the
      * requests before any are counted under. Of two at one time, a change a
      * file says now comes after one it said before it was read again. With
-     * them, when it first and last reached a usage limit that records no
-     * owner.
+     * them, when it first and last reached a usage limit, and a usage limit
+     * that records no owner.
      */
     sessions(untilMs = Number.MAX_SAFE_INTEGER): StoredSession[] {
         const owners = new Map<string, OwnerSpan[]>();
@@ -1253,9 +1255,11 @@ export class UsageStore {
                         CASE WHEN last_ts >= :until
                              THEN (SELECT max(ts) FROM requests r WHERE r.provider = s.provider AND r.session_id = s.session_id AND r.ts < :until)
                              ELSE last_ts END AS last_ts,
-                        h.first_hit AS unowned_first_ts, h.last_hit AS unowned_last_ts
+                        h.first_hit, h.last_hit, h.first_unowned, h.last_unowned
                  FROM sessions s
-                 LEFT JOIN (SELECT provider, session_id, min(ts) AS first_hit, max(ts) AS last_hit FROM limit_hits WHERE owner IS NULL GROUP BY provider, session_id) h
+                 LEFT JOIN (SELECT provider, session_id, min(ts) AS first_hit, max(ts) AS last_hit,
+                                   min(ts) FILTER (WHERE owner IS NULL) AS first_unowned, max(ts) FILTER (WHERE owner IS NULL) AS last_unowned
+                            FROM limit_hits WHERE ts < :until GROUP BY provider, session_id) h
                         ON h.provider = s.provider AND h.session_id = s.session_id
                  ORDER BY s.session_id`,
             )
@@ -1270,8 +1274,8 @@ export class UsageStore {
                 firstTs: row.first_ts as number | null,
                 lastTs: row.last_ts as number | null,
                 owners: owners.get(row.session_id as string) ?? [],
-                unownedHits:
-                    row.unowned_first_ts === null ? null : { firstTs: row.unowned_first_ts as number, lastTs: row.unowned_last_ts as number },
+                hits: row.first_hit === null ? null : { firstTs: row.first_hit as number, lastTs: row.last_hit as number },
+                unownedHits: row.first_unowned === null ? null : { firstTs: row.first_unowned as number, lastTs: row.last_unowned as number },
             }));
     }
 
@@ -1426,11 +1430,13 @@ export class UsageStore {
                  FROM requests`,
             )
             .get({ until: untilMs }) as { start: number | null; newest: number | null; n: number; ahead: number };
+        // A limit reached before the first request starts the history too: everything held shows it.
+        const limits = this.db.prepare('SELECT min(ts) AS start FROM limit_hits WHERE ts < ?').get(untilMs) as { start: number | null };
         const files = this.db
             .prepare('SELECT count(*) AS n, coalesce(sum(oversize_lines), 0) AS oversize, coalesce(sum(malformed_lines), 0) AS malformed FROM files')
             .get() as { n: number; oversize: number; malformed: number };
         return {
-            start: requests.start,
+            start: requests.start === null || limits.start === null ? (requests.start ?? limits.start) : Math.min(requests.start, limits.start),
             newest: requests.newest,
             requests: requests.n,
             ahead: requests.ahead,
@@ -1553,15 +1559,19 @@ export class UsageStore {
      * session has a request, a request or limit hit followed it, or the
      * session reached a limit that records no owner, which a report gives it;
      * and every later one a request or limit hit followed: with when it was
-     * first used, by first use. A session's first owner is used from its
-     * first request, the requests before any owner record included; a later
-     * one from the request after its change. As `usedOwners` in report.ts.
+     * first used, by first use. A session's first owner is used from the
+     * first of its session's first request (those before any owner record
+     * are its), the request or limit after its change, and its first limit
+     * that records no owner; a later one from the request or limit after its
+     * change. As `usedOwners` and `accountsSeen` in report.ts.
      */
     private usedAccounts(provider: UsageProvider): { id: number; owner: SessionOwner; ordinal: number | null }[] {
         return this.db
             .prepare(
                 `SELECT a.id, a.ordinal, a.account_uuid, a.organization_uuid,
-                        min(CASE WHEN o.n = 1 THEN coalesce(s.first_ts, o.since_ts, h.ts) ELSE o.since_ts END) AS first_used
+                        min(CASE WHEN o.n = 1
+                                 THEN min(coalesce(s.first_ts, o.since_ts, h.ts), coalesce(o.since_ts, s.first_ts, h.ts), coalesce(h.ts, s.first_ts, o.since_ts))
+                                 ELSE o.since_ts END) AS first_used
                  FROM (
                      SELECT owner, session_id, since_ts,
                             row_number() OVER (PARTITION BY session_id ORDER BY since_ts IS NULL, since_ts, retired = 0, retired, file, offset) AS n

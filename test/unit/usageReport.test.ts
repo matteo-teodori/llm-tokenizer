@@ -793,6 +793,42 @@ suite('usage report', () => {
             assert.deepStrictEqual(queryReport(store, query({ account: `${C}/` })).limitWindows.map(w => w.account), [`${C}/`]);
         });
 
+        test('an account is used from its first request or limit to its last, whichever records its owner, and the history starts at its first record', async () => {
+            const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
+            const D = '4d5e6f7a-8b9c-4dae-8f0a-2b3c4d5e6f7a';
+            // C's request on the 9th, then a session under C, its owner first, only refused, on the 10th, twice.
+            transcript('-repo-one', 'c1.jsonl', [owner('c1', C), userRecord('c1', '/repo/one', '2026-10-09T09:00:00Z'), assistantRecord('c1', 'm-c1', '2026-10-09T09:00:01Z', 3)]);
+            // One more, dated ahead of the report's clock, as only a wrong clock writes: not counted yet.
+            transcript('-repo-one', 'c2.jsonl', [
+                owner('c2', C),
+                limitHit('c2', 'hit-c2a', '2026-10-10T08:00:00Z'),
+                limitHit('c2', 'hit-c2b', '2026-10-10T08:30:00Z'),
+                limitHit('c2', 'hit-c2c', '2026-11-30T08:00:00Z'),
+            ]);
+            // A session opened under D, refused at once on the 7th, before any request of the history, then resumed under C, whose request came later.
+            transcript('-repo-one', 'd1.jsonl', [
+                owner('d1', D),
+                limitHit('d1', 'hit-d1', '2026-10-07T07:00:00Z'),
+                owner('d1', C),
+                userRecord('d1', '/repo/one', '2026-10-09T12:00:00Z'),
+                assistantRecord('d1', 'm-d1', '2026-10-09T12:00:01Z', 5),
+            ]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const report = queryReport(store, query());
+            assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.firstTs, a.lastTs]), [
+                // D until C began in that session.
+                [`${D}/`, Date.parse('2026-10-07T07:00:00Z'), Date.parse('2026-10-09T12:00:01Z')],
+                [`${C}/`, Date.parse('2026-10-09T09:00:01Z'), Date.parse('2026-10-10T08:30:00Z')],
+            ]);
+            // D was used first: it is 1, by its limit, not by C's request after it.
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2 });
+            // Everything held starts at that limit, and lists it.
+            assert.strictEqual(report.coverage.start, Date.parse('2026-10-07T07:00:00Z'));
+            assert.ok(report.limitWindows.some(w => w.account === `${D}/`));
+        });
+
         test('a session a transcript names only by a copied change of owner and limit has its row: its limit is offered as the account it is shown under', async () => {
             // s9 holds records copied from s10, whose own transcript was gone
             // before the history first read it: its owner, then a refusal.
@@ -1028,7 +1064,7 @@ suite('usage report', () => {
             firstTs: Date.UTC(2026, 9, 9) + i,
             lastTs: Date.UTC(2026, 9, 9) + i,
             owners: [{ owner: owner(i), sinceTs: null }],
-            unownedHits: null,
+            hits: null, unownedHits: null,
         }));
         // One more session for each of the last ten accounts: the ten with most sessions.
         const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
@@ -1092,7 +1128,7 @@ suite('usage report', () => {
             firstTs,
             lastTs: firstTs,
             owners: [{ owner: { accountUuid, organizationUuid: null }, sinceTs: null }],
-            unownedHits: null,
+            hits: null, unownedHits: null,
         });
         const sum = (sessionId: string, input: number) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
@@ -1205,7 +1241,7 @@ suite('usage report', () => {
         const report = buildReport(
             {
                 sums,
-                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHits: null }],
+                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, hits: null, unownedHits: null }],
                 compactions: [],
                 limitHits: [],
                 coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },

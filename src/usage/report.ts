@@ -35,6 +35,8 @@ export interface ReportSession {
      * owner record. Empty where they record none.
      */
     owners: OwnerSpan[];
+    /** When it first and last reached a usage limit, whatever the limit's owner. */
+    hits: { firstTs: number; lastTs: number } | null;
     /**
      * When it first and last reached a usage limit that records no owner:
      * each goes to its owner at its time (see `ownerAt`), the first owner
@@ -123,7 +125,7 @@ export interface AccountSeen {
     key: string;
     owner: SessionOwner | null;
     sessions: number;
-    /** Its sessions' first and last request, or limit reached where a session made none. */
+    /** Its sessions' first and last use: a request, or a limit reached. */
     firstTs: number | null;
     lastTs: number | null;
     /**
@@ -659,17 +661,20 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
     };
     for (const s of sessions) {
         const spans = usedOwners(s);
-        const hits = s.unownedHits;
-        if (spans.length === 0 && (s.firstTs !== null || hits !== null)) {
-            note(null, s.sessionId, s.firstTs ?? hits?.firstTs ?? null, s.lastTs ?? hits?.lastTs ?? null);
+        // A session is used from its first request or limit to its last.
+        const last = latest(s.lastTs, s.hits?.lastTs ?? null);
+        if (spans.length === 0 && (s.firstTs !== null || s.unownedHits !== null)) {
+            note(null, s.sessionId, earliest(s.firstTs, s.hits?.firstTs ?? null), last);
         }
-        // Dated as the history numbers them: the first from the session's first request, or its own, or its first limit's.
+        // Dated as the history numbers them: the first from the first of the
+        // session's first request, its own change's time and the first limit
+        // that records no owner; a later one from its change's.
         spans.forEach((o, i) =>
             note(
                 o.owner,
                 s.sessionId,
-                i === 0 ? (s.firstTs ?? o.sinceTs ?? hits?.firstTs ?? null) : o.sinceTs,
-                spans[i + 1]?.sinceTs ?? s.lastTs ?? hits?.lastTs ?? null,
+                i === 0 ? earliest(earliest(s.firstTs, o.sinceTs), s.unownedHits?.firstTs ?? null) : o.sinceTs,
+                spans[i + 1]?.sinceTs ?? last,
             ),
         );
     }
@@ -709,6 +714,14 @@ function bySeenOrder(a: AccountSeen, b: AccountSeen): number {
         (a.firstTs ?? Infinity) - (b.firstTs ?? Infinity) ||
         compareText(a.key, b.key)
     );
+}
+
+/** The earlier of two times either of which may be missing, and the later. */
+function earliest(a: number | null, b: number | null): number | null {
+    return a === null ? b : b === null ? a : Math.min(a, b);
+}
+function latest(a: number | null, b: number | null): number | null {
+    return a === null ? b : b === null ? a : Math.max(a, b);
 }
 
 /** As `accountKey` makes it; kept here so that the report's rules read on their own. */
