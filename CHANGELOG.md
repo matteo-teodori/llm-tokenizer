@@ -23,11 +23,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   *Account 3*, by a number the history gives each account as it first sees
   it, and keeps, and **Name…** gives it a name of your own, kept in a new
   setting, **Claude Code Account Names**, which Settings Sync leaves out
-  while LLM Tokenizer is installed in the profile whose settings hold it.
-  Sessions with no account recorded, from before Claude Code recorded it,
-  signed in with an API key or through a cloud provider, or whose
-  transcripts Claude Code had deleted before this version first read them,
-  are *Not recorded*.
+  while LLM Tokenizer is installed in the Default profile, whose settings
+  hold it. Sessions with no account recorded, from before Claude Code
+  recorded it, signed in with an API key or through a cloud provider, or
+  whose transcripts Claude Code had deleted before this version first read
+  them, are *Not recorded*.
 - **One account at a time.** A filter beside the scope narrows the whole
   page to one account, or to the sessions that record none: totals, days,
   models, projects, sessions and usage limits.

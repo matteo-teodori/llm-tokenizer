@@ -59,8 +59,8 @@ download of a model's *vocabulary file* from huggingface.co, which you can turn
 off with `llm-tokenizer.downloadTokenizers`; a repository's own settings can
 turn it off for that repository, never back on. Claude Code usage, if you turn it
 on, reads Claude Code's own session records, the accounts its configuration
-file names and three entries of its settings files, on this machine, and sends
-nothing anywhere.
+file names and its settings files, of which it keeps three entries, on this
+machine, and sends nothing anywhere.
 
 ### ⚙️ Configuration
 - `llm-tokenizer.defaultModel`: Model used until you pick one
@@ -303,17 +303,18 @@ managed settings files, it keeps three `env` entries and nothing else:
 
 Its settings are machine settings, so a repository's settings cannot turn it
 on or point it at another folder; the names you give accounts are an
-application setting, which only your own settings hold. Settings Sync leaves
-them all out while LLM Tokenizer is installed in the profile whose settings
-hold them. Where it is not, add them to `settingsSync.ignoredSettings` to keep
-them on this machine: the names in a remote window, where LLM Tokenizer is
-installed on the remote and the names are this machine's settings, and all
-four (`llm-tokenizer.enableClaudeCodeUsage`,
+application setting, which only your own settings hold: the Default profile's,
+whichever profile is in use. Settings Sync leaves each of them out while LLM
+Tokenizer is installed in the profile whose settings hold it. Where it is not,
+add them to `settingsSync.ignoredSettings` to keep them on this machine: the
+names with LLM Tokenizer installed only in a profile other than Default, or in
+a remote window, where it runs on the remote; and all four
+(`llm-tokenizer.enableClaudeCodeUsage`,
 `llm-tokenizer.claudeCodeDataDirectory`,
 `llm-tokenizer.showClaudeCodeUsageInStatusBar` and
-`llm-tokenizer.claudeCodeAccountNames`) with LLM Tokenizer in a profile that
-uses another profile's settings. In a dev container, though, the container's
-settings can come from the repository's `devcontainer.json`.
+`llm-tokenizer.claudeCodeAccountNames`) with it in a profile that uses another
+profile's settings. In a dev container, though, the container's settings can
+come from the repository's `devcontainer.json`.
 
 **Before uninstalling**, run **Clear Claude Code Usage History**: the editor
 may leave this extension's storage on disk after the extension is gone. The
