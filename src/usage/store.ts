@@ -153,10 +153,14 @@ export interface FileCheckpoint {
 export interface StoredSession extends SessionSighting {
     provider: UsageProvider;
     owners: OwnerSpan[];
-    /** When it first and last reached a usage limit before the report's end, whatever the limit's owner. */
-    hits: { firstTs: number; lastTs: number } | null;
-    /** The same, of the limits its transcript records no owner before: a report gives those by their time. */
-    unownedHits: { firstTs: number; lastTs: number } | null;
+    /**
+     * When it first reached a usage limit its transcript records no owner
+     * before, a report giving those by their time: whenever dated, as the
+     * numbering takes them.
+     */
+    unownedHitTs: number | null;
+    /** Its limits before the report's end, by the owner each records, null for none: when first and last. */
+    limitSpans: { owner: SessionOwner | null; firstTs: number; lastTs: number }[];
 }
 
 /**
@@ -1228,10 +1232,21 @@ export class UsageStore {
      * the owner before it left out: the first is its first owner, which the
      * requests before any are counted under. Of two at one time, a change a
      * file says now comes after one it said before it was read again. With
-     * them, when it first and last reached a usage limit, and a usage limit
-     * that records no owner.
+     * them, when it first reached a usage limit that records no owner, and
+     * when it first and last reached one, by the owner each records.
      */
     sessions(untilMs = Number.MAX_SAFE_INTEGER): StoredSession[] {
+        const accounts = this.owners();
+        const limitSpans = new Map<string, { owner: SessionOwner | null; firstTs: number; lastTs: number }[]>();
+        for (const row of this.db
+            .prepare('SELECT session_id, owner, min(ts) AS first_ts, max(ts) AS last_ts FROM limit_hits WHERE ts < ? GROUP BY session_id, owner')
+            .all(untilMs)) {
+            const id = row.session_id as string;
+            const owner = row.owner === null ? null : (accounts.get(row.owner as number) ?? null);
+            const list = limitSpans.get(id) ?? [];
+            list.push({ owner, firstTs: row.first_ts as number, lastTs: row.last_ts as number });
+            limitSpans.set(id, list);
+        }
         const owners = new Map<string, OwnerSpan[]>();
         const changes = this.db
             .prepare(
@@ -1255,11 +1270,10 @@ export class UsageStore {
                         CASE WHEN last_ts >= :until
                              THEN (SELECT max(ts) FROM requests r WHERE r.provider = s.provider AND r.session_id = s.session_id AND r.ts < :until)
                              ELSE last_ts END AS last_ts,
-                        h.first_hit, h.last_hit, h.first_unowned, h.last_unowned
+                        h.first_unowned
                  FROM sessions s
-                 LEFT JOIN (SELECT provider, session_id, min(ts) AS first_hit, max(ts) AS last_hit,
-                                   min(ts) FILTER (WHERE owner IS NULL) AS first_unowned, max(ts) FILTER (WHERE owner IS NULL) AS last_unowned
-                            FROM limit_hits WHERE ts < :until GROUP BY provider, session_id) h
+                 LEFT JOIN (SELECT provider, session_id, min(ts) AS first_unowned
+                            FROM limit_hits WHERE owner IS NULL GROUP BY provider, session_id) h
                         ON h.provider = s.provider AND h.session_id = s.session_id
                  ORDER BY s.session_id`,
             )
@@ -1274,8 +1288,8 @@ export class UsageStore {
                 firstTs: row.first_ts as number | null,
                 lastTs: row.last_ts as number | null,
                 owners: owners.get(row.session_id as string) ?? [],
-                hits: row.first_hit === null ? null : { firstTs: row.first_hit as number, lastTs: row.last_hit as number },
-                unownedHits: row.first_unowned === null ? null : { firstTs: row.first_unowned as number, lastTs: row.last_unowned as number },
+                unownedHitTs: row.first_unowned as number | null,
+                limitSpans: limitSpans.get(row.session_id as string) ?? [],
             }));
     }
 
@@ -1430,14 +1444,17 @@ export class UsageStore {
                  FROM requests`,
             )
             .get({ until: untilMs }) as { start: number | null; newest: number | null; n: number; ahead: number };
-        // A limit reached before the first request starts the history too: everything held shows it.
-        const limits = this.db.prepare('SELECT min(ts) AS start FROM limit_hits WHERE ts < ?').get(untilMs) as { start: number | null };
+        // A limit reached before the first request starts the history too, and one after the last ends it.
+        const limits = this.db.prepare('SELECT min(ts) AS start, max(ts) AS newest FROM limit_hits WHERE ts < ?').get(untilMs) as {
+            start: number | null;
+            newest: number | null;
+        };
         const files = this.db
             .prepare('SELECT count(*) AS n, coalesce(sum(oversize_lines), 0) AS oversize, coalesce(sum(malformed_lines), 0) AS malformed FROM files')
             .get() as { n: number; oversize: number; malformed: number };
         return {
             start: requests.start === null || limits.start === null ? (requests.start ?? limits.start) : Math.min(requests.start, limits.start),
-            newest: requests.newest,
+            newest: requests.newest === null || limits.newest === null ? (requests.newest ?? limits.newest) : Math.max(requests.newest, limits.newest),
             requests: requests.n,
             ahead: requests.ahead,
             files: files.n,

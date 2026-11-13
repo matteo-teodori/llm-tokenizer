@@ -220,7 +220,7 @@ export interface BucketSums {
 }
 
 export interface StoreCoverage {
-    /** The oldest and newest request held, of any range, but those dated ahead. */
+    /** The oldest and newest record held, a request or a limit reached, of any range, but those dated ahead. */
     start: number | null;
     newest: number | null;
     requests: number;

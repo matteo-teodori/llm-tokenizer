@@ -824,9 +824,33 @@ suite('usage report', () => {
             // D was used first: it is 1, by its limit, not by C's request after it.
             store.transaction(() => store.numberAccounts('claude-code'));
             assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2 });
-            // Everything held starts at that limit, and lists it.
+            // Everything held starts at that limit, and lists it; it ends at its newest record, the last limit before the clock.
             assert.strictEqual(report.coverage.start, Date.parse('2026-10-07T07:00:00Z'));
+            assert.strictEqual(report.coverage.newest, Date.parse('2026-10-10T08:30:00Z'));
             assert.ok(report.limitWindows.some(w => w.account === `${D}/`));
+        });
+
+        test("a session's last account is never dated to a limit another reached, an account used only by a limit dated ahead is offered as it is numbered, and a session with only such a limit is no Not recorded", async () => {
+            const F = '6f7a8b9c-adbe-4fc0-8b1c-4d5e6f7a8b9c';
+            // One session, its transcripts in two folders: under A in one, a request and later A's own refusal; under B in the other, a request between.
+            transcript('-repo-one', 's1.jsonl', [owner('s1', A, ORG_A), assistantRecord('s1', 'm-a', '2026-10-09T10:10:00Z', 3), limitHit('s1', 'hit-a', '2026-10-09T10:50:00Z')]);
+            transcript('-repo-two', 's1.jsonl', [owner('s1', B), userRecord('s1', '/repo/two', '2026-10-09T10:20:00Z'), assistantRecord('s1', 'm-b', '2026-10-09T10:20:01Z', 5)]);
+            // A session signed in to F, nothing asked, whose only use is a refusal in its subagent's transcript, dated two days ahead of the clock (a wrong one).
+            transcript('-repo-one', 's2.jsonl', [owner('s2', F), userRecord('s2', '/repo/one', '2026-10-09T09:00:00Z')]);
+            transcript('-repo-one', path.join('s2', 'subagents', 'agent-x.jsonl'), [{ ...limitHit('s2', 'hit-f', '2026-10-12T12:00:00Z'), isSidechain: true, agentId: 'x' }]);
+            transcript('-repo-one', 's3.jsonl', [limitHit('s3', 'hit-n', '2026-10-12T13:00:00Z')]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const report = queryReport(store, query());
+            const seen = Object.fromEntries(report.accountsSeen.map(a => [a.key, [a.firstTs, a.lastTs]]));
+            assert.deepStrictEqual(seen[keyA], [Date.parse('2026-10-09T10:10:00Z'), Date.parse('2026-10-09T10:20:01Z')]);
+            assert.deepStrictEqual(seen[keyB], [Date.parse('2026-10-09T10:20:01Z'), Date.parse('2026-10-09T10:20:01Z')]);
+            // F is used by that refusal: offered as the numbering takes it.
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.ok(`${F}/` in seen, JSON.stringify(Object.keys(seen)));
+            assert.ok(store.accountNumbers().has(`${F}/`));
+            // A session that records no account, its only record a refusal dated ahead: nothing to show, nothing offered.
+            assert.ok(!('none' in seen), JSON.stringify(Object.keys(seen)));
         });
 
         test('a session a transcript names only by a copied change of owner and limit has its row: its limit is offered as the account it is shown under', async () => {
@@ -1064,7 +1088,7 @@ suite('usage report', () => {
             firstTs: Date.UTC(2026, 9, 9) + i,
             lastTs: Date.UTC(2026, 9, 9) + i,
             owners: [{ owner: owner(i), sinceTs: null }],
-            hits: null, unownedHits: null,
+            unownedHitTs: null, limitSpans: [],
         }));
         // One more session for each of the last ten accounts: the ten with most sessions.
         const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
@@ -1128,7 +1152,7 @@ suite('usage report', () => {
             firstTs,
             lastTs: firstTs,
             owners: [{ owner: { accountUuid, organizationUuid: null }, sinceTs: null }],
-            hits: null, unownedHits: null,
+            unownedHitTs: null, limitSpans: [],
         });
         const sum = (sessionId: string, input: number) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
@@ -1241,7 +1265,7 @@ suite('usage report', () => {
         const report = buildReport(
             {
                 sums,
-                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, hits: null, unownedHits: null }],
+                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null, limitSpans: [] }],
                 compactions: [],
                 limitHits: [],
                 coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },
