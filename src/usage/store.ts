@@ -30,7 +30,7 @@ import { numberAccounts, type AccountNumber } from './accounts';
 import { BUCKET_MS } from './aggregate';
 import { backupsBeside, copiesBeside, currentHistory, linkWhole, ownFiles, removeQuietly } from './historyFiles';
 import { isComplete } from './provenance';
-import { OWNERS_SINCE } from './transcripts';
+import { OWNERS_SINCE, PARSER_VERSION } from './transcripts';
 import type {
     BucketSums,
     Compaction,
@@ -473,11 +473,21 @@ const MIGRATE_TO_4 = OWNER_COLUMNS + OWNER_TABLES;
  * Bring a history at version 4 that a build of LLM Tokenizer made before
  * 2.4.0 was released to the schema 2.4.0 has: version 4 changed shape while
  * it was being made, and only such builds wrote another (owners kept by
- * session, then changes no file could retire). What they kept of owners and
- * accounts goes, and every main transcript is searched for its owners
- * again, its rows kept; accounts are numbered and named again by the next
- * pass. Nothing at all for a history in this shape, which one look at the
- * newest column tells.
+ * session, then changes no file could retire). Nothing at all for a history
+ * in this shape, which one look at the newest column tells.
+ *
+ * What those builds got right is kept, as the history outlives the
+ * transcripts it was read from: the names Claude Code gave each account; a
+ * main transcript's changes of owner, and its requests' owners, which they
+ * read from the transcript itself; and, from the builds that kept one owner
+ * per session, that owner, for a session none of whose main transcripts is
+ * left to search again, as a change no file says now (retired), which
+ * counts only where nothing else does. What they took by time goes, a
+ * subagent's and a limit's owner, for a report to take by time, and so do
+ * the numbers they gave, for the next pass to give by first use. Every main
+ * transcript still there is searched for its owners again, its rows kept,
+ * and what that finds replaces what was kept. And the newest parser is this
+ * one from now: a window still running such a build stops writing.
  */
 function completeSchema4(db: DatabaseSync): void {
     const columns = (table: string) =>
@@ -488,23 +498,103 @@ function completeSchema4(db: DatabaseSync): void {
     db.exec('BEGIN IMMEDIATE');
     try {
         if (!columns('owner_changes').has('retired')) {
-            db.exec('DROP TRIGGER IF EXISTS clear_accounts; DROP TABLE IF EXISTS owner_changes; DROP TABLE IF EXISTS accounts');
+            const accounts = columns('accounts');
+            const changes = columns('owner_changes');
             const sessions = columns('sessions');
+            // What is kept, set aside while the tables are made again.
+            db.exec('DROP TABLE IF EXISTS temp.kept_accounts; DROP TABLE IF EXISTS temp.kept_changes; DROP TABLE IF EXISTS temp.kept_owners');
+            if (accounts.size > 0) {
+                const named = accounts.has('named_ts') ? 'named_ts' : accounts.has('seen_ts') ? 'seen_ts' : 'NULL';
+                db.exec(
+                    `CREATE TEMP TABLE kept_accounts AS
+                     SELECT ${accounts.has('id') ? 'id' : 'NULL'} AS id, provider, account_uuid, organization_uuid, email, organization_name, ${named} AS named_ts
+                     FROM accounts`,
+                );
+            }
+            if (changes.size > 0) {
+                db.exec('CREATE TEMP TABLE kept_changes AS SELECT provider, file, offset, session_id, project_dir, owner, since_ts FROM owner_changes');
+            }
+            if (sessions.has('account_uuid')) {
+                db.exec(
+                    `CREATE TEMP TABLE kept_owners AS
+                     SELECT provider, session_id, project_dir, account_uuid, coalesce(organization_uuid, '') AS organization_uuid
+                     FROM sessions WHERE account_uuid IS NOT NULL`,
+                );
+            }
+            db.exec('DROP TRIGGER IF EXISTS clear_accounts; DROP TABLE IF EXISTS owner_changes; DROP TABLE IF EXISTS accounts');
             for (const column of ['account_uuid', 'organization_uuid', 'owner_named', 'owner_mtime']) {
                 if (sessions.has(column)) {
                     db.exec(`ALTER TABLE sessions DROP COLUMN ${column}`);
                 }
             }
-            for (const table of ['requests', 'limit_hits']) {
-                db.exec(columns(table).has('owner') ? `UPDATE ${table} SET owner = NULL` : `ALTER TABLE ${table} ADD COLUMN owner INTEGER`);
-            }
             db.exec(OWNER_TABLES);
+            if (accounts.size > 0) {
+                db.exec(
+                    `INSERT INTO accounts (id, provider, account_uuid, organization_uuid, email, organization_name, named_ts)
+                     SELECT id, provider, account_uuid, organization_uuid, email, organization_name, named_ts FROM temp.kept_accounts`,
+                );
+            }
+            for (const table of ['requests', 'limit_hits']) {
+                if (!columns(table).has('owner')) {
+                    db.exec(`ALTER TABLE ${table} ADD COLUMN owner INTEGER`);
+                }
+            }
+            // A main transcript's own, where its account is still known; nothing else's.
+            db.exec(
+                `UPDATE requests SET owner = NULL
+                 WHERE owner IS NOT NULL AND (kind != 'main' OR owner NOT IN (SELECT id FROM accounts));
+                 UPDATE limit_hits SET owner = NULL WHERE owner IS NOT NULL;`,
+            );
+            if (changes.size > 0) {
+                db.exec(
+                    `INSERT INTO owner_changes (provider, file, offset, session_id, project_dir, owner, since_ts, retired)
+                     SELECT provider, file, offset, session_id, project_dir, owner, since_ts, 0 FROM temp.kept_changes
+                     WHERE owner IN (SELECT id FROM accounts)`,
+                );
+            }
+            if (sessions.has('account_uuid')) {
+                keepSessionOwners(db);
+            }
+            db.exec('DROP TABLE IF EXISTS temp.kept_accounts; DROP TABLE IF EXISTS temp.kept_changes; DROP TABLE IF EXISTS temp.kept_owners');
             db.exec(`UPDATE files SET parser_version = ${OWNERS_SINCE - 1} WHERE kind = 'main' AND parser_version >= ${OWNERS_SINCE}`);
+            const newest = db.prepare('SELECT value FROM meta WHERE key = ?').get(NEWEST_PARSER) as { value: string } | undefined;
+            if (Number(newest?.value ?? 0) < PARSER_VERSION) {
+                db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(NEWEST_PARSER, String(PARSER_VERSION));
+            }
         }
         db.exec('COMMIT');
     } catch (error) {
         db.exec('ROLLBACK');
         throw error;
+    }
+}
+
+/**
+ * The owner a build that kept one per session gave it, for each session
+ * none of whose main transcripts is left: a retired change before its
+ * first record, which a report takes only where the session has no other.
+ * One whose transcript is still there is searched again instead.
+ */
+function keepSessionOwners(db: DatabaseSync): void {
+    const owned = db.prepare('SELECT provider, session_id, project_dir, account_uuid, organization_uuid FROM temp.kept_owners').all();
+    const files = db.prepare(
+        `SELECT DISTINCT r.file, p.path FROM requests r JOIN paths p ON p.id = r.file
+         WHERE r.provider = ? AND r.session_id = ? AND r.kind = 'main' ORDER BY r.file`,
+    );
+    const account = db.prepare('INSERT OR IGNORE INTO accounts (provider, account_uuid, organization_uuid) VALUES (?, ?, ?)');
+    const accountId = db.prepare('SELECT id FROM accounts WHERE provider = ? AND account_uuid = ? AND organization_uuid = ?');
+    const change = db.prepare(
+        `INSERT OR IGNORE INTO owner_changes (provider, file, offset, session_id, project_dir, owner, since_ts, retired)
+         VALUES (?, ?, -1, ?, ?, ?, NULL, 1)`,
+    );
+    for (const row of owned) {
+        const main = files.all(row.provider, row.session_id) as { file: number; path: string }[];
+        if (main.length === 0 || main.some(f => fs.existsSync(f.path))) {
+            continue;
+        }
+        account.run(row.provider, row.account_uuid, row.organization_uuid);
+        const id = (accountId.get(row.provider, row.account_uuid, row.organization_uuid) as { id: number }).id;
+        change.run(row.provider, main[0].file, row.session_id, row.project_dir, id);
     }
 }
 

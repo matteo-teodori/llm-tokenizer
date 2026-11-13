@@ -7,8 +7,9 @@ import type { StatementSync } from 'node:sqlite';
 import { dedupe } from '../../src/usage/accounting';
 import { totalsOf } from '../../src/usage/aggregate';
 import { createHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
+import { queryReport } from '../../src/usage/queries';
 import { LEASE_TAKEOVER_MS, SCHEMA_VERSION, UsageStore, loadSqlite, type FileCheckpoint, type OpenResult } from '../../src/usage/store';
-import { OWNERS_SINCE } from '../../src/usage/transcripts';
+import { OWNERS_SINCE, PARSER_VERSION } from '../../src/usage/transcripts';
 import type { SessionOwner, UsageRequest } from '../../src/usage/types';
 
 const sqlite = loadSqlite();
@@ -915,91 +916,183 @@ suite('usage history store', () => {
         assert.strictEqual(store.accountNumbers().get('e/')?.ordinal, 7);
     });
 
-    test('a history at version 4 that a build before 2.4.0 made is brought to its shape: owners searched for again, rows kept', () => {
-        // The shapes version 4 had while it was made: owners kept by session,
-        // then changes no file could retire.
-        const shapes = [
-            `DROP TRIGGER clear_accounts; DROP TABLE owner_changes; DROP TABLE accounts;
-             ALTER TABLE requests DROP COLUMN owner; ALTER TABLE limit_hits DROP COLUMN owner;
-             ALTER TABLE sessions ADD COLUMN account_uuid TEXT; ALTER TABLE sessions ADD COLUMN organization_uuid TEXT;
-             ALTER TABLE sessions ADD COLUMN owner_named INTEGER; ALTER TABLE sessions ADD COLUMN owner_mtime INTEGER;
-             CREATE TABLE accounts (provider TEXT NOT NULL DEFAULT 'claude-code', account_uuid TEXT NOT NULL, organization_uuid TEXT NOT NULL,
-                 ordinal INTEGER, email TEXT, organization_name TEXT, named_ts INTEGER, PRIMARY KEY (provider, account_uuid, organization_uuid)) STRICT;
-             CREATE TRIGGER clear_accounts AFTER UPDATE OF value ON meta WHEN new.key = 'store_generation' AND NOT EXISTS (SELECT 1 FROM requests)
-             BEGIN DELETE FROM accounts; END;`,
-            `DROP TABLE owner_changes;
-             CREATE TABLE owner_changes (provider TEXT NOT NULL DEFAULT 'claude-code', file INTEGER NOT NULL, offset INTEGER NOT NULL,
-                 session_id TEXT NOT NULL, project_dir TEXT NOT NULL, owner INTEGER NOT NULL, since_ts INTEGER,
-                 PRIMARY KEY (provider, file, offset)) STRICT;`,
-        ];
+    /** A main transcript's checkpoint, as a build that read it with `parserVersion` left it. */
+    const checkpoint = (filePath: string, sessionId: string, parserVersion: number): FileCheckpoint => ({
+        provider: 'claude-code',
+        path: filePath,
+        root: '/root',
+        kind: 'main',
+        sessionId,
+        runId: null,
+        agentId: null,
+        projectDir: 'p',
+        dev: '1',
+        ino: '2',
+        size: 100,
+        mtimeMs: 1,
+        offset: 100,
+        tailHash: null,
+        parserVersion,
+        oversizeLines: 0,
+        malformedLines: 0,
+        newestVersion: null,
+    });
+
+    /** Each account's tokens in the whole history, by key, as a report gives them. */
+    const tokensByAccount = (store: UsageStore) =>
+        Object.fromEntries(
+            queryReport(store, { range: 'coverage', zone: 'UTC', workspaceFolders: null, now: Date.UTC(2026, 10, 13), platform: 'linux', realpath: p => p }).accounts.map(
+                a => [a.key, a.totals.input],
+            ),
+        );
+
+    test('a history at version 4 that a build before 2.4.0 made, with changes no file could retire, keeps what that build read from its transcripts', () => {
         assert.ok(sqlite, 'this runtime has no node:sqlite');
-        for (const shape of shapes) {
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(70) });
+            // A main transcript's requests under the owner recorded before each;
+            // a subagent's under the one that build took by time, and wrongly.
+            store.upsertRequests([
+                req({ messageId: 'm1', file: MAIN, parserVersion: 3, byteOffset: 50, timestamp: at(10), input: 1, owner: A }),
+                req({ messageId: 'm2', file: MAIN, parserVersion: 3, byteOffset: 150, timestamp: at(60), input: 10, owner: B }),
+                req({ messageId: 'x1', file: SUB, kind: 'task', parserVersion: 3, timestamp: at(70), input: 100, owner: A }),
+            ]);
+            store.insertLimitHits('claude-code', [{ uuid: 'h1', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: A }]);
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10)), change(100, B, at(60))], new Map(), false);
+            store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: 'o', email: 'a@example.com', organizationName: 'Org' }], 5);
+            store.numberAccounts('claude-code');
+            store.putFile(checkpoint(MAIN, 'session-a', 3));
+            store.putFile({ ...checkpoint(SUB, 'session-a', 3), kind: 'task', agentId: 'x' });
+        });
+        assert.strictEqual(store.accountNumbers().size, 2);
+        store.close();
+        opened.length = 0;
+        // As 99f34af..7d4fae7 left it: changes keyed without `retired`, no
+        // organization numbers, and parser 3 the newest to hold the lease.
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec(`
+            BEGIN;
+            DROP TRIGGER clear_accounts;
+            CREATE TABLE old_changes (provider TEXT NOT NULL DEFAULT 'claude-code', file INTEGER NOT NULL, offset INTEGER NOT NULL,
+                session_id TEXT NOT NULL, project_dir TEXT NOT NULL, owner INTEGER NOT NULL, since_ts INTEGER,
+                PRIMARY KEY (provider, file, offset)) STRICT;
+            INSERT INTO old_changes SELECT provider, file, offset, session_id, project_dir, owner, since_ts FROM owner_changes;
+            DROP TABLE owner_changes;
+            ALTER TABLE old_changes RENAME TO owner_changes;
+            CREATE INDEX owner_changes_session ON owner_changes (session_id);
+            ALTER TABLE accounts DROP COLUMN organization_ordinal;
+            CREATE TRIGGER clear_accounts AFTER UPDATE OF value ON meta WHEN new.key = 'store_generation' AND NOT EXISTS (SELECT 1 FROM requests)
+            BEGIN DELETE FROM accounts; DELETE FROM owner_changes; END;
+            INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '3');
+            COMMIT;`);
+        raw.close();
+
+        const again = ready(open());
+        // A main transcript's own owners, and its changes, are kept; a
+        // subagent's owner and a limit's go, for a report to take by time.
+        assert.deepStrictEqual([...again.requests()].map(r => [r.messageId, r.owner]), [['m1', A], ['m2', B], ['x1', null]]);
+        assert.deepStrictEqual(again.limitHits().map(h => h.owner), [null]);
+        assert.deepStrictEqual(again.sessions()[0].owners, [{ owner: A, sinceTs: at(10) }, { owner: B, sinceTs: at(60) }]);
+        assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 1, 'b/': 110 });
+        // The names are kept; the numbers are given again, by the next pass.
+        assert.deepStrictEqual(again.accountNames().map(n => n.email), ['a@example.com']);
+        assert.strictEqual(again.accountNumbers().size, 0);
+        assert.ok(again.hasUnnumberedAccounts('claude-code'));
+        // The main transcript is searched again, a subagent's never, and a window still running that build stops.
+        assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion], [OWNERS_SINCE - 1, 3]);
+        assert.ok(again.outdated(3) && !again.outdated(PARSER_VERSION));
+        assert.ok(!again.acquireLease('import', 'a window of that build', 3));
+        // The search finds the changes again where they were: what it says replaces what was kept.
+        again.transaction(() => {
+            again.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10)), change(100, B, at(61))], new Map(), false);
+            again.giveOwners('claude-code', MAIN, [change(0, A, at(10)), change(100, B, at(61))]);
+            again.numberAccounts('claude-code');
+        });
+        assert.deepStrictEqual(again.sessions()[0].owners, [{ owner: A, sinceTs: at(10) }, { owner: B, sinceTs: at(61) }]);
+        assert.deepStrictEqual(Object.fromEntries([...again.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { 'a/o': 1, 'b/': 2 });
+        // Clear works, and the history is not brought again: its shape is this one now.
+        assert.strictEqual(again.clear().settled, true);
+        again.transaction(() => again.upsertRequests([req({ messageId: 'n', file: MAIN, parserVersion: 3, owner: B })]));
+        again.close();
+        opened.length = 0;
+        assert.deepStrictEqual([...ready(open()).requests()].map(r => r.owner), [B]);
+    });
+
+    test('a history at version 4 that a build before 2.4.0 made, with one owner per session, keeps the names, and the owner of a session whose transcripts are gone', () => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const HERE = path.join(dir, 'projects', 'p', 'session-b.jsonl');
+        fs.mkdirSync(path.dirname(HERE), { recursive: true });
+        fs.writeFileSync(HERE, '');
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        // The two shapes: d2a828e's, names with when they were seen; f3f4e38's, names with when they were given, and numbers.
+        const shapes = {
+            seen: `CREATE TABLE accounts (provider TEXT NOT NULL DEFAULT 'claude-code', account_uuid TEXT NOT NULL, organization_uuid TEXT NOT NULL,
+                       email TEXT, organization_name TEXT, seen_ts INTEGER NOT NULL, PRIMARY KEY (provider, account_uuid, organization_uuid)) STRICT;
+                   INSERT INTO accounts VALUES ('claude-code', 'a', 'o', 'a@example.com', 'Org', 5);`,
+            named: `ALTER TABLE sessions ADD COLUMN owner_named INTEGER; ALTER TABLE sessions ADD COLUMN owner_mtime INTEGER;
+                    CREATE TABLE accounts (provider TEXT NOT NULL DEFAULT 'claude-code', account_uuid TEXT NOT NULL, organization_uuid TEXT NOT NULL,
+                        ordinal INTEGER, email TEXT, organization_name TEXT, named_ts INTEGER, PRIMARY KEY (provider, account_uuid, organization_uuid)) STRICT;
+                    INSERT INTO accounts VALUES ('claude-code', 'a', 'o', 1, 'a@example.com', 'Org', 5), ('claude-code', 'b', '', 2, NULL, NULL, NULL);
+                    CREATE TRIGGER clear_accounts AFTER UPDATE OF value ON meta WHEN new.key = 'store_generation' AND NOT EXISTS (SELECT 1 FROM requests)
+                    BEGIN DELETE FROM accounts; END;`,
+        };
+        for (const [name, shape] of Object.entries(shapes)) {
             for (const store of opened.splice(0)) {
                 store.close();
             }
             fs.rmSync(path.dirname(file), { recursive: true, force: true });
             const store = ready(open());
-            const main: FileCheckpoint = {
-                provider: 'claude-code',
-                path: MAIN,
-                root: '/root',
-                kind: 'main',
-                sessionId: 'session-a',
-                runId: null,
-                agentId: null,
-                projectDir: 'p',
-                dev: '1',
-                ino: '2',
-                size: 100,
-                mtimeMs: 1,
-                offset: 100,
-                tailHash: null,
-                parserVersion: 3,
-                oversizeLines: 0,
-                malformedLines: 0,
-                newestVersion: null,
-            };
             store.transaction(() => {
-                // Owners as that build gave them: ids the history it rebuilds no longer has.
+                // session-a's transcripts are gone; session-b's is still there.
+                store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(15) });
+                store.upsertSession('claude-code', { sessionId: 'session-b', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(30), lastTs: at(30) });
                 store.upsertRequests([
-                    req({ messageId: 'gone', file: MAIN, parserVersion: 3, byteOffset: 60, owner: A }),
-                    req({ messageId: 'kept', file: MAIN, parserVersion: 3, byteOffset: 50, owner: B }),
+                    req({ messageId: 'a1', sessionId: 'session-a', file: MAIN, parserVersion: 3, timestamp: at(10), input: 1 }),
+                    req({ messageId: 'a2', sessionId: 'session-a', file: '/root/projects/p/session-a/subagents/agent-x.jsonl', kind: 'task', parserVersion: 3, timestamp: at(15), input: 10 }),
+                    req({ messageId: 'b1', sessionId: 'session-b', file: HERE, parserVersion: 3, timestamp: at(30), input: 100 }),
                 ]);
-                store.putFile(main);
-                store.putFile({ ...main, path: '/root/projects/p/session-a/subagents/agent-x.jsonl', kind: 'task', agentId: 'x' });
+                store.putFile(checkpoint(MAIN, 'session-a', 3));
+                store.putFile(checkpoint(HERE, 'session-b', 3));
             });
             store.close();
             opened.length = 0;
             const raw = new sqlite.DatabaseSync(file);
-            raw.exec(shape);
+            raw.exec(`
+                BEGIN;
+                DROP TRIGGER clear_accounts; DROP TABLE owner_changes; DROP TABLE accounts;
+                ALTER TABLE requests DROP COLUMN owner; ALTER TABLE limit_hits DROP COLUMN owner;
+                ALTER TABLE sessions ADD COLUMN account_uuid TEXT; ALTER TABLE sessions ADD COLUMN organization_uuid TEXT;
+                ${shape}
+                UPDATE sessions SET account_uuid = 'a', organization_uuid = 'o' WHERE session_id = 'session-a';
+                UPDATE sessions SET account_uuid = 'b', organization_uuid = NULL WHERE session_id = 'session-b';
+                INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '3');
+                COMMIT;`);
             raw.close();
 
             const again = ready(open());
-            again.transaction(() => again.deleteRequestsFromFile('claude-code', '/nowhere'));
-            assert.deepStrictEqual([...again.requests()].map(r => [r.messageId, r.owner]), [['gone', null], ['kept', null]]);
-            assert.deepStrictEqual(
-                [again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', '/root/projects/p/session-a/subagents/agent-x.jsonl')?.parserVersion],
-                [OWNERS_SINCE - 1, 3],
-                'the main transcript is to be searched for its owners again, a subagent never',
-            );
-            // Imports, reports and Clear work again.
+            assert.deepStrictEqual(again.accountNames().map(n => n.email), ['a@example.com'], name);
+            // session-a keeps its owner, where nothing else will say it; session-b's transcript is searched again instead.
+            const owners = () => Object.fromEntries(again.sessions().map(s => [s.sessionId, s.owners]));
+            assert.deepStrictEqual(owners(), { 'session-a': [{ owner: A, sinceTs: null }], 'session-b': [] }, name);
+            assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 11, none: 100 }, name);
+            assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', HERE)?.parserVersion], [OWNERS_SINCE - 1, OWNERS_SINCE - 1], name);
+            assert.ok(again.outdated(3), name);
             again.transaction(() => {
-                again.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, 10)], new Map(), false);
-                again.giveOwners('claude-code', MAIN, [change(0, A, 10)]);
+                again.putOwnerChanges('claude-code', HERE, 'p', [change(0, B, at(30), 'session-b')], new Map(), false);
                 again.numberAccounts('claude-code');
             });
-            assert.deepStrictEqual([...again.requests()].map(r => r.owner), [A, A]);
-            assert.ok(again.bucketSums(0).length === 1 && again.sessions().length === 0);
-            assert.deepStrictEqual(again.clear().settled, true);
-            assert.deepStrictEqual([...again.requests()].length, 0);
-            // And it is not done again: the shape is this one now.
-            again.close();
-            opened.length = 0;
-            const third = ready(open());
-            third.transaction(() => third.upsertRequests([req({ messageId: 'n', file: MAIN, parserVersion: 3, owner: B })]));
-            third.close();
-            opened.length = 0;
-            assert.deepStrictEqual([...ready(open()).requests()].map(r => r.owner), [B]);
+            assert.deepStrictEqual(owners()['session-b'], [{ owner: B, sinceTs: at(30) }], name);
+            assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 11, 'b/': 100 }, name);
+            assert.deepStrictEqual(Object.fromEntries([...again.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { 'a/o': 1, 'b/': 2 }, name);
+            // The kept owner is no change a file says now: no request settles it, and no read from the start retires it again.
+            again.transaction(() => {
+                again.putOwnerChanges('claude-code', MAIN, 'p', [], new Map([['session-a', at(10)]]), false);
+                again.putOwnerChanges('claude-code', MAIN, 'p', [], new Map([['session-a', at(10)]]), true);
+            });
+            assert.deepStrictEqual(owners()['session-a'], [{ owner: A, sinceTs: null }], name);
         }
     });
 

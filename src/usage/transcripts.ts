@@ -42,8 +42,13 @@ import type { Compaction, LimitHit, OwnerChange, SessionOwner, TranscriptKind, U
  * 2: each request's `usage.speed` and `usage.inference_geo`.
  * 3: the account each request was made with, from its main transcript's
  *    `session-owner` records.
+ * 4: only the owner a request's own transcript records before it, none for
+ *    a subagent's, and of the changes of owner before a request, only the
+ *    last takes its time. Its rows are parser 3's, so parser 3 files are read
+ *    on; the bump is what stops a window still running a build of 2.4.0
+ *    made before then, which wrote them otherwise (see `outdated`).
  */
-export const PARSER_VERSION = 3;
+export const PARSER_VERSION = 4;
 
 /**
  * The oldest parser whose rows this one keeps. A file it or a later one read

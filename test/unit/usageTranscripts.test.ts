@@ -1024,6 +1024,32 @@ suite('usage transcripts', () => {
         assert.strictEqual((await importRoots(store, [tmp])).unchanged, 2);
     });
 
+    test('a history the parser before this one read is read on from its checkpoints: no record read again, every owner as a full read gives it', async () => {
+        // That parser already read owners: only what a line becomes changed since.
+        assert.ok(PARSER_VERSION - 1 >= OWNERS_SINCE);
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        const agent = path.join(dir, 's1', 'subagents', 'agent-a1.jsonl');
+        fs.writeFileSync(main, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)) + line(assistant('m2', 9, { timestamp: at(5) })));
+        fs.writeFileSync(agent, line(assistant('a1', 3, { isSidechain: true, agentId: 'a1', timestamp: at(6) })));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        const full = split(store);
+        assert.deepStrictEqual(full, { output: { [KEY_A]: 5, [KEY_B]: 9 + 3 }, limits: [] });
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+        raw.exec(`UPDATE requests SET parser_version = ${PARSER_VERSION - 1}; UPDATE files SET parser_version = ${PARSER_VERSION - 1}`);
+        raw.close();
+        const summary = await importRoots(store, [tmp]);
+        assert.deepStrictEqual([summary.read, summary.restarted, summary.records], [2, 0, 0]);
+        assert.deepStrictEqual(split(store), full);
+        assert.deepStrictEqual(
+            [main, agent].map(f => store.getFile('claude-code', fs.realpathSync(f))?.parserVersion),
+            [PARSER_VERSION, PARSER_VERSION],
+        );
+    });
+
     test("after an older parser's import, a session in two project folders gives every limit what a full read gives, whichever folder comes first", async () => {
         const worktree = path.join(tmp, 'projects', 'a-work-app--claude-worktrees-x');
         const app = path.join(tmp, 'projects', 'b-work-app');
