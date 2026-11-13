@@ -22,8 +22,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   have since signed out of keeps its name; one never named there is
   *Account 3*, by a number the history gives each account as it first sees
   it, and keeps, and **Name…** gives it a name of your own, kept in a new
-  setting, **Claude Code Account Names**, which Settings Sync leaves on this
-  machine. Sessions with no account recorded,
+  setting, **Claude Code Account Names**, which Settings Sync leaves out
+  where LLM Tokenizer is installed in the editor that syncs. Sessions with no account recorded,
   from before Claude Code recorded it, signed in with an API key or through
   a cloud provider, or whose transcripts Claude Code had deleted before this
   version first read them, are *Not recorded*.

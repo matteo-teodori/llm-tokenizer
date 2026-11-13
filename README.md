@@ -206,9 +206,10 @@ totals, days, models, projects, sessions and usage limits, each limit said to
 be the account's that reached it. An account is named as Claude Code names it, by its email and,
 unless it is a personal one, its organization, from Claude Code's own
 configuration file (`~/.claude.json`, or `.claude.json` in
-`CLAUDE_CONFIG_DIR`, or `.config.json` there, the name older versions gave
-it): the account it is signed in to now, marked *signed in now*, and every
-account it keeps a list of. Where both `~/.claude.json` and
+`CLAUDE_CONFIG_DIR`, or `.config.json` in Claude Code's configuration folder,
+`~/.claude` or `CLAUDE_CONFIG_DIR`, the name older versions gave it): the
+account it is signed in to now, marked *signed in now*, and every account it
+keeps a list of. Where both `~/.claude.json` and
 `~/.claude/.claude.json` are in use, by Claude Code started without
 `CLAUDE_CONFIG_DIR` and with it, both name accounts, the newer name first,
 and the one written last says which is signed in now. The history keeps those names,
@@ -292,17 +293,22 @@ editor's own state.
 From Claude Code's configuration file it reads only the account signed in now
 (`oauthAccount`) and the accounts it keeps a list of (`knownAccounts`): their
 ids, emails and organizations' names. Nothing else in that file is parsed,
-and the diagnostics say which file it was.
+and the diagnostics say which files they were.
 
 Its settings are machine settings, so a repository's settings cannot turn it
-on or point it at another folder; the names you give accounts are an
-application setting, which only your own settings hold, and which Settings
-Sync leaves on this machine, as it does the others. In a dev container,
-though, the container's settings can come from the repository's
-`devcontainer.json`.
+on or point it at another folder, and Settings Sync never takes them to
+another machine; the names you give accounts are an application setting,
+which only your own settings hold, and which Settings Sync leaves out where
+LLM Tokenizer is installed in the editor that syncs. In a remote window, or
+with LLM Tokenizer in another profile, add
+`llm-tokenizer.claudeCodeAccountNames` to `settingsSync.ignoredSettings` to
+keep them on this machine. In a dev container, though, the container's
+settings can come from the repository's `devcontainer.json`.
 
 **Before uninstalling**, run **Clear Claude Code Usage History**: the editor
-may leave this extension's storage on disk after the extension is gone.
+may leave this extension's storage on disk after the extension is gone. The
+names you gave accounts stay in your settings until you remove **Claude Code
+Account Names**.
 
 ### What it counts, and what it cannot see
 
