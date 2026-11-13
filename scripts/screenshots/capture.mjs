@@ -50,6 +50,27 @@ for (const managed of ['/Library/Application Support/ClaudeCode', '/etc/claude-c
         throw new Error(`${managed} exists: its settings could point the extension at real records`);
     }
 }
+// The images show VS Code as it is now: the newest build `npm test` has
+// downloaded. One that an earlier release's tests left beside it draws an
+// older workbench around the same panel.
+const versionOf = dotApp => JSON.parse(readFileSync(join(dotApp, 'Contents', 'Resources', 'app', 'product.json'), 'utf8')).version;
+const newer = (a, b) => {
+    const [x, y] = [a, b].map(v => v.split('.').map(Number));
+    const i = x.findIndex((n, k) => n !== y[k]);
+    return i >= 0 && x[i] > y[i];
+};
+const version = versionOf(app);
+const builds = dirname(dirname(app));
+if (builds.endsWith('.vscode-test')) {
+    const newest = readdirSync(builds)
+        .filter(entry => entry.startsWith('vscode-darwin') && existsSync(join(builds, entry, 'Visual Studio Code.app')))
+        .map(entry => versionOf(join(builds, entry, 'Visual Studio Code.app')))
+        .reduce((a, b) => (newer(b, a) ? b : a), version);
+    if (newest !== version) {
+        throw new Error(`this is VS Code ${version}, and ${builds} holds ${newest}: make the images on the newest`);
+    }
+}
+console.log(`VS Code ${version}`);
 claimWork(work);
 mkdirSync(out, { recursive: true });
 
@@ -452,17 +473,26 @@ async function openCart(page) {
 }
 
 /**
+ * What of a row can show past the page's bottom edge, or hide below it, and
+ * be only air: a table cell's padding is 3 px, and a bar row centres a 14 px
+ * bar in at least 26.
+ */
+const ROW_AIR = 3;
+
+/**
  * No row cut by the page's bottom edge: shown whole if that costs at most
  * `down` px of the space at the top, else pushed below the edge. A table's
- * rows touch, so the edge is put on the line between two of them; what a
- * fraction of a pixel leaves of the next row is its padding.
+ * rows touch, so the edge is put on the line between two of them. A row
+ * that crosses the edge by no more than its air is not cut: at the top of the
+ * page, where nothing can be pushed down, the next row's first pixels can
+ * show, and are its padding.
  */
 async function uncut(frame, down) {
-    const left = await frame.evaluate(margin => {
+    const left = await frame.evaluate(({ margin, air }) => {
         const cutRow = () =>
             [...document.querySelectorAll('tbody tr, .row')].find(r => {
                 const box = r.getBoundingClientRect();
-                return box.height > 0 && box.top < innerHeight - 1 && box.bottom > innerHeight + 1;
+                return box.height > 0 && box.top < innerHeight - air && box.bottom > innerHeight + air;
             });
         const cut = cutRow();
         if (cut) {
@@ -470,7 +500,7 @@ async function uncut(frame, down) {
             window.scrollBy(0, box.bottom - innerHeight <= margin ? Math.ceil(box.bottom - innerHeight) : -Math.ceil(innerHeight - box.top));
         }
         return cutRow() !== undefined;
-    }, down);
+    }, { margin: down, air: ROW_AIR });
     if (left) {
         throw new Error('a row is still cut by the bottom edge');
     }
@@ -484,7 +514,7 @@ async function tokenSummary(page, theme) {
     }
     await row(page, 'README.md').click({ modifiers: ['Shift'] });
     await row(page, 'README.md').click({ button: 'right' });
-    await page.locator('.context-view .action-item', { hasText: 'Count Tokens' }).first().click();
+    await menuItem(page, 'Count Tokens');
     const summary = await webview(page, 'input#filter');
     await summary.waitForFunction(count => new RegExp(`(^|\\n)${count}\\nCounted`).test(document.body.innerText), demo.workspaceFiles);
     // The page's own top padding takes the nudge.
@@ -493,6 +523,30 @@ async function tokenSummary(page, theme) {
     await shoot(page, `token-summary-${theme}.png`, { frames: [summary] });
     await page.keyboard.press('Meta+W');
     await sleep(500);
+}
+
+/**
+ * Choose `text` in the context menu open now. A menu can take no click in
+ * the moment it opens, where the right button's own release lands, and
+ * stays open: seen on a second VS Code started from a warm profile, the item
+ * lit but never run. So the click comes once the menu has settled, and again
+ * while the menu is still there.
+ */
+async function menuItem(page, text) {
+    const item = page.locator('.context-view .action-item', { hasText: text }).first();
+    await item.waitFor({ state: 'visible' });
+    for (let attempt = 1; ; attempt++) {
+        await sleep(300);
+        await item.click();
+        try {
+            await item.waitFor({ state: 'hidden', timeout: 2_000 });
+            return;
+        } catch (error) {
+            if (attempt === 3) {
+                throw new Error(`the context menu's "${text}" was clicked three times and the menu stayed open`, { cause: error });
+            }
+        }
+    }
 }
 
 async function openUsage(page) {
@@ -527,12 +581,19 @@ async function setScope(usage, scope) {
     await sleep(700);
 }
 
-/** Choose an account in the filter, by its key, or `all`. */
-async function setAccount(usage, account) {
+/**
+ * Choose an account in the filter, by its key, or `all`, and wait for the
+ * page to show its `requests` and `sessions`: the filter keeps the choice in
+ * place, so the figures, not the select, say the host has applied it.
+ */
+async function setAccount(usage, account, requests, sessions) {
     await usage.selectOption('select[data-account-filter]', account);
+    const said = [`${requests.toLocaleString('en-US')} requests`, `${sessions.toLocaleString('en-US')} sessions`];
     await usage.waitForFunction(
-        key => document.querySelector('select[data-account-filter] option[selected]')?.getAttribute('value') === key,
-        account,
+        ([key, figures]) =>
+            document.querySelector('select[data-account-filter]')?.value === key &&
+            figures.every(figure => (document.querySelector('.hero-meta')?.textContent ?? '').includes(figure)),
+        [account, said],
         { timeout: 10_000 },
     );
     await readThrough(usage);
@@ -631,9 +692,21 @@ async function checkPages(usage) {
 
 async function statusTooltip(page) {
     const item = page.locator('.statusbar-item', { hasText: '532.8K' }).first();
-    await item.hover();
     const hover = page.locator('.workbench-hover, .monaco-hover').filter({ hasText: 'Claude Code, in this workspace' }).first();
-    await hover.waitFor({ timeout: 10_000 });
+    // A busy machine can let a hover go by unshown: off the item and onto it
+    // again, as a person would.
+    for (let attempt = 1; ; attempt++) {
+        await item.hover();
+        try {
+            await hover.waitFor({ timeout: 5_000 });
+            break;
+        } catch (error) {
+            if (attempt === 3) {
+                throw new Error('the status item was hovered three times and its tooltip never showed', { cause: error });
+            }
+            await rest(page);
+        }
+    }
     await opaque(hover);
     if ((await hover.innerText()).includes('Still reading')) {
         throw new Error('the tooltip still says the history is being read');
@@ -746,12 +819,12 @@ async function gif() {
         await scrollTo(usage, 'accounts');
         await frame(2.6, [usage]);
         await usage.evaluate(() => window.scrollTo(0, 0));
-        await setAccount(usage, demo.accounts.work);
         const work = demo.byAccount[demo.accounts.work];
+        await setAccount(usage, demo.accounts.work, work.requests, work.sessions);
         await expectCounts(usage, work.requests, work.sessions, 'the work account frame');
         await uncut(usage, 20);
         await frame(2.0, [usage]);
-        await setAccount(usage, 'all');
+        await setAccount(usage, 'all', demo.requests, demo.sessions);
         await expectCounts(usage, demo.requests, demo.sessions, 'the all accounts frame');
         await scrollTo(usage, 'projects');
         await frame(2.6, [usage]);

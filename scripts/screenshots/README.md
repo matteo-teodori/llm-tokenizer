@@ -16,7 +16,9 @@ configuration file of its own names. No one's own usage is read, and
 - macOS, with ffmpeg on the PATH (`brew install ffmpeg`).
 - `npm ci` at the repository's root, and `npm test` once, which downloads the
   VS Code build under `.vscode-test/`: `vscode-darwin-arm64-<version>` on
-  Apple silicon, `vscode-darwin-<version>` on Intel.
+  Apple silicon, `vscode-darwin-<version>` on Intel. Use the newest one
+  there: older ones, from earlier releases' tests, draw an older workbench,
+  and `capture.mjs` refuses them.
 - Here: `npm ci --ignore-scripts` (playwright-core, pinned by
   `package-lock.json`; nothing here is part of the extension).
 
