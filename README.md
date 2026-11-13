@@ -58,8 +58,9 @@ request that contains file contents. The only network access is a one-time
 download of a model's *vocabulary file* from huggingface.co, which you can turn
 off with `llm-tokenizer.downloadTokenizers`; a repository's own settings can
 turn it off for that repository, never back on. Claude Code usage, if you turn it
-on, reads Claude Code's own session records, and the accounts its configuration
-file names, on this machine, and sends nothing anywhere.
+on, reads Claude Code's own session records, the accounts its configuration
+file names and three entries of its settings files, on this machine, and sends
+nothing anywhere.
 
 ### ⚙️ Configuration
 - `llm-tokenizer.defaultModel`: Model used until you pick one
@@ -254,8 +255,8 @@ by what a request's price depends on besides its model: its speed (`fast` is
 billed higher), where it ran (`us` is billed higher), and its prompt size (up to
 100,000 tokens, up to 200,000, or more: Claude Haiku 5.5 prices a request over
 100,000 higher). Its notes say how to read each of those. It gives no prices.
-**Copy** copies the sessions, with each one's active minutes and account, for
-a spreadsheet. Both say in their notes which account they hold, when one is
+**Copy Sessions** copies the sessions, with each one's active minutes and
+account, for a spreadsheet. Both say in their notes which account they hold, when one is
 chosen.
 
 **What is kept, and where.** A database in this extension's own storage
@@ -294,16 +295,24 @@ editor's own state.
 From Claude Code's configuration file it reads only the account signed in now
 (`oauthAccount`) and the accounts it keeps a list of (`knownAccounts`): their
 ids, emails and organizations' names. Nothing else in that file is parsed,
-and the diagnostics say which files they were.
+and the diagnostics say which files they were. From its settings files,
+`settings.json` in `~/.claude` and in each data folder and the organization's
+managed settings files, it keeps three `env` entries and nothing else:
+`CLAUDE_CONFIG_DIR`, which says where the records are,
+`CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
 
 Its settings are machine settings, so a repository's settings cannot turn it
-on or point it at another folder, and while LLM Tokenizer is installed
-Settings Sync never takes them to another machine; the names you give accounts
-are an application setting, which only your own settings hold, and which
-Settings Sync leaves out where LLM Tokenizer is installed in the editor that
-syncs. In a remote window, or with LLM Tokenizer in another profile, add
-`llm-tokenizer.claudeCodeAccountNames` to `settingsSync.ignoredSettings` to
-keep them on this machine. In a dev container, though, the container's
+on or point it at another folder; the names you give accounts are an
+application setting, which only your own settings hold. Settings Sync leaves
+them all out while LLM Tokenizer is installed in the profile whose settings
+hold them. Where it is not, add them to `settingsSync.ignoredSettings` to keep
+them on this machine: the names in a remote window, where LLM Tokenizer is
+installed on the remote and the names are this machine's settings, and all
+four (`llm-tokenizer.enableClaudeCodeUsage`,
+`llm-tokenizer.claudeCodeDataDirectory`,
+`llm-tokenizer.showClaudeCodeUsageInStatusBar` and
+`llm-tokenizer.claudeCodeAccountNames`) with LLM Tokenizer in a profile that
+uses another profile's settings. In a dev container, though, the container's
 settings can come from the repository's `devcontainer.json`.
 
 **Before uninstalling**, run **Clear Claude Code Usage History**: the editor

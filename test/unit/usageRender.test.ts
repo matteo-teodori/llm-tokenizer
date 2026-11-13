@@ -467,6 +467,9 @@ suite('usage page', () => {
         assert.ok(off.includes('Claude Code usage is off'));
         assert.ok(off.includes('Nothing is sent anywhere'));
         assert.ok(off.includes('Never kept: prompts, responses, thinking, tool inputs or results'));
+        // Every file of Claude Code's it reads, and what of each.
+        assert.ok(off.includes('it reads only the Claude accounts it names'));
+        assert.ok(off.includes('only three <code>env</code> entries: where its records are, and two switches'));
         assert.ok(off.includes('data-action="turnOn"') && off.includes('data-action="openSettings"'));
         assert.ok(!off.includes('Remote settings'));
         const remote = text(renderFragments(view({ status: 'off', report: undefined, remote: true, where: 'on box (ssh-remote)' })));

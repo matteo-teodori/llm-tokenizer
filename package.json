@@ -48,7 +48,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
-      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records, and the accounts its configuration file names, are read too, outside the workspace."
+      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records, the accounts its configuration file names and three entries of its settings files are read too, outside the workspace."
     },
     "virtualWorkspaces": {
       "supported": "limited",
@@ -490,7 +490,7 @@
             "type": "string",
             "maxLength": 60
           },
-          "markdownDescription": "Names for Claude accounts in the Claude Code Usage panel, by account id, shown in place of the email Claude Code gives an account, or of `Account 2` where it gave none. Set them with the panel's **Name…** buttons; an account's id is on hover there. Settings Sync leaves them out where LLM Tokenizer is installed in the editor that syncs; in a remote window, or with LLM Tokenizer in another profile, add `llm-tokenizer.claudeCodeAccountNames` to `settingsSync.ignoredSettings` to keep them on this machine."
+          "markdownDescription": "Names for Claude accounts in the Claude Code Usage panel, by account id, shown in place of the email Claude Code gives an account, or of `Account 2` where it gave none. Set them with the panel's **Name…** buttons; an account's id is on hover there. Settings Sync leaves them out while LLM Tokenizer is installed in the profile whose settings hold them; in a remote window, or with LLM Tokenizer in a profile that uses another profile's settings, add `llm-tokenizer.claudeCodeAccountNames` to `settingsSync.ignoredSettings` to keep them on this machine."
         }
       }
     }
