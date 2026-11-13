@@ -564,11 +564,15 @@ suite('usage page', () => {
     });
 
     test('a range the reading has not reached is never called one with no requests', () => {
-        const nothing = report({ totals: emptyTotals(), days: [], models: [], kinds: [], efforts: [], projects: [], sessions: [] });
+        const nothing = report({ totals: emptyTotals(), days: [], models: [], kinds: [], efforts: [], projects: [], sessions: [], limitWindows: [] });
         const reading = renderFragments(view({ report: nothing, reading: { by: 'this window', files: 12, of: 77 } })).body;
         assert.ok(reading.includes('Nothing has been read in this range yet.') && !reading.includes('No requests fall in this range.'), reading);
         assert.ok(renderFragments(view({ report: nothing, scope: 'workspace', reading: { by: 'another window' } })).body.includes('Nothing has been read in this range yet.'));
         assert.ok(renderFragments(view({ report: nothing })).body.includes('No requests fall in this range.'));
+        // Limits read in a range it has not finished: said to be what was read so far, never that the range has no request.
+        const limited = renderFragments(view({ report: { ...nothing, limitWindows: report().limitWindows }, reading: { by: 'another window' } })).body;
+        assert.ok(limited.includes('<h2>No request read in this range yet</h2><p>No request has been read in this range yet; the usage limits read in it so far are below.</p>'), limited);
+        assert.ok(!limited.includes('Nothing has been read in this range yet.') && !limited.includes('Usage limits were reached in it'));
     });
 
     test('a range with no request but limits reached shows them, and says so', () => {

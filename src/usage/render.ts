@@ -868,6 +868,36 @@ function diagnostics(view: PanelView): string {
     </details>`;
 }
 
+/**
+ * A range with no request in it, saying why: nothing read yet, nothing read
+ * of the range yet, or none made in it, by the account chosen or in this
+ * workspace. Refused requests are no requests, but a limit reached in the
+ * range is listed all the same, and said to be.
+ */
+function emptyRange(report: UsageReport, view: PanelView): string {
+    const limits = report.limitWindows.length > 0;
+    const heading = !limits ? 'Nothing in this range' : view.reading ? 'No request read in this range yet' : 'No request in this range';
+    const why =
+        view.reading && limits
+            ? // A range the reading has not reached is not one without requests.
+              'No request has been read in this range yet; the usage limits read in it so far are below.'
+            : report.coverage.requests === 0
+              ? 'No Claude Code requests have been read yet.'
+              : view.reading
+                ? 'Nothing has been read in this range yet.'
+                : view.account !== ALL_ACCOUNTS
+                  ? `${
+                        view.account === NOT_RECORDED
+                            ? 'No request of a session that records no account'
+                            : `No request made with ${escapeHtml(labelOf(labelsOf(view), view.account))}`
+                    } falls in this range${view.scope === 'workspace' ? ' in a folder of this workspace' : ''}.`
+                  : view.scope === 'workspace'
+                    ? 'No session in this range started in a folder of this workspace.'
+                    : 'No requests fall in this range.';
+    const reached = limits && !view.reading ? ' Usage limits were reached in it: they are below.' : '';
+    return `${banner(view)}<section class="empty-state"><h2>${heading}</h2><p>${why}${reached}</p></section>${limitWindows(report, view)}`;
+}
+
 /** The fragments for one post. */
 export function renderFragments(view: PanelView): PanelFragments {
     const empty = emptyState(view);
@@ -876,25 +906,7 @@ export function renderFragments(view: PanelView): PanelFragments {
         empty ??
         (report
             ? report.totals.coverage.requests === 0
-                ? `${banner(view)}<section class="empty-state"><h2>${report.limitWindows.length > 0 ? 'No request in this range' : 'Nothing in this range'}</h2><p>${
-                      report.coverage.requests === 0
-                          ? 'No Claude Code requests have been read yet.'
-                          : view.reading
-                            ? // A range the reading has not reached yet is not one without requests.
-                              'Nothing has been read in this range yet.'
-                            : view.account !== ALL_ACCOUNTS
-                              ? `${
-                                    view.account === NOT_RECORDED
-                                        ? 'No request of a session that records no account'
-                                        : `No request made with ${escapeHtml(labelOf(labelsOf(view), view.account))}`
-                                } falls in this range${view.scope === 'workspace' ? ' in a folder of this workspace' : ''}.`
-                              : view.scope === 'workspace'
-                                ? 'No session in this range started in a folder of this workspace.'
-                                : 'No requests fall in this range.'
-                  }${
-                      // Refused requests are no requests, but their limits were reached in the range all the same.
-                      report.limitWindows.length > 0 ? ' Usage limits were reached in it: they are below.' : ''
-                  }</p></section>${limitWindows(report, view)}`
+                ? emptyRange(report, view)
                 : `${banner(view)}${overview(report, view)}${accounts(report, view)}${projects(report, view)}${sessions(report, view)}`
             : `${banner(view)}<p class="muted">Reading Claude Code's records…</p>`);
     const choices = empty ? null : choicesOf(view);
