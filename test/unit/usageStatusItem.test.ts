@@ -248,6 +248,7 @@ suite('usage status item: the item', () => {
             largeContextDisabled: false,
             largeContextDisabledRoots: options.largeContextDisabledRoots ?? [],
             accountFiles: [],
+            signedInFiles: [],
         };
         const service: StatusItemService = {
             roots: resolved,

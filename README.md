@@ -142,7 +142,7 @@ Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
 - **Ignore Gitignored Files**: exclude `.gitignore` matches from counts (on by default)
 - **Enable Project Scan**: turn off workspace-wide counting on very large repositories
 - **Download Tokenizers**: allow the one-time download that makes counts exact
-- **Enable Claude Code Usage**, **Claude Code Data Directory** and **Show Claude Code Usage in Status Bar**: see [Claude Code Usage](#claude-code-usage)
+- **Enable Claude Code Usage**, **Claude Code Data Directory**, **Show Claude Code Usage in Status Bar** and **Claude Code Account Names**: see [Claude Code Usage](#claude-code-usage)
 
 ### Context Warnings
 - **Normal**: under 80% of the model's usable input limit
@@ -206,8 +206,12 @@ totals, days, models, projects, sessions and usage limits, each limit said to
 be the account's that reached it. An account is named as Claude Code names it, by its email and,
 unless it is a personal one, its organization, from Claude Code's own
 configuration file (`~/.claude.json`, or `.claude.json` in
-`CLAUDE_CONFIG_DIR`): the account it is signed in to now, marked *signed in
-now*, and every account it keeps a list of. The history keeps those names,
+`CLAUDE_CONFIG_DIR`, or `.config.json` there, the name older versions gave
+it): the account it is signed in to now, marked *signed in now*, and every
+account it keeps a list of. Where both `~/.claude.json` and
+`~/.claude/.claude.json` are in use, by Claude Code started without
+`CLAUDE_CONFIG_DIR` and with it, both name accounts, the newer name first,
+and the one written last says which is signed in now. The history keeps those names,
 so an account you have since signed out of keeps its name; one never named
 there is *Account 3*, by a number the history gives each account as it first
 sees it, and keeps. Below each, when it was used and in which projects tell
@@ -291,7 +295,8 @@ and the diagnostics say which file it was.
 
 Its settings are machine settings, so a repository's settings cannot turn it
 on or point it at another folder; the names you give accounts are an
-application setting, which only your own settings hold. In a dev container,
+application setting, which only your own settings hold, and which Settings
+Sync leaves on this machine, as it does the others. In a dev container,
 though, the container's settings can come from the repository's
 `devcontainer.json`.
 

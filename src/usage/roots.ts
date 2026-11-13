@@ -71,10 +71,13 @@ export interface ResolvedRoots {
     /** The roots whose own settings.json sets it: their sessions are held to 200K too. */
     largeContextDisabledRoots: string[];
     /**
-     * Claude Code's configuration file of each root, where one is: what
-     * names the Claude account it is signed in to (see claudeAccounts.ts).
+     * Claude Code's configuration files of each root, where there are any:
+     * what name the Claude accounts it has been signed in to (see
+     * claudeAccounts.ts); and of those, each root's written last, which names
+     * the one it is signed in to now.
      */
     accountFiles: string[];
+    signedInFiles: string[];
 }
 
 /**
@@ -213,7 +216,7 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
         historyDisabled: everywhere('CLAUDE_CODE_SKIP_PROMPT_HISTORY') || rootSettings.some(r => inRoot('CLAUDE_CODE_SKIP_PROMPT_HISTORY', r.env)),
         largeContextDisabled: everywhere('CLAUDE_CODE_DISABLE_1M_CONTEXT'),
         largeContextDisabledRoots: rootSettings.filter(r => inRoot('CLAUDE_CODE_DISABLE_1M_CONTEXT', r.env)).map(r => r.root),
-        accountFiles: accountFiles(roots, inputs.home).filter(file => confined(file, true)),
+        ...configurationFiles(roots, inputs.home, file => confined(file, true)),
     };
 }
 
@@ -222,26 +225,34 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
  * finds its own: `<root>/.config.json`, an older name, while it is a file
  * with something in it; else `.claude.json` in the folder CLAUDE_CONFIG_DIR
  * names, or in the home folder when it names none. `~/.claude` can be
- * either, named by CLAUDE_CONFIG_DIR or not, so of its two, the one modified
- * last is read: Claude Code writes its own at every start, and the other is
- * one it has left. Only files, each under its real path, which the worker
- * reads.
+ * either, named by CLAUDE_CONFIG_DIR or not, and both can be in use, by
+ * Claude Code started with it and without: both are read for the accounts
+ * they name, and the one Claude Code wrote last, at its last start, says
+ * which it is signed in to now; the other may be one it has left. Only
+ * files, each under its real path, which the worker reads; under test, only
+ * those in the fixtures.
  */
-function accountFiles(roots: RootCandidate[], home: string): string[] {
+function configurationFiles(roots: RootCandidate[], home: string, allowed: (file: string) => boolean): { accountFiles: string[]; signedInFiles: string[] } {
     const homeRoot = realPath(path.join(home, '.claude'));
-    const files: string[] = [];
+    const accountFiles: string[] = [];
+    const signedInFiles: string[] = [];
     for (const root of roots) {
         const legacy = path.join(root.path, '.config.json');
         const candidates = fileSize(legacy) > 0 ? [legacy] : [path.join(root.path, '.claude.json'), ...(root.path === homeRoot ? [path.join(home, '.claude.json')] : [])];
-        const live = candidates
-            .map(file => ({ file, modified: fileModified(file) }))
-            .filter(c => c.modified !== undefined)
-            .sort((a, b) => (b.modified ?? 0) - (a.modified ?? 0))[0];
-        if (live && !files.includes(realPath(live.file))) {
-            files.push(realPath(live.file));
-        }
+        const found = candidates
+            .map(file => ({ file: realPath(file), modified: fileModified(file) }))
+            .filter((c): c is { file: string; modified: number } => c.modified !== undefined && allowed(c.file))
+            .sort((a, b) => b.modified - a.modified);
+        found.forEach(({ file }, i) => {
+            if (!accountFiles.includes(file)) {
+                accountFiles.push(file);
+            }
+            if (i === 0 && !signedInFiles.includes(file)) {
+                signedInFiles.push(file);
+            }
+        });
     }
-    return files;
+    return { accountFiles, signedInFiles };
 }
 
 /** When the regular file at `p` was modified, or undefined where there is none. */

@@ -1212,12 +1212,27 @@ suite('usage worker queries', () => {
         // Numbered by the pass, as they were first used.
         assert.deepStrictEqual(report.report.accountsSeen.map(a => [a.key, a.ordinal]), [[`${A}/`, 1], [`${B}/`, 2], ['none', null]]);
 
+        // A second file, older, still signed in to A: its names count, not who it is signed in to.
+        const older = path.join(root, 'older.json');
+        fs.writeFileSync(older, JSON.stringify({ oauthAccount: { accountUuid: A, emailAddress: 'a@example.com' } }));
+        fs.utimesSync(older, new Date(1_700_000_000_000), new Date(1_700_000_000_000));
+        const two = await worker.send(ask(storeFile, { accountFiles: [older, config], signedInFiles: [config] }));
+        assert.ok(two.type === 'report');
+        assert.deepStrictEqual(two.report.currentAccounts, [`${B}/`]);
+
         const one = await worker.send(ask(storeFile, { account: `${A}/` }));
         assert.ok(one.type === 'report' && one.report.totals.output === 10 && one.report.account === `${A}/`, JSON.stringify(one).slice(0, 200));
-        for (const bad of [{ account: 'everyone' }, { accountFiles: 'not a list' as unknown as string[] }, { accountFiles: Array.from({ length: 17 }, () => config) }]) {
+        for (const bad of [
+            { account: 'everyone' },
+            { accountFiles: 'not a list' as unknown as string[] },
+            { accountFiles: Array.from({ length: 17 }, () => config) },
+            { signedInFiles: 'not a list' as unknown as string[] },
+        ]) {
             const refused = await worker.send(ask(storeFile, bad));
             assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'bad-request', JSON.stringify(bad).slice(0, 80));
         }
+        const badImport = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], signedInFiles: [''] });
+        assert.deepStrictEqual(badImport.type === 'failed' && badImport.failure, 'bad-request');
     });
 
     test('a history set aside is named once, by its file name, in the next answer', async () => {

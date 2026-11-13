@@ -100,6 +100,8 @@ function changeOf(service: UsageService, ms = 5_000): Promise<void> {
 /** A recording stand-in for the worker host. */
 class FakeHost implements UsageHost {
     readonly sent: UsageWorkerRequest['type'][] = [];
+    /** Every request, whole. */
+    readonly requests: UsageWorkerRequest[] = [];
     /** Each import's named paths, or 'all' for a full pass. */
     readonly imports: (string[] | 'all')[] = [];
     /** Each import's `crashed` flag. */
@@ -118,6 +120,7 @@ class FakeHost implements UsageHost {
     send(request: UsageWorkerRequest): Promise<UsageWorkerResponse> {
         this.running = true;
         this.sent.push(request.type);
+        this.requests.push(request);
         if (request.type === 'import') {
             this.imports.push(request.paths ? [...request.paths].sort() : 'all');
             this.crashFlags.push(request.crashed === true);
@@ -228,6 +231,32 @@ suite('usage service', () => {
         };
         return { service, clock, host, calls, hints, set };
     }
+
+    test("Claude Code's configuration files go with each pass and look: every one for names, each root's newest for who is signed in", async () => {
+        const home = path.join(tmp, 'home');
+        fs.mkdirSync(path.join(home, '.claude', 'projects'), { recursive: true });
+        const inner = path.join(home, '.claude', '.claude.json');
+        const outer = path.join(home, '.claude.json');
+        fs.writeFileSync(inner, '{}');
+        fs.writeFileSync(outer, '{}');
+        fs.utimesSync(inner, new Date(1_900_000_000_000), new Date(1_900_000_000_000));
+        fs.utimesSync(outer, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+        const { service, host } = make({ rootInputs: () => ({ env: {}, home, platform: process.platform }) });
+        const held = service.hold();
+        try {
+            await service.refresh();
+            await service.report('today', 'UTC', null);
+            const real = (file: string) => fs.realpathSync(file);
+            const files = (type: 'import' | 'query') => {
+                const request = host.requests.find(r => r.type === type) as { accountFiles?: string[]; signedInFiles?: string[] } | undefined;
+                return [request?.accountFiles, request?.signedInFiles];
+            };
+            assert.deepStrictEqual(files('import'), [[real(outer), real(inner)], [real(outer)]]);
+            assert.deepStrictEqual(files('query'), [[real(outer), real(inner)], [real(outer)]]);
+        } finally {
+            held.dispose();
+        }
+    });
 
     test('off, it touches nothing: no worker, no root, no watcher, no timer', async () => {
         // KC1. Held as the panel and the status item would hold it.

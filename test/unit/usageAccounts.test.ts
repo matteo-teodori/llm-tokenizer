@@ -291,6 +291,31 @@ suite("usage accounts: Claude Code's configuration", () => {
         assert.deepStrictEqual(readClaudeAccounts([partial]).names, [{ accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: 'Acme' }]);
     });
 
+    test("names from every file, the one Claude Code wrote last first; only those said to tell which account it is signed in to now", () => {
+        // An older file, signed in to B, that knew A's organization's name;
+        // a newer one, signed in to A, that leaves the name out.
+        const older = write('older.json', {
+            oauthAccount: { accountUuid: B, emailAddress: 'b@example.com' },
+            knownAccounts: { [A]: { emailAddress: 'old@example.com', organizations: { [ORG_A]: 'Acme' } } },
+        });
+        const newer = write('newer.json', { oauthAccount: { accountUuid: A, emailAddress: 'a@example.com', organizationUuid: ORG_A } });
+        const at = (file: string, seconds: number) => fs.utimesSync(file, new Date(seconds * 1000), new Date(seconds * 1000));
+        at(older, 1_900_000_000);
+        at(newer, 2_000_000_000);
+        // Listed older first, as two roots' files can be: the newer's name stands all the same.
+        const read = readClaudeAccounts([older, newer], [newer]);
+        assert.deepStrictEqual(
+            read.names.map(n => [n.accountUuid, n.organizationUuid, n.email, n.organizationName]),
+            [
+                [A, ORG_A, 'a@example.com', 'Acme'],
+                [B, null, 'b@example.com', null],
+            ],
+        );
+        assert.deepStrictEqual(read.current, [{ accountUuid: A, organizationUuid: ORG_A }]);
+        // Every file, where none is said.
+        assert.deepStrictEqual(readClaudeAccounts([older, newer]).current.map(o => o.accountUuid).sort(), [A, B].sort());
+    });
+
     test('a file missing, not a file, too large or not JSON says nothing; one unchanged is not read again', () => {
         assert.deepStrictEqual(readClaudeAccounts([path.join(tmp, 'missing.json'), tmp, write('bad.json', '{"oauthAccount": {')]), { names: [], current: [] });
         // Past the cap, a file is not read, whatever it would have said.
@@ -319,23 +344,33 @@ suite("usage accounts: Claude Code's configuration", () => {
         }
         fs.writeFileSync(path.join(home, '.claude.json'), '{}');
         fs.writeFileSync(path.join(custom, '.claude.json'), '{}');
-        const resolve = (env: NodeJS.ProcessEnv = {}) =>
-            resolveRoots({ setting: '', editorEnvironment: undefined, env, home, platform: process.platform, confineTo: [tmp] }).accountFiles.map(f =>
-                path.relative(fs.realpathSync(tmp), f),
-            );
+        const resolveAll = (env: NodeJS.ProcessEnv = {}) => {
+            const resolved = resolveRoots({ setting: '', editorEnvironment: undefined, env, home, platform: process.platform, confineTo: [tmp] });
+            const relative = (files: string[]) => files.map(f => path.relative(fs.realpathSync(tmp), f));
+            return { names: relative(resolved.accountFiles), signedIn: relative(resolved.signedInFiles) };
+        };
+        const resolve = (env: NodeJS.ProcessEnv = {}) => resolveAll(env).names;
         // ~/.claude read without CLAUDE_CONFIG_DIR: ~/.claude.json.
-        assert.deepStrictEqual(resolve(), [path.join('home', '.claude.json')]);
-        // A folder CLAUDE_CONFIG_DIR names: its own, besides ~/.claude's.
-        assert.deepStrictEqual(resolve({ CLAUDE_CONFIG_DIR: custom }), [path.join('custom', '.claude.json'), path.join('home', '.claude.json')]);
+        assert.deepStrictEqual(resolveAll(), { names: [path.join('home', '.claude.json')], signedIn: [path.join('home', '.claude.json')] });
+        // A folder CLAUDE_CONFIG_DIR names: its own, besides ~/.claude's, each saying who is signed in there.
+        const both = [path.join('custom', '.claude.json'), path.join('home', '.claude.json')];
+        assert.deepStrictEqual(resolveAll({ CLAUDE_CONFIG_DIR: custom }), { names: both, signedIn: both });
         // ~/.claude named by CLAUDE_CONFIG_DIR at times, and not at others:
-        // of its two files, the one Claude Code wrote last.
+        // both its files name accounts, the one Claude Code wrote last first,
+        // and only that one says which is signed in now.
         fs.writeFileSync(path.join(claude, '.claude.json'), '{}');
         const at = (file: string, seconds: number) => fs.utimesSync(file, new Date(seconds * 1000), new Date(seconds * 1000));
         at(path.join(claude, '.claude.json'), 2_000_000_000);
         at(path.join(home, '.claude.json'), 1_900_000_000);
-        assert.deepStrictEqual(resolve(), [path.join('home', '.claude', '.claude.json')]);
+        assert.deepStrictEqual(resolveAll(), {
+            names: [path.join('home', '.claude', '.claude.json'), path.join('home', '.claude.json')],
+            signedIn: [path.join('home', '.claude', '.claude.json')],
+        });
         at(path.join(home, '.claude.json'), 2_100_000_000);
-        assert.deepStrictEqual(resolve(), [path.join('home', '.claude.json')]);
+        assert.deepStrictEqual(resolveAll(), {
+            names: [path.join('home', '.claude.json'), path.join('home', '.claude', '.claude.json')],
+            signedIn: [path.join('home', '.claude.json')],
+        });
         // The older name, while it holds something, is the one Claude Code reads.
         fs.writeFileSync(path.join(custom, '.config.json'), '{}');
         assert.deepStrictEqual(resolve({ CLAUDE_CONFIG_DIR: custom })[0], path.join('custom', '.config.json'));

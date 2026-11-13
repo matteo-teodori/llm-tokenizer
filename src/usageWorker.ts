@@ -355,7 +355,8 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 !RANGE_KEYS.includes(request.range) ||
                 !isTimeZone(request.zone) ||
                 (request.account !== undefined && !isAccountFilter(request.account)) ||
-                (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles))
+                (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles)) ||
+                (request.signedInFiles !== undefined && !isAccountFiles(request.signedInFiles))
             ) {
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
@@ -367,7 +368,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 now: Date.now(),
                 platform: process.platform,
                 account: request.account,
-                configured: readClaudeAccounts(request.accountFiles ?? []),
+                configured: readClaudeAccounts(request.accountFiles ?? [], request.signedInFiles),
             });
             reply({
                 type: 'report',
@@ -383,7 +384,8 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             const paths = request.paths;
             if (
                 (paths !== undefined && !(Array.isArray(paths) && paths.length <= MAX_PATHS && paths.every(p => typeof p === 'string' && p.length <= 4096))) ||
-                (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles))
+                (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles)) ||
+                (request.signedInFiles !== undefined && !isAccountFiles(request.signedInFiles))
             ) {
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;

@@ -31,7 +31,8 @@ export type UsageWorkerRequest =
      * the same holder of the import lease as the one that died. `crashed`:
      * the window saw its last worker crash, so a read it left unfinished
      * counts as a crash of that file. `accountFiles`: Claude Code's
-     * configuration files, whose account names the history keeps.
+     * configuration files, whose account names the history keeps;
+     * `signedInFiles`, those that say which account it is signed in to now.
      */
     | {
           type: 'import';
@@ -42,14 +43,16 @@ export type UsageWorkerRequest =
           holder?: string;
           crashed?: boolean;
           accountFiles?: string[];
+          signedInFiles?: string[];
       }
     /**
      * `workspaceFolders` null reports every project. `progress`: with how
      * many files the running pass has to go through, which takes a walk of
      * every root; asked only once the page says how far a pass has gone.
      * `account`: one account's sessions only, by `accountKey`, or those that
-     * recorded none; every session when absent. `accountFiles`: where the
-     * account signed in now is named.
+     * recorded none; every session when absent. `accountFiles`: where
+     * Claude Code names its accounts; `signedInFiles`, those of them that
+     * say which it is signed in to now.
      */
     | {
           type: 'query';
@@ -61,6 +64,7 @@ export type UsageWorkerRequest =
           progress?: boolean;
           account?: string;
           accountFiles?: string[];
+          signedInFiles?: string[];
       }
     /** Bring one session's main transcript up to date, then read its latest request and compactions. */
     | { type: 'liveContext'; id: number; storeFile: string; roots: string[]; sessionId: string; holder?: string; crashed?: boolean }

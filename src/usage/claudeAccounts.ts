@@ -42,21 +42,31 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const WANTED: ReadonlySet<string> = new Set(['oauthAccount', 'knownAccounts']);
 
+/** What one file says, and when it was written. */
+interface FileAccounts {
+    accounts: ConfiguredAccounts;
+    modifiedMs: number;
+}
+
 /** Each file read, by what it was when read: a file unchanged since is not read again. */
-const cache = new Map<string, { stamp: string; accounts: ConfiguredAccounts }>();
+const cache = new Map<string, { stamp: string; read: FileAccounts }>();
 
 /**
- * What `files` say, in order, merged: an account named in more than one
- * keeps the first name given. A file missing, unreadable, too large or not
- * JSON says nothing.
+ * What `files` say, merged, the file written last first: an account named
+ * in more than one keeps the newest name given, and where that leaves out
+ * its email or its organization's name, an older one's. Only `signedIn`
+ * say which account Claude Code is signed in to now, every file when it is
+ * not given. A file missing, unreadable, too large or not JSON says nothing.
  */
-export function readClaudeAccounts(files: readonly string[]): ConfiguredAccounts {
+export function readClaudeAccounts(files: readonly string[], signedIn: readonly string[] = files): ConfiguredAccounts {
     const names = new Map<string, AccountName>();
     const current = new Map<string, SessionOwner>();
-    for (const file of files) {
-        const read = readOne(file);
-        for (const owner of read.current) {
-            current.set(ownerKey(owner), owner);
+    const reads = files.map((file, i) => ({ file, i, ...readOne(file) })).sort((a, b) => b.modifiedMs - a.modifiedMs || a.i - b.i);
+    for (const { file, accounts: read } of reads) {
+        if (signedIn.includes(file)) {
+            for (const owner of read.current) {
+                current.set(ownerKey(owner), owner);
+            }
         }
         for (const name of read.names) {
             const key = ownerKey(name);
@@ -71,8 +81,8 @@ function ownerKey(owner: SessionOwner): string {
     return `${owner.accountUuid}/${owner.organizationUuid ?? ''}`;
 }
 
-function readOne(file: string): ConfiguredAccounts {
-    const none: ConfiguredAccounts = { names: [], current: [] };
+function readOne(file: string): FileAccounts {
+    const none: FileAccounts = { accounts: { names: [], current: [] }, modifiedMs: -Infinity };
     let fd: number | undefined;
     try {
         // A regular file only, read through the descriptor that was checked:
@@ -86,13 +96,13 @@ function readOne(file: string): ConfiguredAccounts {
         const stamp = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`;
         const cached = cache.get(file);
         if (cached?.stamp === stamp) {
-            return cached.accounts;
+            return cached.read;
         }
         const bytes = Buffer.alloc(Number(stat.size));
         const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
-        const accounts = accountsOf(topLevel(bytes.subarray(0, length), WANTED));
-        cache.set(file, { stamp, accounts });
-        return accounts;
+        const read = { accounts: accountsOf(topLevel(bytes.subarray(0, length), WANTED)), modifiedMs: Number(stat.mtimeMs) };
+        cache.set(file, { stamp, read });
+        return read;
     } catch {
         // Missing, unreadable: nothing said. Never the error's message.
         cache.delete(file);

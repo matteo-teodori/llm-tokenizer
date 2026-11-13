@@ -127,7 +127,7 @@ function emptyState(view: PanelView): string | undefined {
                 <h2>Claude Code usage is off</h2>
                 <p>Turned on, LLM Tokenizer reads Claude Code's own session records ${view.where ? escapeHtml(view.where) : 'on this machine'},
                 in the projects folder of its configuration folder (<code>~/.claude</code> by default), and shows how many tokens Claude Code processed: by day, account, project, session and model.
-                From Claude Code's configuration file (<code>~/.claude.json</code> by default, or <code>.claude.json</code> in its configuration folder) it reads only the Claude accounts it names.</p>
+                From Claude Code's configuration file (<code>~/.claude.json</code> by default, or <code>.claude.json</code> in its configuration folder, or <code>.config.json</code> there, the name older versions gave it) it reads only the Claude accounts it names.</p>
                 <p>Kept, in a database in this extension's own storage:</p>
                 <ul>
                     <li>each request's token counts, model, effort, speed, where it ran, time and Claude Code version, and its ids: message, request, session, and the subagent or workflow run it came from;</li>

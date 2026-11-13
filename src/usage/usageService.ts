@@ -388,8 +388,9 @@ export class UsageService implements vscode.Disposable {
         // How many files the pass has is worth a walk of the roots only once
         // the page says how far it has gone.
         const progress = this.reading?.by === 'this window';
-        // Where the account signed in now is named: as the last pass found the roots.
+        // Where Claude Code names its accounts, and the one signed in now: as the last pass found the roots.
         const accountFiles = this.resolved?.accountFiles ?? [];
+        const signedInFiles = this.resolved?.signedInFiles ?? [];
         const response = await this.ask(
             {
                 type: 'query',
@@ -400,6 +401,7 @@ export class UsageService implements vscode.Disposable {
                 ...(progress ? { progress } : {}),
                 ...(account !== undefined ? { account } : {}),
                 accountFiles,
+                signedInFiles,
             },
             'look',
         );
@@ -650,6 +652,7 @@ export class UsageService implements vscode.Disposable {
                 holder: this.holder,
                 crashed: this.crashed,
                 accountFiles: resolved.accountFiles,
+                signedInFiles: resolved.signedInFiles,
             },
             'pass',
         );
