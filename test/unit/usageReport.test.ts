@@ -784,14 +784,13 @@ suite('usage report', () => {
                 report.sessions.map(s => [s.sessionId, s.accounts]).sort(),
                 [['a1', [keyA]], ['a2', [keyA2]], ['b1', [keyB]], ['b2', [keyB]], ['n1', ['none']]],
             );
-            // Every account of the history, by its number, which first use gave
-            // it, an account's organizations together, the ones with none last.
+            // Every account of the history, not numbered yet, by first use, the ones with none last.
             assert.deepStrictEqual(
                 report.accountsSeen.map(a => [a.key, a.sessions, a.firstTs]),
                 [
                     [keyA, 1, Date.parse('2026-10-08T10:00:01Z')],
-                    [keyA2, 1, Date.parse('2026-10-09T09:00:01Z')],
                     [keyB, 2, Date.parse('2026-10-09T08:00:01Z')],
+                    [keyA2, 1, Date.parse('2026-10-09T09:00:01Z')],
                     ['none', 1, Date.parse('2026-10-09T07:00:01Z')],
                 ],
             );
@@ -821,9 +820,9 @@ suite('usage report', () => {
         test('accounts keep the numbers the history gave them, an account\'s organizations its number and their own, and the worker gives them after each pass', async () => {
             const store = await history();
             const numbers = () => queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal, a.organizationOrdinal, a.organizations]);
-            // Before any is kept: as they will be, by first use.
+            // Before the pass that found them numbers them: none, by first use.
             assert.deepStrictEqual(numbers(), [
-                [keyA, 1, 1, 2], [keyA2, 1, 2, 2], [keyB, 2, 1, 1], ['none', null, null, 0],
+                [keyA, null, null, 2], [keyB, null, null, 1], [keyA2, null, null, 2], ['none', null, null, 0],
             ]);
             assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), {});
             store.transaction(() => store.numberAccounts('claude-code'));

@@ -7,7 +7,7 @@
  * gathers the rows; the rules are here, and tested here.
  */
 
-import { ALL_ACCOUNTS, NOT_RECORDED, numberAccounts, type AccountNumber } from './accounts';
+import { ALL_ACCOUNTS, NOT_RECORDED, type AccountNumber } from './accounts';
 import { BUCKET_MS, emptyTotals, localDate, mergeTotals, type UsageTotals } from './aggregate';
 import { projectLabel, type ProjectRef } from './projects';
 import type { AccountName } from './store';
@@ -650,26 +650,26 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
 }
 
 /**
- * `seen` with the numbers the history gave its accounts, and those it will
- * give the ones it has not numbered yet, mid-pass: after the others, by
- * first use, as `UsageStore.numberAccounts` will.
+ * `seen` with the numbers the history gave its accounts. One a pass has
+ * found and not numbered yet has none until it has: shown by the first
+ * digits of its id, never by a number the pass might not give it, as an
+ * account first used earlier in a file read later would take its place.
  */
 function numbered(seen: AccountSeen[], stored: ReadonlyMap<string, AccountNumber> | undefined): AccountSeen[] {
-    const numbers = new Map(stored ?? []);
-    const byFirstUse = [...seen].sort((a, b) => (a.firstTs ?? Infinity) - (b.firstTs ?? Infinity) || compareText(a.key, b.key));
-    for (const [key, n] of numberAccounts(numbers, byFirstUse.map(a => a.owner).filter((o): o is SessionOwner => o !== null))) {
-        numbers.set(key, n);
-    }
-    const organizations = new Map<string, number>();
-    for (const key of numbers.keys()) {
+    const numbers = stored ?? new Map<string, AccountNumber>();
+    // An account's organizations: those the history numbered, and those not numbered yet.
+    const organizations = new Map<string, Set<string>>();
+    const add = (key: string) => {
         const accountUuid = key.slice(0, key.indexOf('/'));
-        organizations.set(accountUuid, (organizations.get(accountUuid) ?? 0) + 1);
-    }
+        organizations.set(accountUuid, (organizations.get(accountUuid) ?? new Set()).add(key));
+    };
+    [...numbers.keys()].forEach(add);
+    seen.filter(a => a.owner !== null).forEach(a => add(a.key));
     return seen.map(a => ({
         ...a,
         ordinal: numbers.get(a.key)?.ordinal ?? null,
         organizationOrdinal: numbers.get(a.key)?.organization ?? null,
-        organizations: a.owner ? (organizations.get(a.owner.accountUuid) ?? 1) : 0,
+        organizations: a.owner ? (organizations.get(a.owner.accountUuid)?.size ?? 1) : 0,
     }));
 }
 

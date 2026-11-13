@@ -101,6 +101,8 @@ export function numberAccounts(numbered: ReadonlyMap<string, AccountNumber>, unn
 /** How one account is shown: its label, and what tells it apart besides. */
 export interface AccountLabel {
     label: string;
+    /** The organization the label names in brackets, where it names one. */
+    organization: string | null;
     /** The name Claude Code gives it, where you gave it another. */
     claudeName: string | null;
     /** Whether you named it, in the setting. */
@@ -110,8 +112,8 @@ export interface AccountLabel {
 /** Claude Code's longest label, which it cuts there. */
 const MAX_LABEL = 80;
 
-/** Control characters and line breaks: each a space. */
-const BREAKS = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
+/** Control characters and line breaks, and the blank Braille cell, which draws as a space: each a space. */
+const BREAKS = /[\p{Cc}\p{Zl}\p{Zp}\u2800]/gu;
 /**
  * Format characters, bidirectional ones among them, and every other one
  * Unicode says draws nothing, assigned or not: variation selectors, fillers,
@@ -163,10 +165,12 @@ export function givenNames(setting: unknown): Record<string, string> {
  * `<email>'s Organization`, which names the email where nothing else does.
  * An account with no name is `Account 3`, by the number the history gave
  * it: a number stays as accounts are named, as more come, and as an
- * account's sessions go. A name given in the setting, by account id, stands
- * in place of the email. An account with two organizations, one unnamed,
- * calls that one `organization 2` by its own number. Two labels that would
- * read alike end with the first digits of what tells them apart.
+ * account's sessions go. One the history has not numbered yet, while the
+ * pass that found it reads, is `Account 0f1e2d3c`, by the first digits of
+ * its id. A name given in the setting, by account id, stands in place of
+ * the email. An account with two organizations, one unnamed, calls that one
+ * `organization 2` by its own number. Two labels that would read alike end
+ * with the first digits of what tells them apart.
  */
 export function accountLabels(seen: readonly AccountSeen[], names: readonly AccountName[], given: Readonly<Record<string, string>>): Map<string, AccountLabel> {
     const named = new Map(names.map(n => [accountKey(n), n]));
@@ -174,25 +178,22 @@ export function accountLabels(seen: readonly AccountSeen[], names: readonly Acco
     const labels = new Map<string, AccountLabel>();
     for (const s of seen) {
         if (!s.owner) {
-            labels.set(s.key, { label: 'Not recorded', claudeName: null, named: false });
+            labels.set(s.key, { label: 'Not recorded', organization: null, claudeName: null, named: false });
             continue;
         }
         const email = emails.get(s.owner.accountUuid) ?? null;
         const organizationName = named.get(s.key)?.organizationName ?? null;
         const personal = organizationName !== null && (organizationName === `${email}'s Organization` || PERSONAL.test(organizationName));
-        const organization =
-            organizationName !== null && !personal
-                ? organizationName
-                : s.organizations > 1 && organizationName === null
-                  ? `organization ${s.organizationOrdinal ?? '?'}`
-                  : null;
+        const unnamed = s.organizationOrdinal !== null ? `organization ${s.organizationOrdinal}` : s.owner.organizationUuid ? `organization ${s.owner.organizationUuid.slice(0, 8)}` : 'no organization';
+        const organization = organizationName !== null && !personal ? organizationName : s.organizations > 1 && organizationName === null ? unnamed : null;
         const withOrganization = (base: string) => labelOf(base, organization);
         const own = given[s.owner.accountUuid]?.trim();
         const claudeName = email !== null ? withOrganization(email) : null;
         if (own) {
-            labels.set(s.key, { label: withOrganization(own), claudeName, named: true });
+            labels.set(s.key, { label: withOrganization(own), organization, claudeName, named: true });
         } else {
-            labels.set(s.key, { label: claudeName ?? withOrganization(`Account ${s.ordinal ?? '?'}`), claudeName: null, named: false });
+            const number = `Account ${s.ordinal ?? s.owner.accountUuid.slice(0, 8)}`;
+            labels.set(s.key, { label: claudeName ?? withOrganization(number), organization, claudeName: null, named: false });
         }
     }
     return tellApart(labels, seen);
@@ -240,17 +241,30 @@ function labelOf(base: string, organization: string | null): string {
     return `${cut(base, MAX_LABEL - [...kept].length - 3)} (${kept})`;
 }
 
+/** The filter's own options, whose labels no account's may take. */
+const TAKEN = ['All accounts'];
+
+/**
+ * A label as two that read alike share it: in one compatibility form, so
+ * that letters drawn in another style are the letters they show, and in one
+ * case. Letters of another script that look alike are not folded.
+ */
+function readAs(label: string): string {
+    return label.normalize('NFKC').toLowerCase();
+}
+
 /**
  * Labels that would read alike, as two organizations of one name, or a name
- * you gave that is another account's email, each followed by the first
- * digits of its account's id, and of its organization's where one account
- * is there twice; the whole ids where that still leaves two alike.
+ * you gave that is another account's email, or that is the filter's own, each
+ * followed by the first digits of its account's id, and of its
+ * organization's where one account is there twice; the whole ids where that
+ * still leaves two alike.
  */
 function tellApart(labels: Map<string, AccountLabel>, seen: readonly AccountSeen[]): Map<string, AccountLabel> {
     const owners = new Map(seen.map(s => [s.key, s.owner]));
-    const byLabel = new Map<string, string[]>();
+    const byLabel = new Map<string, string[]>(TAKEN.map(label => [readAs(label), ['']]));
     for (const [key, label] of labels) {
-        byLabel.set(label.label, [...(byLabel.get(label.label) ?? []), key]);
+        byLabel.set(readAs(label.label), [...(byLabel.get(readAs(label.label)) ?? []), key]);
     }
     const alike = [...byLabel.values()].filter(keys => keys.length > 1);
     const told = new Map(labels);
@@ -259,7 +273,7 @@ function tellApart(labels: Map<string, AccountLabel>, seen: readonly AccountSeen
         for (const key of keys) {
             const owner = owners.get(key);
             const label = labels.get(key);
-            // The sessions that record none are never the ones told apart.
+            // The sessions that record none, and the filter's own, are never the ones told apart.
             if (!owner || !label) {
                 continue;
             }
@@ -271,12 +285,12 @@ function tellApart(labels: Map<string, AccountLabel>, seen: readonly AccountSeen
     for (const keys of alike) {
         tell(keys, 8);
     }
-    const counts = new Map<string, number>();
+    const counts = new Map<string, number>(TAKEN.map(label => [readAs(label), 1]));
     for (const label of told.values()) {
-        counts.set(label.label, (counts.get(label.label) ?? 0) + 1);
+        counts.set(readAs(label.label), (counts.get(readAs(label.label)) ?? 0) + 1);
     }
     for (const keys of alike) {
-        if (keys.some(key => (counts.get(told.get(key)?.label ?? '') ?? 0) > 1)) {
+        if (keys.some(key => (counts.get(readAs(told.get(key)?.label ?? '')) ?? 0) > 1)) {
             tell(keys, 36);
         }
     }

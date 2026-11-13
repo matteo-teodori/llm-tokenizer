@@ -47,7 +47,7 @@ suite('usage accounts: keys and labels', () => {
     });
 
     /** An account as the history numbered it: its numbers, how many organizations its account has, and its first use. */
-    const seenAs = (owner: SessionOwner | null, ordinal: number | null = null, organization = 1, organizations = 1, firstTs = 0): AccountSeen => ({
+    const seenAs = (owner: SessionOwner | null, ordinal: number | null = null, organization: number | null = 1, organizations = 1, firstTs = 0): AccountSeen => ({
         key: accountKey(owner),
         owner,
         firstTs,
@@ -185,6 +185,32 @@ suite('usage accounts: keys and labels', () => {
         assert.deepStrictEqual(told, [`Work · ${B}`, `Work · ${C}`, `Work · ${B.slice(0, 8)}`]);
     });
 
+    test('an account the history has not numbered yet is told by the first digits of its id, an organization of it likewise', () => {
+        const labels = accountLabels(
+            [seenAs(ownerOf(A, ORG_A), null, null, 3), seenAs(ownerOf(A), null, null, 3), seenAs(ownerOf(B), 2)],
+            [],
+            {},
+        );
+        assert.deepStrictEqual(
+            [labels.get(`${A}/${ORG_A}`)?.label, labels.get(`${A}/`)?.label, labels.get(`${B}/`)?.label],
+            [`Account ${A.slice(0, 8)} (organization ${ORG_A.slice(0, 8)})`, `Account ${A.slice(0, 8)} (no organization)`, 'Account 2'],
+        );
+        const numberedOrganization = accountLabels([seenAs(ownerOf(A, ORG_A), 1, 2, 2)], [], {}).get(`${A}/${ORG_A}`);
+        assert.deepStrictEqual([numberedOrganization?.label, numberedOrganization?.organization], ['Account 1 (organization 2)', 'organization 2']);
+        assert.strictEqual(accountLabels([seenAs(ownerOf(B), 1)], [], {}).get(`${B}/`)?.organization, null);
+        // Named by you, the organization it names is said as well.
+        const given = accountLabels([seenAs(ownerOf(A, ORG_A), 1)], [{ accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: 'Acme' }], { [A]: 'Work' });
+        assert.deepStrictEqual([given.get(`${A}/${ORG_A}`)?.label, given.get(`${A}/${ORG_A}`)?.organization], ['Work (Acme)', 'Acme']);
+    });
+
+    test("labels that read alike in another style or case are told apart too, and none takes the filter's own", () => {
+        const styled = String.fromCodePoint(0x1d5a0, 0x1d5bc, 0x1d5c6, 0x1d5be);
+        const labels = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2), seenAs(ownerOf(C), 3)], [], { [A]: 'Acme', [B]: styled, [C]: 'ACME' });
+        assert.deepStrictEqual([...labels.values()].map(l => l.label), [`Acme · ${A.slice(0, 8)}`, `${styled} · ${B.slice(0, 8)}`, `ACME · ${C.slice(0, 8)}`]);
+        const all = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2)], [], { [A]: 'All accounts' });
+        assert.deepStrictEqual([all.get(`${A}/`)?.label, all.get(`${B}/`)?.label], [`All accounts · ${A.slice(0, 8)}`, 'Account 2']);
+    });
+
     test('a name you give stands in place of the email, as its labels show it, else of its number', () => {
         const seen = [seenAs(ownerOf(A, ORG_A), 2)];
         assert.strictEqual(nameReplaces(A, seen, [{ accountUuid: A, organizationUuid: ORG_A2, email: 'a@example.com', organizationName: 'Beta' }]), 'a@example.com');
@@ -214,6 +240,9 @@ suite('usage accounts: keys and labels', () => {
         }
         // One normal form: a letter and its accent read as the letter they make.
         assert.strictEqual(showable(`Caf${char(0x65)}${char(0x301)}`, 60), `Caf${char(0xe9)}`);
+        // The blank Braille cell draws as a space, and is one.
+        assert.strictEqual(showable(`Acme${char(0x2800)}`, 60), 'Acme');
+        assert.strictEqual(showable(char(0x2800), 60), null);
         assert.strictEqual(showable(`  ${char(0x2028)} `, 60), null);
         assert.strictEqual(showable(42, 60), null);
         assert.strictEqual(showable('x'.repeat(70), 60)?.length, 60);
