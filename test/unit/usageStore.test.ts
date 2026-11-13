@@ -839,17 +839,19 @@ suite('usage history store', () => {
         assert.ok(store.hasUnnumberedAccounts('claude-code'));
         assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 3);
         assert.ok(!store.hasUnnumberedAccounts('claude-code'));
-        assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), { 'a/': 1, 'b/': 2, 'a/o': 3 });
+        // An account's organizations share its number, each with its own after it.
+        const numbers = () => Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, `${n.ordinal}.${n.organization}`]));
+        assert.deepStrictEqual(numbers(), { 'a/': '1.1', 'b/': '2.1', 'a/o': '1.2' });
         // A session from before the others, signed in to a new account: next, not first.
         store.transaction(() => sight('s0', 'c', 1));
         assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 1);
-        assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), { 'a/': 1, 'b/': 2, 'a/o': 3, 'c/': 4 });
+        assert.deepStrictEqual(numbers(), { 'a/': '1.1', 'b/': '2.1', 'a/o': '1.2', 'c/': '3.1' });
         // An account named before any request was made with it: numbered once one is, its name kept.
         store.transaction(() => store.rememberAccounts('claude-code', [{ accountUuid: 'd', organizationUuid: null, email: 'd@example.com', organizationName: null }], 5));
         assert.ok(!store.hasUnnumberedAccounts('claude-code'));
         store.transaction(() => sight('s4', 'd', 40));
         store.transaction(() => store.numberAccounts('claude-code'));
-        assert.deepStrictEqual([store.accountNumbers().get('d/'), store.accountNames().map(n => n.email)], [5, ['d@example.com']]);
+        assert.deepStrictEqual([store.accountNumbers().get('d/')?.ordinal, store.accountNames().map(n => n.email)], [4, ['d@example.com']]);
         assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 0);
         // A session from before Claude Code recorded owners, resumed under one
         // later: used from its first request, before an account first used in between.
@@ -859,14 +861,14 @@ suite('usage history store', () => {
             sight('s6', 'f', 45);
         });
         store.transaction(() => store.numberAccounts('claude-code'));
-        assert.deepStrictEqual([store.accountNumbers().get('g/'), store.accountNumbers().get('f/')], [6, 7]);
+        assert.deepStrictEqual([store.accountNumbers().get('g/')?.ordinal, store.accountNumbers().get('f/')?.ordinal], [5, 6]);
         // A session's later owner, which no request has followed yet: not numbered until one has.
         const later = { sessionId: 's4', offset: 100, owner: { accountUuid: 'e', organizationUuid: null }, sinceTs: null };
         store.transaction(() => store.putOwnerChanges('claude-code', '/root/projects/p/s4.jsonl', 'p', [later], new Map(), false));
         assert.ok(!store.hasUnnumberedAccounts('claude-code'));
         store.transaction(() => store.putOwnerChanges('claude-code', '/root/projects/p/s4.jsonl', 'p', [], new Map([['s4', 50]]), false));
         assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 1);
-        assert.strictEqual(store.accountNumbers().get('e/'), 8);
+        assert.strictEqual(store.accountNumbers().get('e/')?.ordinal, 7);
     });
 
     test('a Clear in a build before this schema, which knows nothing of accounts, leaves no account named on disk', () => {

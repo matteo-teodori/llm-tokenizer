@@ -784,13 +784,14 @@ suite('usage report', () => {
                 report.sessions.map(s => [s.sessionId, s.accounts]).sort(),
                 [['a1', [keyA]], ['a2', [keyA2]], ['b1', [keyB]], ['b2', [keyB]], ['n1', ['none']]],
             );
-            // Every account of the history, by when it was first used, the ones with none last.
+            // Every account of the history, by its number, which first use gave
+            // it, an account's organizations together, the ones with none last.
             assert.deepStrictEqual(
                 report.accountsSeen.map(a => [a.key, a.sessions, a.firstTs]),
                 [
                     [keyA, 1, Date.parse('2026-10-08T10:00:01Z')],
-                    [keyB, 2, Date.parse('2026-10-09T08:00:01Z')],
                     [keyA2, 1, Date.parse('2026-10-09T09:00:01Z')],
+                    [keyB, 2, Date.parse('2026-10-09T08:00:01Z')],
                     ['none', 1, Date.parse('2026-10-09T07:00:01Z')],
                 ],
             );
@@ -817,15 +818,18 @@ suite('usage report', () => {
             assert.deepStrictEqual([both.totals.output, both.sessions.map(s => s.sessionId)], [5, ['b2']]);
         });
 
-        test('accounts keep the numbers the history gave them, and the worker gives them after each pass', async () => {
+        test('accounts keep the numbers the history gave them, an account\'s organizations its number and their own, and the worker gives them after each pass', async () => {
             const store = await history();
-            // Before any number: by first use.
-            assert.deepStrictEqual(queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal]), [
-                [keyA, null], [keyB, null], [keyA2, null], ['none', null],
+            const numbers = () => queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal, a.organizationOrdinal, a.organizations]);
+            // Before any is kept: as they will be, by first use.
+            assert.deepStrictEqual(numbers(), [
+                [keyA, 1, 1, 2], [keyA2, 1, 2, 2], [keyB, 2, 1, 1], ['none', null, null, 0],
             ]);
+            assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), {});
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual(queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal]), [
-                [keyA, 1], [keyB, 2], [keyA2, 3], ['none', null],
+            assert.strictEqual(store.accountNumbers().size, 3);
+            assert.deepStrictEqual(numbers(), [
+                [keyA, 1, 1, 2], [keyA2, 1, 2, 2], [keyB, 2, 1, 1], ['none', null, null, 0],
             ]);
             // A session from before them all, of a new account: after them, by its number.
             const C = '11111111-2222-4333-8444-555555555555';
@@ -836,8 +840,8 @@ suite('usage report', () => {
             ]);
             await importRoots(store, [path.join(tmp, 'root')]);
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual(queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal]), [
-                [keyA, 1], [keyB, 2], [keyA2, 3], [`${C}/`, 4], ['none', null],
+            assert.deepStrictEqual(numbers(), [
+                [keyA, 1, 1, 2], [keyA2, 1, 2, 2], [keyB, 2, 1, 1], [`${C}/`, 3, 1, 1], ['none', null, null, 0],
             ]);
         });
 
@@ -973,18 +977,119 @@ suite('usage report', () => {
             webSearchRequests: 0,
             webFetchRequests: 0,
         }));
-        const report = buildReport(
-            { sums, sessions: [...sessions, ...extra], compactions: [], limitHits: [], coverage: { start: 0, newest: 0, requests: 270, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 } },
-            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
-        );
-        assert.deepStrictEqual([report.accounts.length, report.omitted.accounts, report.accountsSeen.length, report.omitted.accountsSeen], [50, 210, 200, 60]);
+        const input = { sums, sessions: [...sessions, ...extra], compactions: [], limitHits: [], coverage: { start: 0, newest: 0, requests: 270, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 } };
+        const report = buildReport(input, { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', maxSessions: 5 });
+        // 200 with most sessions, 0 to 189 and the ten with two, and those listed, 210 to 259: all but 190 to 209.
+        assert.deepStrictEqual([report.accounts.length, report.omitted.accounts, report.accountsSeen.length, report.omitted.accountsSeen], [50, 210, 240, 20]);
         // The ones with most tokens listed; the ones with most sessions offered, in the order they were first used.
         assert.strictEqual(report.accounts[0].key, `${owner(259).accountUuid}/`);
         assert.deepStrictEqual(report.accountsSeen.slice(0, 2).map(a => a.sessions), [1, 1]);
         assert.ok(report.accountsSeen.some(a => a.key === `${owner(250).accountUuid}/` && a.sessions === 2));
         assert.ok(report.accountsSeen.every((a, i, all) => i === 0 || (all[i - 1].firstTs ?? 0) <= (a.firstTs ?? 0)));
+        // Every account a list names has its row, and its label with it.
+        const seen = new Set(report.accountsSeen.map(a => a.key));
+        assert.ok([...report.accounts.map(a => a.key), ...report.sessions.flatMap(s => s.accounts)].every(key => seen.has(key)));
         // The totals keep every account.
         assert.strictEqual(report.totals.coverage.requests, 270);
+        // One chosen past the cap is still offered, and not counted among those left out.
+        const chosen = buildReport(input, { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', maxSessions: 5, account: `${owner(200).accountUuid}/` });
+        assert.deepStrictEqual(
+            [chosen.accountsSeen.some(a => a.key === `${owner(200).accountUuid}/`), chosen.accountsSeen.length, chosen.omitted.accountsSeen],
+            [true, 201, 59],
+        );
+        // In a range where it made no request too.
+        const today = buildReport(input, { range: 'today', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', maxSessions: 5, account: `${owner(200).accountUuid}/` });
+        assert.deepStrictEqual([today.totals.coverage.requests, today.accountsSeen.some(a => a.key === `${owner(200).accountUuid}/`)], [0, true]);
+    });
+
+    test('accounts are offered by the numbers kept, whatever first use says now, and one a session or a limit names is kept past the cap', () => {
+        const id = (i: number) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
+        const session = (sessionId: string, accountUuid: string, firstTs: number) => ({
+            sessionId,
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: false,
+            firstTs,
+            lastTs: firstTs,
+            owners: [{ owner: { accountUuid, organizationUuid: null }, sinceTs: null }],
+        });
+        const sum = (sessionId: string, input: number) => ({
+            bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
+            sessionId,
+            model: 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: Date.UTC(2026, 9, 9, 12),
+            lastTs: Date.UTC(2026, 9, 9, 12),
+            input,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        });
+        const coverage = { start: 0, newest: 0, requests: 1, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 };
+        const options = { range: 'coverage' as const, zone: 'UTC', now: FIXTURE_NOW, scope: 'all' as const };
+        // Numbered 1 and 2 when first seen; a session of the second found since, from before them both.
+        const kept = buildReport(
+            {
+                sums: [],
+                sessions: [session('s1', id(1), 20), session('s2', id(2), 10)],
+                compactions: [],
+                limitHits: [],
+                coverage,
+                accountNumbers: new Map([
+                    [`${id(1)}/`, { ordinal: 1, organization: 1 }],
+                    [`${id(2)}/`, { ordinal: 2, organization: 1 }],
+                ]),
+            },
+            options,
+        );
+        assert.deepStrictEqual(kept.accountsSeen.map(a => [a.key, a.ordinal]), [[`${id(1)}/`, 1], [`${id(2)}/`, 2]]);
+        // An account's organizations by their own numbers likewise.
+        const org = (n: number) => `${String(n).padStart(8, '0')}-1111-4000-8000-000000000000`;
+        const inOrganization = (sessionId: string, organizationUuid: string, firstTs: number) => ({
+            ...session(sessionId, id(1), firstTs),
+            owners: [{ owner: { accountUuid: id(1), organizationUuid }, sinceTs: null }],
+        });
+        const organizations = buildReport(
+            {
+                sums: [],
+                sessions: [inOrganization('x', org(1), 10), inOrganization('y', org(2), 20)],
+                compactions: [],
+                limitHits: [],
+                coverage,
+                accountNumbers: new Map([
+                    [`${id(1)}/${org(1)}`, { ordinal: 1, organization: 2 }],
+                    [`${id(1)}/${org(2)}`, { ordinal: 1, organization: 1 }],
+                ]),
+            },
+            options,
+        );
+        assert.deepStrictEqual(organizations.accountsSeen.map(a => [a.key, a.organizationOrdinal]), [[`${id(1)}/${org(2)}`, 1], [`${id(1)}/${org(1)}`, 2]]);
+        // 201 accounts of two sessions each, and Z of one, its tokens the fewest: past every cap but for what names it.
+        const crowd = Array.from({ length: 201 }, (_, i) => [session(`a${i}`, id(i), i), session(`b${i}`, id(i), i)]).flat();
+        const z = session('z', id(999), 1_000);
+        const sums = [...crowd.map(s => sum(s.sessionId, 2)), sum('z', 1)];
+        const hit = { uuid: 'h', sessionId: 'z', timestamp: Date.UTC(2026, 9, 9, 12), limitType: 'five_hour', resetsAt: null };
+        const base = { sums, sessions: [...crowd, z], compactions: [], coverage };
+        const zKey = `${id(999)}/`;
+        const listed = buildReport({ ...base, limitHits: [] }, { ...options, maxSessions: 1_000 });
+        assert.deepStrictEqual([listed.accountsSeen.some(a => a.key === zKey), listed.omitted.accountsSeen], [true, 0]);
+        const limited = buildReport({ ...base, limitHits: [hit] }, { ...options, maxSessions: 1 });
+        assert.deepStrictEqual([limited.accountsSeen.some(a => a.key === zKey), limited.omitted.accountsSeen], [true, 0]);
+        const neither = buildReport({ ...base, limitHits: [] }, { ...options, maxSessions: 1 });
+        assert.deepStrictEqual([neither.accountsSeen.some(a => a.key === zKey), neither.omitted.accountsSeen], [false, 1]);
     });
 
     test('a missing counter makes the report a lower bound', () => {

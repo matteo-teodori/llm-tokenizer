@@ -26,6 +26,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
+import { numberAccounts, type AccountNumber } from './accounts';
 import { BUCKET_MS } from './aggregate';
 import { backupsBeside, copiesBeside, currentHistory, linkWhole, ownFiles, removeQuietly } from './historyFiles';
 import { isComplete } from './provenance';
@@ -414,8 +415,9 @@ INSERT OR REPLACE INTO meta (key, value) VALUES ('${OLD_NEWEST_PARSER}', '${Numb
  * none is known, and it counts under its session's first owner. A row read
  * before has none until its main transcript is searched again (see
  * `OWNERS_SINCE` and `giveOwners`). `accounts` holds one row per account and
- * organization (`organization_uuid` empty where it named none): its number
- * in the history, given once and kept (see `numberAccounts`), and the names
+ * organization (`organization_uuid` empty where it named none): its
+ * account's number in the history, and its own among the account's, given
+ * once and kept (see `numberAccounts`), and the names
  * Claude Code's own configuration gave it while this history was kept, so
  * that an account signed out of since keeps its name.
  *
@@ -434,6 +436,7 @@ CREATE TABLE accounts (
     account_uuid TEXT NOT NULL,
     organization_uuid TEXT NOT NULL,
     ordinal INTEGER,
+    organization_ordinal INTEGER,
     email TEXT,
     organization_name TEXT,
     named_ts INTEGER,
@@ -1295,23 +1298,27 @@ export class UsageStore {
 
     /**
      * Give each account and organization the history's requests were made
-     * with, and that has none yet, its number: after the highest given, in
-     * the order they were first used, so that those first seen together are
-     * numbered by first use. A number once given is kept, so an account's
-     * never changes as more come, or as an older session is resumed under a
-     * newer account. Call inside `transaction`.
+     * with, and that has none yet, its numbers (see `numberAccounts` in
+     * accounts.ts): in the order they were first used, so that those first
+     * seen together are numbered by first use. A number once given is kept,
+     * so an account's never changes as more come, as an older session is
+     * resumed under a newer account, or as an account's sessions go. Call
+     * inside `transaction`.
      *
      * @returns how many were numbered.
      */
     numberAccounts(provider: UsageProvider): number {
         this.assertWritable();
-        const unnumbered = this.usedAccounts(provider).filter(a => a.ordinal === null);
-        let next = ((this.db.prepare('SELECT max(ordinal) AS n FROM accounts WHERE provider = ?').get(provider) as { n: number | null }).n ?? 0) + 1;
-        const number = this.db.prepare('UPDATE accounts SET ordinal = ? WHERE id = ?');
-        for (const a of unnumbered) {
-            number.run(next++, a.id);
+        const used = this.usedAccounts(provider);
+        const given = numberAccounts(this.accountNumbers(), used.map(a => a.owner));
+        const number = this.db.prepare('UPDATE accounts SET ordinal = ?, organization_ordinal = ? WHERE id = ?');
+        for (const a of used) {
+            const n = given.get(ownerKey(a.owner));
+            if (n) {
+                number.run(n.ordinal, n.organization, a.id);
+            }
         }
-        return unnumbered.length;
+        return given.size;
     }
 
     /** Whether some account a request was made with has no number yet: a read, before `numberAccounts` writes. */
@@ -1326,7 +1333,7 @@ export class UsageStore {
      * used from its first request, the requests before any owner record
      * included; a later one from the request after its change.
      */
-    private usedAccounts(provider: UsageProvider): { id: number; ordinal: number | null }[] {
+    private usedAccounts(provider: UsageProvider): { id: number; owner: SessionOwner; ordinal: number | null }[] {
         return this.db
             .prepare(
                 `SELECT a.id, a.ordinal, a.account_uuid, a.organization_uuid,
@@ -1343,16 +1350,19 @@ export class UsageStore {
                  ORDER BY first_ts IS NULL, first_ts, a.account_uuid, a.organization_uuid`,
             )
             .all({ provider })
-            .map(row => ({ id: row.id as number, ordinal: row.ordinal as number | null }));
+            .map(row => ({ id: row.id as number, owner: ownerOf(row), ordinal: row.ordinal as number | null }));
     }
 
-    /** Each account's number, by key (see `accountKey`). */
-    accountNumbers(): Map<string, number> {
+    /** Each account's numbers, by key (see `accountKey`), those with no session left included. */
+    accountNumbers(): Map<string, AccountNumber> {
         return new Map(
             this.db
-                .prepare('SELECT account_uuid, organization_uuid, ordinal FROM accounts WHERE ordinal IS NOT NULL')
+                .prepare('SELECT account_uuid, organization_uuid, ordinal, organization_ordinal FROM accounts WHERE ordinal IS NOT NULL')
                 .all()
-                .map(row => [`${row.account_uuid as string}/${row.organization_uuid as string}`, row.ordinal as number]),
+                .map(row => [
+                    `${row.account_uuid as string}/${row.organization_uuid as string}`,
+                    { ordinal: row.ordinal as number, organization: row.organization_ordinal as number },
+                ]),
         );
     }
 

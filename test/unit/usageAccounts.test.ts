@@ -3,9 +3,22 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { ALL_ACCOUNTS, NOT_RECORDED, accountKey, accountLabels, givenNames, isAccountFilter, isAccountId, isAccountKey, showable } from '../../src/usage/accounts';
+import {
+    ALL_ACCOUNTS,
+    NOT_RECORDED,
+    accountKey,
+    accountLabels,
+    givenNames,
+    isAccountFilter,
+    isAccountId,
+    isAccountKey,
+    numberAccounts,
+    showable,
+    type AccountSeen,
+} from '../../src/usage/accounts';
 import { MAX_CONFIG_BYTES, readClaudeAccounts, topLevel } from '../../src/usage/claudeAccounts';
 import { resolveRoots } from '../../src/usage/roots';
+import type { SessionOwner } from '../../src/usage/types';
 
 const A = '0f1e2d3c-4b5a-4968-8776-655443322110';
 const ORG_A = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
@@ -32,13 +45,20 @@ suite('usage accounts: keys and labels', () => {
         assert.ok(isAccountId(A) && !isAccountId(`${A}/`) && !isAccountId(A.toUpperCase()));
     });
 
+    /** An account as the history numbered it: its numbers, how many organizations its account has, and its first use. */
+    const seenAs = (owner: SessionOwner | null, ordinal: number | null = null, organization = 1, organizations = 1, firstTs = 0): AccountSeen => ({
+        key: accountKey(owner),
+        owner,
+        firstTs,
+        ordinal: owner ? ordinal : null,
+        organizationOrdinal: owner ? organization : null,
+        organizations: owner ? organizations : 0,
+    });
+    const ownerOf = (accountUuid: string, organizationUuid: string | null = null): SessionOwner => ({ accountUuid, organizationUuid });
+
     test("labels are Claude Code's own: the email, and the organization's name unless it is a personal account's", () => {
         const labels = accountLabels(
-            [
-                { key: `${A}/${ORG_A}`, owner: { accountUuid: A, organizationUuid: ORG_A }, firstTs: 1 },
-                { key: `${B}/`, owner: { accountUuid: B, organizationUuid: null }, firstTs: 2 },
-                { key: NOT_RECORDED, owner: null, firstTs: 0 },
-            ],
+            [seenAs(ownerOf(A, ORG_A), 1), seenAs(ownerOf(B), 2), seenAs(null)],
             [
                 { accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: 'Acme' },
                 { accountUuid: B, organizationUuid: null, email: 'b@example.com', organizationName: "b@example.com's Organization" },
@@ -52,12 +72,8 @@ suite('usage accounts: keys and labels', () => {
         });
     });
 
-    test('an account with no name is numbered by first use, whatever is named meanwhile; a name you give stands for its email', () => {
-        const seen = [
-            { key: `${C}/`, owner: { accountUuid: C, organizationUuid: null }, firstTs: 30 },
-            { key: `${A}/${ORG_A}`, owner: { accountUuid: A, organizationUuid: ORG_A }, firstTs: 10 },
-            { key: `${B}/`, owner: { accountUuid: B, organizationUuid: null }, firstTs: 20 },
-        ];
+    test('an account with no name is named by its number, whatever is named meanwhile; a name you give stands for its email', () => {
+        const seen = [seenAs(ownerOf(C), 3), seenAs(ownerOf(A, ORG_A), 1), seenAs(ownerOf(B), 2)];
         const none = accountLabels(seen, [], {});
         assert.deepStrictEqual([...seen].map(s => none.get(s.key)?.label), ['Account 3', 'Account 1', 'Account 2']);
         // B named by Claude Code, A by you: C keeps its number.
@@ -71,37 +87,53 @@ suite('usage accounts: keys and labels', () => {
         assert.deepStrictEqual([both.get(`${A}/${ORG_A}`)?.label, both.get(`${A}/${ORG_A}`)?.claudeName], ['Work (Acme)', 'a@example.com (Acme)']);
     });
 
-    test("an account's second organization, unnamed, is told apart by number, and a label is cut where Claude Code cuts it", () => {
-        const seen = [
-            { key: `${A}/${ORG_A}`, owner: { accountUuid: A, organizationUuid: ORG_A }, firstTs: 1 },
-            { key: `${A}/${ORG_A2}`, owner: { accountUuid: A, organizationUuid: ORG_A2 }, firstTs: 2 },
-        ];
-        const labels = accountLabels(seen, [{ accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: null }], {});
+    test("an account's number is the one the history gave it, never a place among the accounts left", () => {
+        // A, number 1, has no session left: B and C keep theirs.
+        const labels = accountLabels([seenAs(ownerOf(B), 2), seenAs(ownerOf(C), 3)], [], {});
+        assert.deepStrictEqual([labels.get(`${B}/`)?.label, labels.get(`${C}/`)?.label], ['Account 2', 'Account 3']);
+    });
+
+    test("an account's second organization, unnamed, is told apart by its own number, and a label is cut where Claude Code cuts it", () => {
+        const seen = [seenAs(ownerOf(A, ORG_A), 1, 1, 2), seenAs(ownerOf(A, ORG_A2), 1, 2, 2)];
+        const names = [{ accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: null }];
+        const labels = accountLabels(seen, names, {});
         assert.deepStrictEqual([labels.get(`${A}/${ORG_A}`)?.label, labels.get(`${A}/${ORG_A2}`)?.label], ['a@example.com (organization 1)', 'a@example.com (organization 2)']);
-        const long = accountLabels(seen.slice(0, 1), [{ accountUuid: A, organizationUuid: ORG_A, email: `${'x'.repeat(90)}@example.com`, organizationName: null }], {});
+        // The first one's sessions gone: the second keeps its number.
+        assert.strictEqual(accountLabels(seen.slice(1), names, {}).get(`${A}/${ORG_A2}`)?.label, 'a@example.com (organization 2)');
+        const long = accountLabels([seenAs(ownerOf(A, ORG_A), 1)], [{ accountUuid: A, organizationUuid: ORG_A, email: `${'x'.repeat(90)}@example.com`, organizationName: null }], {});
         const label = long.get(`${A}/${ORG_A}`)?.label ?? '';
         assert.deepStrictEqual([[...label].length, label.endsWith('…')], [80, true]);
     });
 
-    test('an account with no name keeps the number the history gave it, whatever was used first', () => {
-        // C was numbered first, though a session resumed under A later began before C's.
-        const seen = [
-            { key: `${A}/`, owner: { accountUuid: A, organizationUuid: null }, firstTs: 1, ordinal: 2 },
-            { key: `${C}/`, owner: { accountUuid: C, organizationUuid: null }, firstTs: 5, ordinal: 1 },
-            // Not numbered yet: after the numbered ones, by first use.
-            { key: `${B}/`, owner: { accountUuid: B, organizationUuid: null }, firstTs: 0, ordinal: null },
-        ];
-        const labels = accountLabels(seen, [], {});
-        assert.deepStrictEqual([labels.get(`${C}/`)?.label, labels.get(`${A}/`)?.label, labels.get(`${B}/`)?.label], ['Account 1', 'Account 2', 'Account 3']);
+    test("accounts are numbered once, by first use, after those numbered; an account's new organization takes its account's number and the next of its own", () => {
+        const numbered = new Map([
+            [`${A}/${ORG_A}`, { ordinal: 1, organization: 1 }],
+            [`${B}/`, { ordinal: 2, organization: 1 }],
+        ]);
+        const given = numberAccounts(numbered, [ownerOf(C), ownerOf(A, ORG_A2), ownerOf(A, ORG_A), ownerOf(C), ownerOf(B, ORG_A)]);
+        assert.deepStrictEqual(Object.fromEntries(given), {
+            [`${C}/`]: { ordinal: 3, organization: 1 },
+            [`${A}/${ORG_A2}`]: { ordinal: 1, organization: 2 },
+            [`${B}/${ORG_A}`]: { ordinal: 2, organization: 2 },
+        });
+        assert.deepStrictEqual(Object.fromEntries(numberAccounts(new Map(), [ownerOf(B), ownerOf(A)])), {
+            [`${B}/`]: { ordinal: 1, organization: 1 },
+            [`${A}/`]: { ordinal: 2, organization: 1 },
+        });
+        // Whatever order the numbers kept come in: after the highest.
+        const kept = new Map([
+            [`${B}/`, { ordinal: 2, organization: 1 }],
+            [`${A}/${ORG_A2}`, { ordinal: 1, organization: 2 }],
+            [`${A}/${ORG_A}`, { ordinal: 1, organization: 1 }],
+        ]);
+        assert.deepStrictEqual(Object.fromEntries(numberAccounts(kept, [ownerOf(A), ownerOf(C)])), {
+            [`${A}/`]: { ordinal: 1, organization: 3 },
+            [`${C}/`]: { ordinal: 3, organization: 1 },
+        });
     });
 
     test('labels that would read alike are told apart by the first digits of what differs', () => {
-        const seen = [
-            { key: `${A}/${ORG_A}`, owner: { accountUuid: A, organizationUuid: ORG_A }, firstTs: 1 },
-            { key: `${A}/${ORG_A2}`, owner: { accountUuid: A, organizationUuid: ORG_A2 }, firstTs: 2 },
-            { key: `${B}/`, owner: { accountUuid: B, organizationUuid: null }, firstTs: 3 },
-            { key: `${C}/`, owner: { accountUuid: C, organizationUuid: null }, firstTs: 4 },
-        ];
+        const seen = [seenAs(ownerOf(A, ORG_A), 1, 1, 2), seenAs(ownerOf(A, ORG_A2), 1, 2, 2), seenAs(ownerOf(B), 2), seenAs(ownerOf(C), 3)];
         const names = [
             { accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: 'Acme' },
             { accountUuid: A, organizationUuid: ORG_A2, email: 'a@example.com', organizationName: 'Acme' },
@@ -109,17 +141,51 @@ suite('usage accounts: keys and labels', () => {
         ];
         // Two organizations of one name, and a name you gave that is another account's email.
         const labels = accountLabels(seen, names, { [C]: 'b@example.com' });
-        assert.deepStrictEqual(
-            seen.map(x => labels.get(x.key)?.label),
-            [`a@example.com (Acme) · ${ORG_A.slice(0, 8)}`, `a@example.com (Acme) · ${ORG_A2.slice(0, 8)}`, `b@example.com · ${B.slice(0, 8)}`, `b@example.com · ${C.slice(0, 8)}`],
-        );
+        assert.deepStrictEqual(seen.map(x => labels.get(x.key)?.label), [
+            `a@example.com (Acme) · ${A.slice(0, 8)}/${ORG_A.slice(0, 8)}`,
+            `a@example.com (Acme) · ${A.slice(0, 8)}/${ORG_A2.slice(0, 8)}`,
+            `b@example.com · ${B.slice(0, 8)}`,
+            `b@example.com · ${C.slice(0, 8)}`,
+        ]);
         // A name you gave that reads as the sessions that record none.
-        const plain = accountLabels([...seen.slice(2, 3), { key: 'none', owner: null, firstTs: 0 }], [], { [B]: 'Not recorded' });
+        const plain = accountLabels([seenAs(ownerOf(B), 1), seenAs(null)], [], { [B]: 'Not recorded' });
         assert.deepStrictEqual([plain.get(`${B}/`)?.label, plain.get('none')?.label], [`Not recorded · ${B.slice(0, 8)}`, 'Not recorded']);
     });
 
+    test('labels told apart stay apart: two accounts in one organization, one with another of that name too, none without one, and digits alike', () => {
+        // A in X and in Y, B in X, all three 'Work (Acme)'.
+        const mixed = accountLabels(
+            [seenAs(ownerOf(A, ORG_A), 1, 1, 2), seenAs(ownerOf(A, ORG_A2), 1, 2, 2), seenAs(ownerOf(B, ORG_A), 2)],
+            [
+                { accountUuid: A, organizationUuid: ORG_A, email: null, organizationName: 'Acme' },
+                { accountUuid: A, organizationUuid: ORG_A2, email: null, organizationName: 'Acme' },
+                { accountUuid: B, organizationUuid: ORG_A, email: null, organizationName: 'Acme' },
+            ],
+            { [A]: 'Work', [B]: 'Work' },
+        );
+        assert.deepStrictEqual(
+            [...mixed.values()].map(l => l.label),
+            [`Work (Acme) · ${A.slice(0, 8)}/${ORG_A.slice(0, 8)}`, `Work (Acme) · ${A.slice(0, 8)}/${ORG_A2.slice(0, 8)}`, `Work (Acme) · ${B.slice(0, 8)}`],
+        );
+        // An organization whose name reads as A's own with none, and two
+        // accounts whose ids begin alike: the whole ids for those alone.
+        const D = '11111111-9999-4333-8444-555555555555';
+        const labels = accountLabels(
+            [seenAs(ownerOf(A, ORG_A2), 1, 1, 2), seenAs(ownerOf(A), 1, 2, 2), seenAs(ownerOf(C), 2), seenAs(ownerOf(D), 3)],
+            [{ accountUuid: A, organizationUuid: ORG_A2, email: null, organizationName: 'organization 2' }],
+            { [A]: 'Work', [C]: 'Home', [D]: 'Home' },
+        );
+        assert.deepStrictEqual(
+            [...labels.values()].map(l => l.label),
+            [`Work (organization 2) · ${A.slice(0, 8)}/${ORG_A2.slice(0, 8)}`, `Work (organization 2) · ${A.slice(0, 8)}/no organization`, `Home · ${C}`, `Home · ${D}`],
+        );
+        // A name you gave that reads as another's label once told apart.
+        const told = [...accountLabels([seenAs(ownerOf(B), 1), seenAs(ownerOf(C), 2), seenAs(ownerOf(A), 3)], [], { [B]: 'Work', [C]: 'Work', [A]: `Work · ${B.slice(0, 8)}` }).values()].map(l => l.label);
+        assert.deepStrictEqual(told, [`Work · ${B}`, `Work · ${C}`, `Work · ${B.slice(0, 8)}`]);
+    });
+
     test("a personal organization's name gives its email where nothing else does, and a long email is cut before its organization", () => {
-        const seen = [{ key: `${A}/${ORG_A}`, owner: { accountUuid: A, organizationUuid: ORG_A }, firstTs: 1 }];
+        const seen = [seenAs(ownerOf(A, ORG_A), 1)];
         const personal = accountLabels(seen, [{ accountUuid: A, organizationUuid: ORG_A, email: null, organizationName: "a@example.com's Organization" }], {});
         assert.strictEqual(personal.get(`${A}/${ORG_A}`)?.label, 'a@example.com');
         const long = accountLabels(seen, [{ accountUuid: A, organizationUuid: ORG_A, email: `${'x'.repeat(90)}@example.com`, organizationName: 'Acme Corp' }], {});
@@ -129,9 +195,16 @@ suite('usage accounts: keys and labels', () => {
 
     test('a name keeps nothing that could hide or reorder what it shows, and the names you give are only ids with a name', () => {
         const hidden = `Wo${char(0x202e)}rk${char(0x200b)}${char(0x0007)}\n\t  Org`;
-        assert.strictEqual(showable(hidden, 60), 'Wo rk Org');
+        assert.strictEqual(showable(hidden, 60), 'Work Org');
         // Invisible tags, a Mongolian vowel separator and interlinear annotations, past the basic plane or not.
         assert.strictEqual(showable(`Work${char(0xe0041)}${char(0xe007f)}${char(0x180e)}${char(0xfff9)}`, 60), 'Work');
+        // And every other character that draws nothing, assigned or not: a
+        // grapheme joiner, variation selectors, fillers, unassigned tags.
+        for (const code of [0x034f, 0xfe0f, 0xe0100, 0x115f, 0x17b4, 0x2065, 0x3164, 0xffa0, 0xe0000, 0xe0002]) {
+            assert.strictEqual(showable(`Ac${char(code)}me`, 60), 'Acme', code.toString(16));
+        }
+        // One normal form: a letter and its accent read as the letter they make.
+        assert.strictEqual(showable(`Caf${char(0x65)}${char(0x301)}`, 60), `Caf${char(0xe9)}`);
         assert.strictEqual(showable(`  ${char(0x2028)} `, 60), null);
         assert.strictEqual(showable(42, 60), null);
         assert.strictEqual(showable('x'.repeat(70), 60)?.length, 60);

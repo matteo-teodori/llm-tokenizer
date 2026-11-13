@@ -267,7 +267,7 @@ suite('usage panel', () => {
 
     test('its range, scope, account and the reader\'s zone are kept for the next time it opens', async () => {
         const { service, fake } = fakeService();
-        fake.report = quietReport({ accountsSeen: [{ key: 'none', owner: null, sessions: 1, firstTs: 1, lastTs: 1, ordinal: null }] });
+        fake.report = quietReport({ accountsSeen: [{ key: 'none', owner: null, sessions: 1, firstTs: 1, lastTs: 1, ordinal: null, organizationOrdinal: null, organizations: 0 }] });
         UsagePanel.show(context, service, log);
         page.send({ type: 'ready', zone: 'Asia/Tokyo' });
         page.send({ type: 'setRange', range: '30d' });
@@ -319,8 +319,8 @@ suite('usage panel', () => {
         const { service, fake } = fakeService();
         fake.report = quietReport({
             accountsSeen: [
-                { key: `${id}/`, owner: { accountUuid: id, organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1 },
-                { key: 'none', owner: null, sessions: 1, firstTs: 1, lastTs: 2, ordinal: null },
+                { key: `${id}/`, owner: { accountUuid: id, organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1, organizationOrdinal: 1, organizations: 1 },
+                { key: 'none', owner: null, sessions: 1, firstTs: 1, lastTs: 2, ordinal: null, organizationOrdinal: null, organizations: 0 },
             ],
         });
         UsagePanel.show(context, service, log);
@@ -338,7 +338,7 @@ suite('usage panel', () => {
         const id = '0f1e2d3c-4b5a-4968-8776-655443322110';
         const { service, fake } = fakeService();
         fake.report = quietReport({
-            accountsSeen: [{ key: `${id}/`, owner: { accountUuid: id, organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1 }],
+            accountsSeen: [{ key: `${id}/`, owner: { accountUuid: id, organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1, organizationOrdinal: 1, organizations: 1 }],
             accountNames: [{ accountUuid: id, organizationUuid: null, email: 'a@example.com', organizationName: null }],
         });
         const updates: unknown[][] = [];
