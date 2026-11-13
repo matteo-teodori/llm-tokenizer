@@ -246,7 +246,8 @@ suite('usage service', () => {
         try {
             await service.refresh();
             await service.report('today', 'UTC', null);
-            const real = (file: string) => fs.realpathSync(file);
+            // As the roots are resolved: on Windows, with a short (8.3) temporary folder's long name.
+            const real = (file: string) => fs.realpathSync.native(file);
             const files = (type: 'import' | 'query') => {
                 const request = host.requests.find(r => r.type === type) as { accountFiles?: string[]; signedInFiles?: string[] } | undefined;
                 return [request?.accountFiles, request?.signedInFiles];

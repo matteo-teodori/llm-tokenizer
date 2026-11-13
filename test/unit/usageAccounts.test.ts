@@ -379,7 +379,7 @@ suite("usage accounts: Claude Code's configuration", () => {
         fs.writeFileSync(path.join(custom, '.claude.json'), '{}');
         const resolveAll = (env: NodeJS.ProcessEnv = {}) => {
             const resolved = resolveRoots({ setting: '', editorEnvironment: undefined, env, home, platform: process.platform, confineTo: [tmp] });
-            const relative = (files: string[]) => files.map(f => path.relative(fs.realpathSync(tmp), f));
+            const relative = (files: string[]) => files.map(f => path.relative(fs.realpathSync.native(tmp), f));
             return { names: relative(resolved.accountFiles), signedIn: relative(resolved.signedInFiles) };
         };
         const resolve = (env: NodeJS.ProcessEnv = {}) => resolveAll(env).names;
