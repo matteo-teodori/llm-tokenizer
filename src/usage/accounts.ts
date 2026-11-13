@@ -220,11 +220,15 @@ function emailsOf(names: readonly AccountName[]): Map<string, string> {
     return emails;
 }
 
-/** What a name you give an account stands in place of: its email, as its labels show it, else its number. */
+/**
+ * What a name you give an account stands in place of: its email, as its
+ * labels show it, else its number, or, until the history has numbered it,
+ * the first digits of its id that its label shows meanwhile.
+ */
 export function nameReplaces(accountUuid: string, seen: readonly AccountSeen[], names: readonly AccountName[]): string {
     const email = emailsOf(names).get(accountUuid);
-    const ordinal = seen.find(s => s.owner?.accountUuid === accountUuid)?.ordinal;
-    return email ?? (ordinal != null ? `Account ${ordinal}` : 'its number');
+    const account = seen.find(s => s.owner?.accountUuid === accountUuid);
+    return email ?? (account ? `Account ${account.ordinal ?? accountUuid.slice(0, 8)}` : 'its number');
 }
 
 /** The name Claude Code gives a personal account's organization, and the email in it. */

@@ -48,7 +48,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
-      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records outside the workspace are read too."
+      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records, and the accounts its configuration file names, are read too, outside the workspace."
     },
     "virtualWorkspaces": {
       "supported": "limited",

@@ -211,12 +211,16 @@ suite('usage accounts: keys and labels', () => {
         assert.deepStrictEqual([all.get(`${A}/`)?.label, all.get(`${B}/`)?.label], [`All accounts · ${A.slice(0, 8)}`, 'Account 2']);
     });
 
-    test('a name you give stands in place of the email, as its labels show it, else of its number', () => {
+    test('a name you give stands in place of the email, as its labels show it, else of its number, or of its id until it has one', () => {
         const seen = [seenAs(ownerOf(A, ORG_A), 2)];
         assert.strictEqual(nameReplaces(A, seen, [{ accountUuid: A, organizationUuid: ORG_A2, email: 'a@example.com', organizationName: 'Beta' }]), 'a@example.com');
         assert.strictEqual(nameReplaces(A, seen, [{ accountUuid: A, organizationUuid: ORG_A, email: null, organizationName: "p@example.com's Organization" }]), 'p@example.com');
         assert.strictEqual(nameReplaces(A, seen, []), 'Account 2');
         assert.strictEqual(nameReplaces(B, seen, []), 'its number');
+        // One the history has not numbered yet: the first digits of its id, as its label shows them meanwhile.
+        const unnumbered = [seenAs(ownerOf(A, ORG_A), null)];
+        assert.strictEqual(nameReplaces(A, unnumbered, []), 'Account 0f1e2d3c');
+        assert.strictEqual(accountLabels(unnumbered, [], {}).get(`${A}/${ORG_A}`)?.label.startsWith('Account 0f1e2d3c'), true);
     });
 
     test("a personal organization's name gives its email where nothing else does, and a long email is cut before its organization", () => {

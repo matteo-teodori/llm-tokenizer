@@ -58,8 +58,8 @@ request that contains file contents. The only network access is a one-time
 download of a model's *vocabulary file* from huggingface.co, which you can turn
 off with `llm-tokenizer.downloadTokenizers`; a repository's own settings can
 turn it off for that repository, never back on. Claude Code usage, if you turn it
-on, reads Claude Code's own session records on this machine and sends nothing
-anywhere.
+on, reads Claude Code's own session records, and the accounts its configuration
+file names, on this machine, and sends nothing anywhere.
 
 ### ⚙️ Configuration
 - `llm-tokenizer.defaultModel`: Model used until you pick one
@@ -70,6 +70,7 @@ anywhere.
 - `llm-tokenizer.enableClaudeCodeUsage`: Read Claude Code's session records to show its usage (off by default)
 - `llm-tokenizer.claudeCodeDataDirectory`: Claude Code's configuration folder, when Claude Code's own rules would not find it
 - `llm-tokenizer.showClaudeCodeUsageInStatusBar`: Show the live context of the Claude Code session in this workspace (off by default)
+- `llm-tokenizer.claudeCodeAccountNames`: Names of your own for Claude accounts in Claude Code usage, by account id (set with **Name…**)
 
 ## Supported Models
 
@@ -296,11 +297,11 @@ ids, emails and organizations' names. Nothing else in that file is parsed,
 and the diagnostics say which files they were.
 
 Its settings are machine settings, so a repository's settings cannot turn it
-on or point it at another folder, and Settings Sync never takes them to
-another machine; the names you give accounts are an application setting,
-which only your own settings hold, and which Settings Sync leaves out where
-LLM Tokenizer is installed in the editor that syncs. In a remote window, or
-with LLM Tokenizer in another profile, add
+on or point it at another folder, and while LLM Tokenizer is installed
+Settings Sync never takes them to another machine; the names you give accounts
+are an application setting, which only your own settings hold, and which
+Settings Sync leaves out where LLM Tokenizer is installed in the editor that
+syncs. In a remote window, or with LLM Tokenizer in another profile, add
 `llm-tokenizer.claudeCodeAccountNames` to `settingsSync.ignoredSettings` to
 keep them on this machine. In a dev container, though, the container's
 settings can come from the repository's `devcontainer.json`.
@@ -308,7 +309,9 @@ settings can come from the repository's `devcontainer.json`.
 **Before uninstalling**, run **Clear Claude Code Usage History**: the editor
 may leave this extension's storage on disk after the extension is gone. The
 names you gave accounts stay in your settings until you remove **Claude Code
-Account Names**.
+Account Names**, and once LLM Tokenizer is gone Settings Sync no longer leaves
+them, or the usage settings, out: with Settings Sync on, remove them first, or
+add them to `settingsSync.ignoredSettings`.
 
 ### What it counts, and what it cannot see
 
