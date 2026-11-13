@@ -45,9 +45,11 @@ import type { Compaction, LimitHit, OwnerChange, SessionOwner, TranscriptKind, U
  * 4: only the owner a request's own transcript records before it, none for
  *    a subagent's; a change of owner begins with the next request kept or
  *    limit reached, never an error's placeholder, and of several before
- *    one, only the last. Its rows are parser 3's, so parser 3 files are read
- *    on; the bump is what stops a window still running a build of 2.4.0
- *    made before then, which wrote them otherwise (see `outdated`).
+ *    one, only the last. Parser 3 was only ever a build of 2.4.0 made before
+ *    its release: its main transcripts are searched for their owners again,
+ *    the owners it took by time dropped (see `completeSchema4` in store.ts),
+ *    and its other files read on; the bump also stops a window still running
+ *    one (see `outdated`).
  */
 export const PARSER_VERSION = 4;
 

@@ -340,6 +340,9 @@ export async function importUnderLease(
         isCancelled: () => lost || (options.isCancelled?.() ?? false),
     };
     try {
+        // What a window of a build made before 2.4.0's release wrote, its pass
+        // under way as this history was brought to this parser, is undone first.
+        store.transaction(() => store.undoPrereleasePasses());
         return await (paths ? importPaths(store, roots, paths, leased) : importRoots(store, roots, leased));
     } finally {
         // Held only for the pass: another window's hint should not wait out

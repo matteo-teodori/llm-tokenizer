@@ -1052,6 +1052,24 @@ suite('usage transcripts', () => {
         assert.strictEqual((await importRoots(store, [tmp])).unchanged, 2);
     });
 
+    test('a pass under the lease first undoes what a window of a build before 2.4.0 wrote meanwhile', async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 's1.jsonl'), line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })));
+        fs.writeFileSync(path.join(dir, 's1', 'subagents', 'agent-a1.jsonl'), line(assistant('a1', 3, { isSidechain: true, agentId: 'a1', timestamp: at(2) })));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(owners(store), { a1: null, m1: A });
+        // That window's pass: the subagent's request under an owner it took by time, its file at its parser.
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+        raw.exec("UPDATE requests SET owner = (SELECT min(id) FROM accounts) WHERE kind != 'main'; UPDATE files SET parser_version = 3 WHERE kind != 'main'");
+        raw.close();
+        assert.deepStrictEqual(owners(store), { a1: A, m1: A });
+        assert.ok(await importUnderLease(store, [tmp], 'window-a'));
+        assert.deepStrictEqual(owners(store), { a1: null, m1: A });
+    });
+
     test('a history the parser before this one read is read on from its checkpoints: no record read again, every owner as a full read gives it', async () => {
         // That parser already read owners: only what a line becomes changed since.
         assert.ok(PARSER_VERSION - 1 >= OWNERS_SINCE);

@@ -461,7 +461,7 @@ CREATE TABLE owner_changes (
     retired INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (provider, file, retired, offset)
 ) STRICT;
-CREATE INDEX owner_changes_session ON owner_changes (session_id);
+CREATE INDEX owner_changes_session ON owner_changes (session_id, since_ts);
 CREATE TRIGGER clear_accounts AFTER UPDATE OF value ON meta
 WHEN new.key = 'store_generation' AND NOT EXISTS (SELECT 1 FROM requests)
 BEGIN
@@ -472,34 +472,56 @@ END;
 const MIGRATE_TO_4 = OWNER_COLUMNS + OWNER_TABLES;
 
 /**
- * Bring a history at version 4 that a build of LLM Tokenizer made before
- * 2.4.0 was released to the schema 2.4.0 has: version 4 changed shape while
- * it was being made, and only such builds wrote another (owners kept by
- * session, then changes no file could retire). Nothing at all for a history
- * in this shape, which one look at the newest column tells.
+ * The first parser that keeps only the owner a request's own transcript
+ * records before it (see PARSER_VERSION in transcripts.ts). A history whose
+ * newest parser is older was last written by 2.3.0, which kept no owner,
+ * or by a build of 2.4.0 made before its release, which took some by time.
+ */
+const OWNERS_BY_POSITION = 4;
+
+/** The parser of the builds of 2.4.0 made before its release, and of no other build. */
+const PRERELEASE_PARSER = 3;
+
+/**
+ * Bring a history at version 4 to the schema and the owners 2.4.0 has.
+ * Version 4 changed shape while 2.4.0 was being made, and only builds of it
+ * made before its release wrote another (owners kept by session, then
+ * changes no file could retire); and those builds took some owners by
+ * time, in whatever shape. Nothing at all for a history this build or a
+ * later one has written to, which its newest parser tells, nor for one no
+ * parser has imported into yet.
  *
  * What those builds got right is kept, as the history outlives the
- * transcripts it was read from: the names Claude Code gave each account; a
- * main transcript's changes of owner, and its requests' owners, which they
- * read from the transcript itself; and, from the builds that kept one owner
- * per session, that owner, for a session none of whose main transcripts is
- * left to search again, as a change no file says now (retired), which
- * counts only where nothing else does. What they took by time goes, a
- * subagent's and a limit's owner, for a report to take by time, and so do
- * the numbers they gave, for the next pass to give by first use. Every main
- * transcript still there is searched for its owners again, its rows kept,
- * and what that finds replaces what was kept. And the newest parser is this
- * one from now: a window still running such a build stops writing.
+ * transcripts it was read from: the names Claude Code's configuration gave
+ * each account; a main transcript's changes of owner, and its requests'
+ * owners, which they read from the transcript itself; and, from the builds
+ * that kept one owner per session, that owner, for a session whose own
+ * transcript is gone, as a change no file says now (retired), which counts
+ * only where nothing else does. What they took by time goes, a subagent's
+ * and a limit's owner, for a report to take by time, and so do the numbers
+ * they gave, for the next whole pass to give by first use, and the times
+ * they gave changes that were never in force. Every main transcript they
+ * read is searched for its owners again, its rows kept, and what that finds
+ * replaces what was kept. And the newest parser is this one's from now, so
+ * that a window still running such a build stops at its next look at the
+ * lease; what a pass of one already under way writes meanwhile is undone
+ * by the next pass here (see `undoPrereleasePasses`).
  */
 function completeSchema4(db: DatabaseSync): void {
     const columns = (table: string) =>
         new Set((db.prepare('SELECT name FROM pragma_table_info(?)').all(table) as { name: string }[]).map(row => row.name));
-    if (columns('owner_changes').has('retired')) {
+    const reshape = () => !columns('owner_changes').has('retired');
+    // Written by an older parser: one no parser has imported into holds nothing to undo.
+    const older = () => {
+        const held = db.prepare('SELECT 1 FROM meta WHERE key = ?').get(NEWEST_PARSER) !== undefined;
+        return held && newestParser(db) < OWNERS_BY_POSITION;
+    };
+    if (!reshape() && !older()) {
         return;
     }
     db.exec('BEGIN IMMEDIATE');
     try {
-        if (!columns('owner_changes').has('retired')) {
+        if (reshape()) {
             const accounts = columns('accounts');
             const changes = columns('owner_changes');
             const sessions = columns('sessions');
@@ -519,7 +541,7 @@ function completeSchema4(db: DatabaseSync): void {
             if (sessions.has('account_uuid')) {
                 db.exec(
                     `CREATE TEMP TABLE kept_owners AS
-                     SELECT provider, session_id, project_dir, account_uuid, coalesce(organization_uuid, '') AS organization_uuid
+                     SELECT provider, session_id, root, project_dir, account_uuid, coalesce(organization_uuid, '') AS organization_uuid
                      FROM sessions WHERE account_uuid IS NOT NULL`,
                 );
             }
@@ -541,12 +563,8 @@ function completeSchema4(db: DatabaseSync): void {
                     db.exec(`ALTER TABLE ${table} ADD COLUMN owner INTEGER`);
                 }
             }
-            // A main transcript's own, where its account is still known; nothing else's.
-            db.exec(
-                `UPDATE requests SET owner = NULL
-                 WHERE owner IS NOT NULL AND (kind != 'main' OR owner NOT IN (SELECT id FROM accounts));
-                 UPDATE limit_hits SET owner = NULL WHERE owner IS NOT NULL;`,
-            );
+            // An account no longer known names no one.
+            db.exec('UPDATE requests SET owner = NULL WHERE owner IS NOT NULL AND owner NOT IN (SELECT id FROM accounts)');
             if (changes.size > 0) {
                 db.exec(
                     `INSERT INTO owner_changes (provider, file, offset, session_id, project_dir, owner, since_ts, retired)
@@ -558,11 +576,22 @@ function completeSchema4(db: DatabaseSync): void {
                 keepSessionOwners(db);
             }
             db.exec('DROP TABLE IF EXISTS temp.kept_accounts; DROP TABLE IF EXISTS temp.kept_changes; DROP TABLE IF EXISTS temp.kept_owners');
-            db.exec(`UPDATE files SET parser_version = ${OWNERS_SINCE - 1} WHERE kind = 'main' AND parser_version >= ${OWNERS_SINCE}`);
-            const newest = db.prepare('SELECT value FROM meta WHERE key = ?').get(NEWEST_PARSER) as { value: string } | undefined;
-            if (Number(newest?.value ?? 0) < PARSER_VERSION) {
-                db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(NEWEST_PARSER, String(PARSER_VERSION));
-            }
+        }
+        if (older()) {
+            undoPrerelease(db, 'all');
+            // Changes a read gave the time of one request: only the last had it.
+            db.exec(
+                `UPDATE owner_changes SET since_ts = NULL
+                 WHERE since_ts IS NOT NULL AND EXISTS (
+                     SELECT 1 FROM owner_changes later
+                     WHERE later.provider = owner_changes.provider AND later.file = owner_changes.file
+                       AND later.retired = owner_changes.retired AND later.session_id = owner_changes.session_id
+                       AND later.offset > owner_changes.offset AND later.since_ts = owner_changes.since_ts)`,
+            );
+            db.exec('UPDATE accounts SET ordinal = NULL, organization_ordinal = NULL WHERE ordinal IS NOT NULL OR organization_ordinal IS NOT NULL');
+            // Built on the change's time too, by the builds that make it so.
+            db.exec('DROP INDEX IF EXISTS owner_changes_session; CREATE INDEX owner_changes_session ON owner_changes (session_id, since_ts)');
+            db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(NEWEST_PARSER, String(Math.max(newestParser(db), PARSER_VERSION)));
         }
         db.exec('COMMIT');
     } catch (error) {
@@ -571,18 +600,46 @@ function completeSchema4(db: DatabaseSync): void {
     }
 }
 
+/** The newest parser that has held the import lease, as the history keeps it. */
+function newestParser(db: DatabaseSync): number {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(NEWEST_PARSER) as { value: string } | undefined;
+    return row ? Number(row.value) : 0;
+}
+
+/**
+ * Undo what a build of 2.4.0 made before its release wrote and this one
+ * would not, in a transaction: the owners it took by time, a subagent's
+ * request's, which this parser never gives, and a limit's, which a report
+ * then takes by time; and its main transcripts' changes of owner, with the
+ * times it gave them, by having each searched again, its rows kept. Of the
+ * limits, all, or (`'its sessions'`) those of the sessions whose files are
+ * at its parser.
+ */
+function undoPrerelease(db: DatabaseSync, limits: 'all' | 'its sessions'): void {
+    db.exec("UPDATE requests SET owner = NULL WHERE owner IS NOT NULL AND kind != 'main'");
+    db.exec(
+        limits === 'all'
+            ? 'UPDATE limit_hits SET owner = NULL WHERE owner IS NOT NULL'
+            : `UPDATE limit_hits SET owner = NULL WHERE owner IS NOT NULL
+               AND session_id IN (SELECT session_id FROM files WHERE parser_version = ${PRERELEASE_PARSER} AND session_id IS NOT NULL)`,
+    );
+    db.exec(`UPDATE files SET parser_version = ${OWNERS_SINCE - 1} WHERE kind = 'main' AND parser_version = ${PRERELEASE_PARSER}`);
+}
+
 /**
  * The owner a build that kept one per session gave it, for each session
- * none of whose main transcripts is left: a retired change before its
- * first record, which a report takes only where the session has no other.
- * One whose transcript is still there is searched again instead.
+ * whose own transcript is gone: a retired change before its first record,
+ * under that transcript's path, which a report takes only where the
+ * session has no other. A session whose transcript is still there, in its
+ * own project folder or in any other its files were read from, is
+ * searched again instead; a copy set aside under another name may not
+ * hold its owner, and does not count.
  */
 function keepSessionOwners(db: DatabaseSync): void {
-    const owned = db.prepare('SELECT provider, session_id, project_dir, account_uuid, organization_uuid FROM temp.kept_owners').all();
-    const files = db.prepare(
-        `SELECT DISTINCT r.file, p.path FROM requests r JOIN paths p ON p.id = r.file
-         WHERE r.provider = ? AND r.session_id = ? AND r.kind = 'main' ORDER BY r.file`,
-    );
+    const owned = db.prepare('SELECT provider, session_id, root, project_dir, account_uuid, organization_uuid FROM temp.kept_owners').all();
+    const known = db.prepare("SELECT path FROM files WHERE provider = ? AND session_id = ? AND kind = 'main'");
+    const addPath = db.prepare('INSERT OR IGNORE INTO paths (path) VALUES (?)');
+    const pathId = db.prepare('SELECT id FROM paths WHERE path = ?');
     const account = db.prepare('INSERT OR IGNORE INTO accounts (provider, account_uuid, organization_uuid) VALUES (?, ?, ?)');
     const accountId = db.prepare('SELECT id FROM accounts WHERE provider = ? AND account_uuid = ? AND organization_uuid = ?');
     const change = db.prepare(
@@ -590,13 +647,17 @@ function keepSessionOwners(db: DatabaseSync): void {
          VALUES (?, ?, -1, ?, ?, ?, NULL, 1)`,
     );
     for (const row of owned) {
-        const main = files.all(row.provider, row.session_id) as { file: number; path: string }[];
-        if (main.length === 0 || main.some(f => fs.existsSync(f.path))) {
+        const name = `${String(row.session_id)}.jsonl`;
+        const own = path.join(String(row.root), 'projects', String(row.project_dir), name);
+        const candidates = [own, ...(known.all(row.provider, row.session_id) as { path: string }[]).map(f => f.path).filter(p => path.basename(p) === name)];
+        if (candidates.some(p => fs.existsSync(p))) {
             continue;
         }
+        addPath.run(own);
+        const file = (pathId.get(own) as { id: number }).id;
         account.run(row.provider, row.account_uuid, row.organization_uuid);
         const id = (accountId.get(row.provider, row.account_uuid, row.organization_uuid) as { id: number }).id;
-        change.run(row.provider, main[0].file, row.session_id, row.project_dir, id);
+        change.run(row.provider, file, row.session_id, row.project_dir, id);
     }
 }
 
@@ -1820,8 +1881,25 @@ export class UsageStore {
     }
 
     private maxParserVersion(): number {
-        const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(NEWEST_PARSER) as { value: string } | undefined;
-        return row ? Number(row.value) : 0;
+        return newestParser(this.db);
+    }
+
+    /**
+     * Undo what a pass of a build of 2.4.0 made before its release wrote
+     * after this history was brought to this parser (see `completeSchema4`):
+     * only one already under way then can have, before it next looked at
+     * the lease, and only it writes its parser. Call inside `transaction`,
+     * holding the import lease, before a pass.
+     *
+     * @returns whether it found any.
+     */
+    undoPrereleasePasses(): boolean {
+        this.assertWritable();
+        const found = this.db.prepare(`SELECT EXISTS (SELECT 1 FROM files WHERE parser_version = ${PRERELEASE_PARSER}) AS any`).get() as { any: number };
+        if (found.any) {
+            undoPrerelease(this.db, 'its sessions');
+        }
+        return found.any === 1;
     }
 
     releaseLease(role: string, holder: string): void {
