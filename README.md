@@ -224,7 +224,7 @@ the limit under the account that reached it; one from before Claude Code
 recorded accounts counts under the first account it records, its older
 requests included. Sessions whose transcripts record no account are *Not
 recorded*: those Claude Code wrote before it began
-recording accounts, around version 2.1.318 in October 2026, those signed in
+recording accounts, around version 2.1.318 in November 2026, those signed in
 with an API key or through a cloud provider, and those whose transcripts
 Claude Code had deleted before this version first read the history.
 

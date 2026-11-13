@@ -120,7 +120,7 @@ export interface LimitHit {
  * The Claude account a session was signed in to, as its main transcript
  * records it: ids only, never a name. A session signed in with an API key,
  * or through a cloud provider, records none, and so did Claude Code before
- * version 2.1.318 or so, in October 2026.
+ * version 2.1.318 or so, in November 2026.
  */
 export interface SessionOwner {
     accountUuid: string;

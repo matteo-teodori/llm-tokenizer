@@ -16,7 +16,7 @@
  * - `journal.jsonl` holds no usage (0 markers in 6,730 lines) and is skipped;
  * - a session's owner, the Claude account and organization it was signed in
  *   to, is a `session-owner` record in its main transcript only (863 of 863
- *   on 5,102 files), written since Claude Code 2.1.318 or so, in October
+ *   on 5,102 files), written since Claude Code 2.1.318 or so, in November
  *   2026: when a session starts, before its first request, again with the
  *   rest of its metadata, and when it is resumed under another account, so
  *   that a session from before then, resumed since, has one too, after its

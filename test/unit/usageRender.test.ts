@@ -1177,7 +1177,7 @@ suite('usage page', () => {
         assert.ok(body.includes(`data-action="nameAccount" data-account="${ID_A}" data-key="${KEY_A}" aria-label="Name a@example.com (${HOSTILE_ESCAPED})"`), body);
         assert.ok(body.includes(`data-action="nameAccount" data-account="${ID_B}" data-key="${ID_B}/" aria-label="Name Account 2"`));
         assert.strictEqual((body.match(/data-action="nameAccount"/g) ?? []).length, 2);
-        assert.ok(body.includes('Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so'));
+        assert.ok(body.includes('Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in November 2026,'));
         assert.ok(body.includes('and those Claude Code had deleted before this version first read them.'));
         // Sorted as the other tables, by the label as shown.
         assert.ok(body.includes('data-k-label="a@example.com (') && body.includes('data-k-label="Account 2"'));

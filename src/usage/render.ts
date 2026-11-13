@@ -629,7 +629,7 @@ function accounts(report: UsageReport, view: PanelView): string {
         ${capNote(report.omitted.accounts, 'accounts')}
         <p class="note">An account is the Claude account and organization a request was made with, as its session's transcript records it, its subagents' included: a session resumed under another account counts under each for its own requests, and one from before Claude Code recorded accounts under the first it records. Its name is the one Claude Code gave it while this history was kept, or the one you give it.${
             unrecorded
-                ? ' Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in October 2026, those signed in with an API key or through a cloud provider, and those Claude Code had deleted before this version first read them.'
+                ? ' Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in November 2026, those signed in with an API key or through a cloud provider, and those Claude Code had deleted before this version first read them.'
                 : ''
         }</p>
     </section>`;
