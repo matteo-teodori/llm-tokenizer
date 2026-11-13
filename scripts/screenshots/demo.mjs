@@ -331,6 +331,9 @@ session({ project: 'acme-storefront', start: NOW - 95 * 60_000, minutes: 92, cou
 limitHit(sessions[Math.floor(sessions.length * 0.4)], 'five_hour', 3);
 limitHit(sessions[Math.floor(sessions.length * 0.85)], 'five_hour', 2);
 void morning;
+// The client's account, whatever the draws gave the last days: a session of
+// its own two days ago, made last so that every figure before it stays.
+session({ project: 'data-pipeline', start: today - 2 * DAY + 10 * 3_600_000, minutes: 55, count: 60, model: 'claude-sonnet-5-5' });
 
 for (const [file, lines] of files) {
     mkdirSync(dirname(file), { recursive: true });
@@ -394,6 +397,10 @@ function keyOf(account) {
 function accountLabels() {
     const used = Object.entries(ACCOUNTS).filter(([, a]) => byAccount[keyOf(a)]);
     const order = used.map(([, a]) => keyOf(a)).sort((a, b) => byAccount[a].first - byAccount[b].first);
+    // What the README's images and its alt texts show.
+    if (used.length !== 3 || order.indexOf(keyOf(ACCOUNTS.client)) !== 2) {
+        throw new Error('the demo has not used its three accounts, the client last: no Account 3 to show');
+    }
     const labels = used.map(([name, a]) =>
         name === 'work' ? `${a.email} (${a.organization})` : name === 'personal' ? a.email : `Account ${order.indexOf(keyOf(a)) + 1}`,
     );
