@@ -527,6 +527,18 @@ async function setScope(usage, scope) {
     await sleep(700);
 }
 
+/** Choose an account in the filter, by its key, or `all`. */
+async function setAccount(usage, account) {
+    await usage.selectOption('select[data-account-filter]', account);
+    await usage.waitForFunction(
+        key => document.querySelector('select[data-account-filter] option[selected]')?.getAttribute('value') === key,
+        account,
+        { timeout: 10_000 },
+    );
+    await readThrough(usage);
+    await sleep(700);
+}
+
 /** The total's line says `requests` and `sessions`, as the demo wrote them. */
 async function expectCounts(usage, requests, sessions, what) {
     const meta = await usage.locator('.hero-meta').first().innerText();
@@ -551,6 +563,11 @@ async function checkDemo(usage, profile) {
     });
     if (JSON.stringify(projects) !== JSON.stringify(demo.projects)) {
         throw new Error(`the panel's projects are not the demo's: ${projects.length} of them`);
+    }
+    // Its accounts, named from the demo's own Claude Code configuration file.
+    const accounts = await usage.evaluate(() => [...document.querySelectorAll('#accounts .account-name')].map(e => e.textContent?.trim() ?? '').sort());
+    if (JSON.stringify(accounts) !== JSON.stringify([...demo.accounts.labels].sort())) {
+        throw new Error(`the panel's accounts are not the demo's: ${JSON.stringify(accounts)}`);
     }
     const logs = join(profile, 'logs');
     const found = readdirSync(logs, { recursive: true }).filter(f => String(f).endsWith('LLM Tokenizer.log'));
@@ -725,6 +742,17 @@ async function gif() {
         await expectCounts(usage, demo.requests, demo.sessions, 'the all projects frame');
         await uncut(usage, 20);
         await frame(1.2, [usage]);
+        // The accounts, then the work one alone.
+        await scrollTo(usage, 'accounts');
+        await frame(2.6, [usage]);
+        await usage.evaluate(() => window.scrollTo(0, 0));
+        await setAccount(usage, demo.accounts.work);
+        const work = demo.byAccount[demo.accounts.work];
+        await expectCounts(usage, work.requests, work.sessions, 'the work account frame');
+        await uncut(usage, 20);
+        await frame(2.0, [usage]);
+        await setAccount(usage, 'all');
+        await expectCounts(usage, demo.requests, demo.sessions, 'the all accounts frame');
         await scrollTo(usage, 'projects');
         await frame(2.6, [usage]);
         // The sessions, a page on: the pager says which ten are shown.

@@ -7,7 +7,9 @@ update the README's alt texts to the figures they then show.
 Everything shown is invented. `demo.mjs` writes a home holding the demo
 workspace, acme-storefront (the files git tracks in `workspace/`), and 30 days
 of Claude Code records for it and four other invented projects, from a seeded
-generator. No one's own usage is read, and `capture.mjs` checks that.
+generator, on three invented Claude accounts, which a Claude Code
+configuration file of its own names. No one's own usage is read, and
+`capture.mjs` checks that.
 
 ## Prerequisites
 

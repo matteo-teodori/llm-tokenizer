@@ -1,7 +1,9 @@
 /**
  * An invented home for the README's screenshots: the demo workspace,
  * acme-storefront, and 30 days of Claude Code records for it and four other
- * invented projects, laid out as Claude Code lays out its own.
+ * invented projects, laid out as Claude Code lays out its own, on three
+ * invented Claude accounts, with Claude Code's own configuration file naming
+ * the one signed in now and one other.
  *
  *   node demo.mjs <work dir> [now, ISO 8601]
  *
@@ -31,6 +33,7 @@ refuseEarlyHours(NOW);
 
 const home = join(work, 'home');
 const claude = join(home, '.claude');
+const today = Math.floor(NOW / DAY) * DAY;
 rmSync(home, { recursive: true, force: true });
 mkdirSync(join(claude, 'projects'), { recursive: true });
 mkdirSync(join(claude, 'sessions'), { recursive: true });
@@ -70,7 +73,34 @@ const pick = weighted => {
 const hex = n => Array.from({ length: n }, () => Math.floor(rand() * 16).toString(16)).join('');
 const uuid = () => `${hex(8)}-${hex(4)}-4${hex(3)}-${pick([['8', 1], ['9', 1], ['a', 1], ['b', 1]])}${hex(3)}-${hex(12)}`;
 
+/** Before Claude Code recorded a session's account, and after. */
 const VERSION = '2.1.296';
+const OWNER_VERSION = '2.1.320';
+/**
+ * The invented accounts: work, signed in now; a personal one, which Claude
+ * Code's list of accounts names; and one it never named. Chosen by project
+ * and day, never by the generator, so that every figure stays as it was.
+ */
+const ACCOUNTS = {
+    work: { accountUuid: '5f3c2a1e-8b7d-4c6e-9a2f-1d0e3b4c5a6f', organizationUuid: 'c0ffee00-1234-4abc-8def-0123456789ab', email: 'dana@acme.example', organization: 'Acme Corp' },
+    personal: { accountUuid: '7a9b8c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d', organizationUuid: '3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b', email: 'dana@example.com', organization: "dana@example.com's Organization" },
+    client: { accountUuid: '2b4d6f80-1a3c-4e5f-8a7b-9c0d1e2f3a4b', organizationUuid: '6c5b4a39-2817-4f6e-9d5c-4b3a29180f7e' },
+};
+/** The first days, before Claude Code recorded accounts: their sessions record none. */
+const UNRECORDED_DAYS = 6;
+/** The account a session was signed in to, by its project and how many days ago it began. */
+function accountOf(project, daysAgo) {
+    if (daysAgo >= 30 - UNRECORDED_DAYS) {
+        return null;
+    }
+    if (project === 'design-system' || project === 'mobile-app') {
+        return ACCOUNTS.personal;
+    }
+    if (project === 'data-pipeline' && daysAgo >= 12 && daysAgo <= 18) {
+        return ACCOUNTS.client;
+    }
+    return ACCOUNTS.work;
+}
 const PROJECTS = [
     ['acme-storefront', 38],
     ['inventory-api', 24],
@@ -94,6 +124,8 @@ const EFFORT = {
 const totals = { requests: 0, input: 0, cacheCreation: 0, cacheRead: 0, output: 0, thinking: 0, sessions: 0, compactions: 0, limits: 0 };
 /** Requests and sessions by project, for the pages' per-project figures. */
 const byProject = {};
+/** Requests and sessions by account's key, as the panel keys them, for the account filter's figures, and when each was first used. */
+const byAccount = {};
 const files = new Map();
 const write = (file, line) => {
     const lines = files.get(file) ?? [];
@@ -184,8 +216,14 @@ function session({ project, start, minutes, count, model, live }) {
     const sessionId = live ?? uuid();
     const dir = join(claude, 'projects', projectDir);
     const main = join(dir, `${sessionId}.jsonl`);
-    const base = { sessionId, version: VERSION, cwd };
+    const account = accountOf(project, Math.floor((today - Math.floor(start / DAY) * DAY) / DAY));
+    const base = { sessionId, version: account ? OWNER_VERSION : VERSION, cwd };
+    // As Claude Code writes it: with the session's metadata, its account's ids only.
+    const owner = account && { type: 'session-owner', accountUuid: account.accountUuid, organizationUuid: account.organizationUuid, sessionId };
     write(main, { type: 'user', uuid: uuid(), timestamp: iso(start), ...base, message: { role: 'user', content: '(demo)' } });
+    if (owner) {
+        write(main, owner);
+    }
     const effort = pick(EFFORT[model]);
     const span = minutes * 60_000;
     const end = requests(main, base, {
@@ -229,10 +267,19 @@ function session({ project, start, minutes, count, model, live }) {
             });
         }
     }
+    if (owner) {
+        // Written again with the rest of the metadata, as Claude Code does.
+        write(main, owner);
+    }
     totals.sessions++;
     const own = (byProject[project] ??= { requests: 0, sessions: 0 });
     own.requests += totals.requests - before;
     own.sessions++;
+    const key = account ? `${account.accountUuid}/${account.organizationUuid}` : 'none';
+    const mine = (byAccount[key] ??= { requests: 0, sessions: 0, first: start });
+    mine.requests += totals.requests - before;
+    mine.sessions++;
+    mine.first = Math.min(mine.first, start);
     return { main, base, end };
 }
 
@@ -253,7 +300,6 @@ function limitHit({ main, base, end }, kind, resetHours) {
 }
 
 // ── 30 days, today included, in UTC ────────────────────────────────────────
-const today = Math.floor(NOW / DAY) * DAY;
 const sessions = [];
 for (let d = 29; d >= 1; d--) {
     const day = today - d * DAY;
@@ -281,6 +327,34 @@ for (const [file, lines] of files) {
     writeFileSync(file, lines.join('\n') + '\n');
 }
 
+// Claude Code's configuration file, where CLAUDE_CONFIG_DIR puts it: the
+// account signed in now, and its list of the accounts it has known. The
+// client's account is in neither, so the panel numbers it.
+const { work: workAccount, personal } = ACCOUNTS;
+writeFileSync(
+    join(claude, '.claude.json'),
+    JSON.stringify(
+        {
+            numStartups: 214,
+            projects: { [workspace]: { allowedTools: [], hasTrustDialogAccepted: true } },
+            oauthAccount: {
+                accountUuid: workAccount.accountUuid,
+                emailAddress: workAccount.email,
+                organizationUuid: workAccount.organizationUuid,
+                organizationName: workAccount.organization,
+                displayName: 'Dana',
+                organizationRole: 'user',
+            },
+            knownAccounts: {
+                [workAccount.accountUuid]: { emailAddress: workAccount.email, organizations: { [workAccount.organizationUuid]: workAccount.organization } },
+                [personal.accountUuid]: { emailAddress: personal.email, organizations: { [personal.organizationUuid]: personal.organization } },
+            },
+        },
+        null,
+        2,
+    ),
+);
+
 const processed = totals.input + totals.cacheCreation + totals.cacheRead + totals.output;
 console.log(
     JSON.stringify({
@@ -293,5 +367,25 @@ console.log(
         files: files.size,
         projects: Object.keys(byProject).sort(),
         byProject,
+        byAccount,
+        accounts: { work: keyOf(workAccount), labels: accountLabels() },
     }),
 );
+
+function keyOf(account) {
+    return `${account.accountUuid}/${account.organizationUuid}`;
+}
+
+/**
+ * The labels the panel must show for the accounts the demo used: Claude
+ * Code's for the two its configuration names, the personal one without its
+ * organization, and a number by first use for the one it does not.
+ */
+function accountLabels() {
+    const used = Object.entries(ACCOUNTS).filter(([, a]) => byAccount[keyOf(a)]);
+    const order = used.map(([, a]) => keyOf(a)).sort((a, b) => byAccount[a].first - byAccount[b].first);
+    const labels = used.map(([name, a]) =>
+        name === 'work' ? `${a.email} (${a.organization})` : name === 'personal' ? a.email : `Account ${order.indexOf(keyOf(a)) + 1}`,
+    );
+    return byAccount.none ? [...labels, 'Not recorded'] : labels;
+}
