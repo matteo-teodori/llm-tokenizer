@@ -370,7 +370,8 @@ export class UsageService implements vscode.Disposable {
     }
 
     /** The report for one range and scope, or undefined while off or failing. */
-    async report(range: RangeKey, zone: string, workspaceFolders: string[] | null): Promise<UsageReport | undefined> {
+    /** `account`: one account's sessions only, by key (see accounts.ts); every session when absent. */
+    async report(range: RangeKey, zone: string, workspaceFolders: string[] | null, account?: string): Promise<UsageReport | undefined> {
         if (!this.enabled) {
             return undefined;
         }
@@ -387,8 +388,19 @@ export class UsageService implements vscode.Disposable {
         // How many files the pass has is worth a walk of the roots only once
         // the page says how far it has gone.
         const progress = this.reading?.by === 'this window';
+        // Where the account signed in now is named: as the last pass found the roots.
+        const accountFiles = this.resolved?.accountFiles ?? [];
         const response = await this.ask(
-            { type: 'query', storeFile: this.deps.storeFile, range, zone, workspaceFolders, ...(progress ? { progress } : {}) },
+            {
+                type: 'query',
+                storeFile: this.deps.storeFile,
+                range,
+                zone,
+                workspaceFolders,
+                ...(progress ? { progress } : {}),
+                ...(account !== undefined ? { account } : {}),
+                accountFiles,
+            },
             'look',
         );
         if (response.type !== 'report') {
@@ -637,6 +649,7 @@ export class UsageService implements vscode.Disposable {
                 paths,
                 holder: this.holder,
                 crashed: this.crashed,
+                accountFiles: resolved.accountFiles,
             },
             'pass',
         );

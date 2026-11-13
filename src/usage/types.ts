@@ -107,6 +107,18 @@ export interface LimitHit {
     resetsAt: number | null;
 }
 
+/**
+ * The Claude account a session was signed in to, as its main transcript
+ * records it: ids only, never a name. A session signed in with an API key,
+ * or through a cloud provider, records none, and so did Claude Code before
+ * version 2.1.318 or so, in October 2026.
+ */
+export interface SessionOwner {
+    accountUuid: string;
+    /** Null where the record names no organization. */
+    organizationUuid: string | null;
+}
+
 /** What one import learnt about a session, merged into what is stored. */
 export interface SessionSighting {
     sessionId: string;
@@ -122,6 +134,12 @@ export interface SessionSighting {
     projectDir: string;
     firstTs: number | null;
     lastTs: number | null;
+    /**
+     * Its owner, when this import read one: the last read replaces the one
+     * stored, and an import that read none leaves it be. Null or absent,
+     * none read.
+     */
+    owner?: SessionOwner | null;
 }
 
 /** One group of the store's bucket sums: counters summed, a missing one adding nothing. */

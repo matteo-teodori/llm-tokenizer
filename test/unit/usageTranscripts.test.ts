@@ -15,7 +15,9 @@ import {
     MAX_COUNTER,
     MAX_LINE_BYTES,
     MAX_PARSED_LINE_BYTES,
+    OWNERS_SINCE,
     PARSER_VERSION,
+    ROWS_SINCE,
     newerVersion,
     readTranscript,
     walkProjects,
@@ -592,8 +594,8 @@ suite('usage transcripts', () => {
         assert.ok(checkpoint);
         const [kept] = [...store.requests()];
         store.transaction(() => {
-            store.putFile({ ...checkpoint, parserVersion: PARSER_VERSION - 1 });
-            store.upsertRequests([{ ...kept, messageId: 'gone', parserVersion: PARSER_VERSION - 1 }]);
+            store.putFile({ ...checkpoint, parserVersion: ROWS_SINCE - 1 });
+            store.upsertRequests([{ ...kept, messageId: 'gone', parserVersion: ROWS_SINCE - 1 }]);
         });
 
         const summary = await importRoots(store, [tmp]);
@@ -605,7 +607,7 @@ suite('usage transcripts', () => {
         const file = path.join(tmp, 's1.jsonl');
         const a = line(assistant('m1', 5));
         fs.writeFileSync(file, a + line(assistant('m2', 7)));
-        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: PARSER_VERSION - 1 };
+        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: ROWS_SINCE - 1 };
         fs.appendFileSync(file, line(assistant('m3', 9)));
         assert.strictEqual(readTranscript(mainFile(file), older).restarted, 'parser');
         fs.writeFileSync(file, a);
@@ -637,10 +639,10 @@ suite('usage transcripts', () => {
                 assert.ok(checkpoint);
                 const rows = [...store.requests()].filter(r => r.file === file);
                 store.deleteRequestsFromFile('claude-code', file);
-                store.upsertRequests(rows.map(r => ({ ...r, parserVersion: PARSER_VERSION - 1 })));
-                store.putFile({ ...checkpoint, parserVersion: PARSER_VERSION - 1 });
+                store.upsertRequests(rows.map(r => ({ ...r, parserVersion: ROWS_SINCE - 1 })));
+                store.putFile({ ...checkpoint, parserVersion: ROWS_SINCE - 1 });
                 if (file.endsWith('whole.jsonl')) {
-                    store.upsertRequests([{ ...rows[0], messageId: 'gone', parserVersion: PARSER_VERSION - 1 }]);
+                    store.upsertRequests([{ ...rows[0], messageId: 'gone', parserVersion: ROWS_SINCE - 1 }]);
                 }
             }
         });
@@ -654,7 +656,7 @@ suite('usage transcripts', () => {
 
         const summary = await importRoots(store, [tmp]);
         assert.strictEqual(summary.restarted, 4);
-        const older = PARSER_VERSION - 1;
+        const older = ROWS_SINCE - 1;
         assert.deepStrictEqual(
             [...store.requests()].map(r => [r.messageId, r.parserVersion]),
             [
@@ -664,6 +666,176 @@ suite('usage transcripts', () => {
                 ['whole0', PARSER_VERSION], ['whole1', PARSER_VERSION], ['whole2', PARSER_VERSION],
             ],
         );
+    });
+
+    /** A session-owner record as Claude Code writes it: its type first, then the owner's ids, then the session. */
+    function owner(accountUuid: unknown, organizationUuid?: unknown, sessionId = 's1'): object {
+        return { type: 'session-owner', accountUuid, ...(organizationUuid === undefined ? {} : { organizationUuid }), sessionId };
+    }
+    const ACCOUNT_A = '0f1e2d3c-4b5a-4968-8776-655443322110';
+    const ORG_A = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+    const ACCOUNT_B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+
+    test("a session's owner is read from its main transcript, the last one read, its ids lower-cased", () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(
+            file,
+            line(owner(ACCOUNT_A, ORG_A)) +
+                line(assistant('m1', 5)) +
+                // Claude Code writes the ids as the account's profile has them.
+                line(owner(ACCOUNT_B.toUpperCase())) +
+                line(owner(ACCOUNT_A, ORG_A, 'another-session')) +
+                line(assistant('m2', 7)),
+        );
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual(Object.fromEntries(read.owners), {
+            s1: { accountUuid: ACCOUNT_B, organizationUuid: null },
+            'another-session': { accountUuid: ACCOUNT_A, organizationUuid: ORG_A },
+        });
+        assert.deepStrictEqual(read.requests.map(r => r.messageId), ['m1', 'm2']);
+        assert.deepStrictEqual(Object.fromEntries(read.malformed), {});
+    });
+
+    test("an owner record that is not one is counted as a bad field, and a subagent's is never looked at", () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(
+            file,
+            line(owner('not-an-id', ORG_A)) +
+                line(owner(ACCOUNT_A, 42)) +
+                line(owner(ACCOUNT_A, `${ORG_A}x`)) +
+                line(owner(`${ACCOUNT_A} `)) +
+                line(owner(ACCOUNT_A, '')) +
+                line(assistant('m1', 5)),
+        );
+        const read = readTranscript(mainFile(file), undefined);
+        // An empty organization is one not named.
+        assert.deepStrictEqual(Object.fromEntries(read.owners), { s1: { accountUuid: ACCOUNT_A, organizationUuid: null } });
+        assert.deepStrictEqual(Object.fromEntries(read.malformed), { 'bad-field:session-owner': 4 });
+
+        const agent = path.join(tmp, 'agent-a1.jsonl');
+        fs.writeFileSync(agent, line(owner(ACCOUNT_A, ORG_A)) + line(owner('not-an-id')) + line(assistant('m9', 1, { isSidechain: true })));
+        const task = readTranscript({ ...mainFile(agent), kind: 'task', agentId: 'a1' }, undefined);
+        assert.deepStrictEqual([task.owners.size, Object.fromEntries(task.malformed), task.requests.length], [0, {}, 1]);
+    });
+
+    test("a main transcript an older parser read is searched for its owner before the checkpoint, and read on from it", () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(file, line(assistant('m1', 5)) + line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m2', 7)));
+        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 };
+        assert.ok(OWNERS_SINCE - 1 >= ROWS_SINCE, "the older parser's rows are kept");
+
+        // Nothing new: the owner is all there is to read.
+        const again = readTranscript(mainFile(file), older);
+        assert.deepStrictEqual(
+            [again.unchanged, again.restarted, again.requests.length, Object.fromEntries(again.owners), again.checkpoint.offset, again.checkpoint.parserVersion],
+            [false, null, 0, { s1: { accountUuid: ACCOUNT_A, organizationUuid: ORG_A } }, older.offset, PARSER_VERSION],
+        );
+        // Something new: only it gives rows, and an owner after the
+        // checkpoint is the last one read.
+        fs.appendFileSync(file, line(assistant('m3', 9)) + line(owner(ACCOUNT_B)));
+        const on = readTranscript(mainFile(file), older);
+        assert.deepStrictEqual(
+            [on.restarted, on.requests.map(r => r.messageId), Object.fromEntries(on.owners)],
+            [null, ['m3'], { s1: { accountUuid: ACCOUNT_B, organizationUuid: null } }],
+        );
+        // Read by this parser, the bytes before the checkpoint are not searched again.
+        fs.appendFileSync(file, line(assistant('m4', 1)));
+        const next = readTranscript(mainFile(file), on.checkpoint);
+        assert.deepStrictEqual([next.requests.map(r => r.messageId), next.owners.size], [['m4'], 0]);
+    });
+
+    test("bytes searched for an owner say nothing again of what was counted when they were read", () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(
+            file,
+            '{"type":"assistant"' + ' '.repeat(MAX_LINE_BYTES) + '\n' + '{"type":"assistant", oops}\n' + line(owner(ACCOUNT_A)) + line(assistant('m1', 5)),
+        );
+        const first = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual([first.oversize, first.malformed.get('json-syntax')], [1, 1]);
+        const scanned = readTranscript(mainFile(file), { ...first.checkpoint, parserVersion: OWNERS_SINCE - 1 });
+        assert.deepStrictEqual(
+            [scanned.oversize, Object.fromEntries(scanned.malformed), scanned.requests.length, scanned.owners.size],
+            [0, {}, 0, 1],
+        );
+    });
+
+    test('an owner record too long to parse is never parsed, read or searched for', () => {
+        // The worker's heap is 128 MB: see MAX_PARSED_LINE_BYTES.
+        const file = path.join(tmp, 's1.jsonl');
+        const long = JSON.stringify({ type: 'session-owner', accountUuid: ACCOUNT_A, sessionId: 's1', pad: ' '.repeat(MAX_PARSED_LINE_BYTES) }) + '\n';
+        fs.writeFileSync(file, long + line(assistant('m1', 5)));
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual([read.owners.size, read.oversize], [0, 1]);
+        const scanned = readTranscript(mainFile(file), { ...read.checkpoint, parserVersion: OWNERS_SINCE - 1 });
+        assert.deepStrictEqual([scanned.owners.size, scanned.oversize], [0, 0]);
+    });
+
+    test("a subagent's transcript an older parser read is read on from its checkpoint, never searched", () => {
+        const agent = path.join(tmp, 'agent-a1.jsonl');
+        fs.writeFileSync(agent, line(owner(ACCOUNT_A)) + line(assistant('m1', 5, { isSidechain: true })));
+        const task = { ...mainFile(agent), kind: 'task' as const, agentId: 'a1' };
+        const older = { ...readTranscript(task, undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 };
+        const again = readTranscript(task, older);
+        assert.deepStrictEqual([again.restarted, again.requests.length, again.owners.size, again.checkpoint.parserVersion], [null, 0, 0, PARSER_VERSION]);
+    });
+
+    test("after an older parser's import, a pass gives each session its owner, and reads no row again", async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        const agent = path.join(dir, 's1', 'subagents', 'agent-a1.jsonl');
+        fs.writeFileSync(main, line(assistant('m1', 5)) + line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m2', 7)));
+        fs.writeFileSync(agent, line(assistant('a1', 3, { isSidechain: true, agentId: 'a1' })));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(
+            store.sessions().map(s => [s.sessionId, s.owner]),
+            [['s1', { accountUuid: ACCOUNT_A, organizationUuid: ORG_A }]],
+        );
+
+        // As the older parser left it: every row and checkpoint its own, and no owner.
+        const older = OWNERS_SINCE - 1;
+        store.transaction(() => {
+            for (const file of [main, agent].map(f => fs.realpathSync(f))) {
+                const checkpoint = store.getFile('claude-code', file);
+                assert.ok(checkpoint);
+                const rows = [...store.requests()].filter(r => r.file === file);
+                store.deleteRequestsFromFile('claude-code', file);
+                store.upsertRequests(rows.map(r => ({ ...r, parserVersion: older })));
+                store.putFile({ ...checkpoint, parserVersion: older });
+            }
+        });
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+        raw.exec('UPDATE sessions SET account_uuid = NULL, organization_uuid = NULL');
+        raw.close();
+        assert.deepStrictEqual(store.sessions().map(s => s.owner), [null]);
+
+        const summary = await importRoots(store, [tmp]);
+        assert.deepStrictEqual([summary.read, summary.restarted, summary.records], [2, 0, 0]);
+        assert.deepStrictEqual(store.sessions().map(s => s.owner), [{ accountUuid: ACCOUNT_A, organizationUuid: ORG_A }]);
+        assert.deepStrictEqual([...store.requests()].map(r => [r.messageId, r.parserVersion]), [['a1', older], ['m1', older], ['m2', older]]);
+        assert.deepStrictEqual(
+            [main, agent].map(f => store.getFile('claude-code', fs.realpathSync(f))?.parserVersion),
+            [PARSER_VERSION, PARSER_VERSION],
+        );
+        // And then it is a file like any other: unchanged, not even read.
+        assert.strictEqual((await importRoots(store, [tmp])).unchanged, 2);
+    });
+
+    test("a session's owner is the last one read: a later read with none keeps it, one with another replaces it", async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(dir, { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        fs.writeFileSync(main, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5)));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        fs.appendFileSync(main, line(assistant('m2', 5)));
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(store.sessions().map(s => s.owner), [{ accountUuid: ACCOUNT_A, organizationUuid: ORG_A }]);
+        fs.appendFileSync(main, line(owner(ACCOUNT_B)));
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(store.sessions().map(s => s.owner), [{ accountUuid: ACCOUNT_B, organizationUuid: null }]);
     });
 
     test('an unchanged file is not even opened', async function () {

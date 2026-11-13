@@ -28,6 +28,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
         to: '2026-10-09',
         zone: 'Europe/Rome',
         scope: 'all',
+        account: 'all',
         totals: t,
         days: [{ date: '2026-10-09', totals: t }],
         models: [{ model: HOSTILE, variant: '1m', totals: t }],
@@ -39,6 +40,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
                 sessionId: HOSTILE,
                 project: { kind: 'root', path: `/repo/${HOSTILE}` },
                 label: HOSTILE,
+                account: 'none',
                 firstTs: Date.UTC(2026, 9, 9, 10),
                 lastTs: Date.UTC(2026, 9, 9, 11, 30),
                 activeMs: 47 * 60_000,
@@ -48,7 +50,11 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
             },
         ],
         dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: t }],
-        limitWindows: [{ limitType: HOSTILE, resetsAt: 1791561600, hits: 2, firstTs: Date.UTC(2026, 9, 9, 10, 6), date: '2026-10-09' }],
+        accounts: [{ key: 'none', owner: null, sessions: 1, totals: t, models: [], projects: [HOSTILE] }],
+        accountsSeen: [{ key: 'none', owner: null, sessions: 1, firstTs: Date.UTC(2026, 9, 9, 10), lastTs: Date.UTC(2026, 9, 9, 11, 30) }],
+        accountNames: [],
+        currentAccounts: [],
+        limitWindows: [{ account: 'none', limitType: HOSTILE, resetsAt: 1791561600, hits: 2, firstTs: Date.UTC(2026, 9, 9, 10, 6), date: '2026-10-09' }],
         omitted: { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 },
         coverage: { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 3, ahead: 0, files: 4, oversizeLines: 0, malformedLines: 0 },
         ...overrides,
@@ -740,7 +746,7 @@ suite('usage page', () => {
     });
 
     test('Usage limits reached lists the newest first, a page at a time', () => {
-        const windows = Array.from({ length: 12 }, (_, i) => ({ limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, i), date: '2026-10-09' }));
+        const windows = Array.from({ length: 12 }, (_, i) => ({ account: 'none', limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, i), date: '2026-10-09' }));
         const body = renderFragments(view({ report: report({ limitWindows: windows }) })).body;
         const newest = body.indexOf('refused from 2026-10-09 11:00');
         const oldest = body.indexOf('refused from 2026-10-09 00:00');

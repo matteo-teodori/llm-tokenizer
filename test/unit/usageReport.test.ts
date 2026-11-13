@@ -235,7 +235,7 @@ suite('usage report', () => {
         );
         assert.deepStrictEqual(session.compactions.map(c => [c.trigger, c.preTokens, c.postTokens]), [['auto', 160_000, 12_000]]);
         assert.deepStrictEqual(report.limitWindows, [
-            { limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
+            { account: 'none', limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
         ]);
         assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 });
         assert.deepStrictEqual([report.coverage.requests, report.coverage.files], [4, 4]);
@@ -709,6 +709,143 @@ suite('usage report', () => {
         assert.strictEqual(report.limitWindows.length, 1);
     });
 
+    describeAccounts();
+
+    /** The account tests: sessions of two accounts, one with two organizations, and one that records none. */
+    function describeAccounts(): void {
+        const A = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const ORG_A = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+        const ORG_A2 = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
+        const B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+        const owner = (sessionId: string, accountUuid: string, organizationUuid?: string) => ({ type: 'session-owner', accountUuid, organizationUuid, sessionId });
+        const limitHit = (sessionId: string, uuid: string, timestamp: string) => ({
+            type: 'assistant',
+            uuid,
+            timestamp,
+            sessionId,
+            quotaLimits: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: 1791561600 },
+            message: { id: `msg-${uuid}`, model: '<synthetic>', role: 'assistant', content: [], usage: { input_tokens: 0, output_tokens: 0 } },
+        });
+        const keyA = `${A}/${ORG_A}`;
+        const keyA2 = `${A}/${ORG_A2}`;
+        const keyB = `${B}/`;
+
+        async function history(): Promise<UsageStore> {
+            transcript('-repo-one', 'a1.jsonl', [
+                userRecord('a1', '/repo/one', '2026-10-08T10:00:00Z'),
+                assistantRecord('a1', 'm-a1', '2026-10-08T10:00:01Z', 100),
+                owner('a1', A, ORG_A),
+                limitHit('a1', 'hit-a', '2026-10-08T10:05:00Z'),
+            ]);
+            // Its subagent's tokens are its account's, though only the main transcript names it.
+            transcript('-repo-one', path.join('a1', 'subagents', 'agent-x.jsonl'), [
+                { ...assistantRecord('a1', 'm-a1-agent', '2026-10-08T10:02:00Z', 50), isSidechain: true, agentId: 'x' },
+            ]);
+            transcript('-repo-two', 'a2.jsonl', [
+                owner('a2', A, ORG_A2),
+                userRecord('a2', '/repo/two', '2026-10-09T09:00:00Z'),
+                assistantRecord('a2', 'm-a2', '2026-10-09T09:00:01Z', 30),
+            ]);
+            transcript('-repo-two', 'b1.jsonl', [
+                userRecord('b1', '/repo/two', '2026-10-07T08:00:00Z'),
+                assistantRecord('b1', 'm-b1', '2026-10-09T08:00:01Z', 300),
+                owner('b1', B),
+                limitHit('b1', 'hit-b', '2026-10-09T08:05:00Z'),
+            ]);
+            // B's second session, in another project, with fewer tokens: its projects, the most processed first.
+            transcript('-repo-one', 'b2.jsonl', [
+                userRecord('b2', '/repo/one', '2026-10-09T13:00:00Z'),
+                assistantRecord('b2', 'm-b2', '2026-10-09T13:00:01Z', 5),
+                owner('b2', B),
+            ]);
+            transcript('-repo-one', 'n1.jsonl', [
+                userRecord('n1', '/repo/one', '2026-10-09T07:00:00Z'),
+                assistantRecord('n1', 'm-n1', '2026-10-09T07:00:01Z', 7),
+                limitHit('n1', 'hit-n', '2026-10-09T07:05:00Z'),
+            ]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            return store;
+        }
+
+        test('tokens are split by account and organization, subagents included, the sessions that record none in a row of their own', async () => {
+            const report = queryReport(await history(), query());
+            assert.strictEqual(report.account, 'all');
+            assert.deepStrictEqual(
+                report.accounts.map(a => [a.key, a.sessions, a.totals.output, a.projects]),
+                [
+                    [keyB, 2, 305, ['two', 'one']],
+                    [keyA, 1, 150, ['one']],
+                    [keyA2, 1, 30, ['two']],
+                    ['none', 1, 7, ['one']],
+                ],
+            );
+            assert.deepStrictEqual(
+                report.sessions.map(s => [s.sessionId, s.account]).sort(),
+                [['a1', keyA], ['a2', keyA2], ['b1', keyB], ['b2', keyB], ['n1', 'none']],
+            );
+            // Every account of the history, by when it was first used, the ones with none last.
+            assert.deepStrictEqual(
+                report.accountsSeen.map(a => [a.key, a.sessions, a.firstTs]),
+                [
+                    [keyA, 1, Date.parse('2026-10-08T10:00:01Z')],
+                    [keyB, 2, Date.parse('2026-10-09T08:00:01Z')],
+                    [keyA2, 1, Date.parse('2026-10-09T09:00:01Z')],
+                    ['none', 1, Date.parse('2026-10-09T07:00:01Z')],
+                ],
+            );
+            // A limit is an account's: two accounts' hits of one window are two windows.
+            assert.deepStrictEqual(report.limitWindows.map(w => [w.account, w.hits]), [[keyA, 1], ['none', 1], [keyB, 1]]);
+        });
+
+        test('one account chosen narrows everything to its sessions, its limits included; the accounts seen stay whole', async () => {
+            const store = await history();
+            const a = queryReport(store, query({ account: keyA }));
+            assert.deepStrictEqual(
+                [a.account, a.totals.output, a.sessions.map(s => s.sessionId), a.projects.map(p => p.label), a.accounts.map(r => r.key)],
+                [keyA, 150, ['a1'], ['one'], [keyA]],
+            );
+            assert.deepStrictEqual(a.limitWindows.map(w => [w.account, w.hits]), [[keyA, 1]]);
+            assert.strictEqual(a.accountsSeen.length, 4);
+            const none = queryReport(store, query({ account: 'none' }));
+            assert.deepStrictEqual([none.totals.output, none.sessions.map(s => s.sessionId), none.limitWindows.length], [7, ['n1'], 1]);
+            // An account the history no longer holds, after a Clear say: nothing, rather than everything.
+            const gone = queryReport(store, query({ account: `${B}/${ORG_A}` }));
+            assert.deepStrictEqual([gone.totals.coverage.requests, gone.sessions.length, gone.limitWindows.length, gone.accountsSeen.length], [0, 0, 0, 4]);
+            // With a workspace too: both apply.
+            const both = queryReport(store, query({ account: keyB, workspaceFolders: ['/repo/one'] }));
+            assert.deepStrictEqual([both.totals.output, both.sessions.map(s => s.sessionId)], [5, ['b2']]);
+        });
+
+        test("the names Claude Code gives now stand over those the history kept, which are kept for the rest", async () => {
+            const store = await history();
+            store.transaction(() =>
+                store.rememberAccounts(
+                    'claude-code',
+                    [
+                        { accountUuid: A, organizationUuid: ORG_A, email: 'old@example.com', organizationName: 'Old Org' },
+                        { accountUuid: B, organizationUuid: null, email: 'b@example.com', organizationName: null },
+                    ],
+                    1,
+                ),
+            );
+            const report = queryReport(
+                store,
+                query({
+                    configured: {
+                        names: [{ accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: null }],
+                        current: [{ accountUuid: A, organizationUuid: ORG_A }],
+                    },
+                }),
+            );
+            assert.deepStrictEqual(
+                report.accountNames.map(n => [n.accountUuid, n.email, n.organizationName]).sort(),
+                [[A, 'a@example.com', 'Old Org'], [B, 'b@example.com', null]],
+            );
+            assert.deepStrictEqual(report.currentAccounts, [keyA]);
+        });
+    }
+
     test('a missing counter makes the report a lower bound', () => {
         const store = freshStore();
         store.transaction(() => store.upsertRequests([request({ messageId: 'a', input: null }), request({ messageId: 'b' })]));
@@ -791,6 +928,48 @@ suite('usage worker queries', () => {
         assert.ok(again.type === 'report' && again.report.totals.processed === 1_278, JSON.stringify(again).slice(0, 200));
         const refused = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
         assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'store-read-only');
+    });
+
+    test("through the worker: each account's tokens, its name kept once Claude Code has signed out of it, and one account chosen", async () => {
+        const A = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const root = path.join(tmp, 'root');
+        const projects = path.join(root, 'projects', 'p');
+        fs.mkdirSync(projects, { recursive: true });
+        const owner = (sessionId: string, accountUuid: string) => ({ type: 'session-owner', accountUuid, organizationUuid: '', sessionId });
+        fs.writeFileSync(path.join(projects, 'a.jsonl'), line(owner('a', A)) + line(assistantRecord('a', 'm-a', '2026-10-09T10:00:00Z', 10)));
+        fs.writeFileSync(path.join(projects, 'b.jsonl'), line(assistantRecord('b', 'm-b', '2026-10-09T11:00:00Z', 20)) + line(owner('b', B)));
+        fs.writeFileSync(path.join(projects, 'n.jsonl'), line(assistantRecord('n', 'm-n', '2026-10-09T12:00:00Z', 30)));
+        const config = path.join(root, '.claude.json');
+        const signedIn = (accountUuid: string, emailAddress: string) =>
+            fs.writeFileSync(config, JSON.stringify({ projects: { '/p': {} }, oauthAccount: { accountUuid, emailAddress, organizationName: `${emailAddress}'s Organization` } }));
+        signedIn(A, 'a@example.com');
+
+        const worker = host();
+        const imported = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], accountFiles: [config] });
+        assert.strictEqual(imported.type, 'imported');
+        // Signed in to B now: A keeps the name it had.
+        signedIn(B, 'b@example.com');
+        fs.utimesSync(config, new Date(), new Date(Date.now() + 5_000));
+        const report = await worker.send(ask(storeFile, { accountFiles: [config] }));
+        assert.ok(report.type === 'report');
+        assert.deepStrictEqual(
+            report.report.accounts.map(a => [a.key, a.totals.output]),
+            [['none', 30], [`${B}/`, 20], [`${A}/`, 10]],
+        );
+        assert.deepStrictEqual(
+            report.report.accountNames.map(n => [n.accountUuid, n.email]).sort(),
+            [[A, 'a@example.com'], [B, 'b@example.com']],
+        );
+        assert.deepStrictEqual(report.report.currentAccounts, [`${B}/`]);
+
+        const one = await worker.send(ask(storeFile, { account: `${A}/` }));
+        assert.ok(one.type === 'report' && one.report.totals.output === 10 && one.report.account === `${A}/`, JSON.stringify(one).slice(0, 200));
+        for (const bad of [{ account: 'everyone' }, { accountFiles: 'not a list' as unknown as string[] }, { accountFiles: Array.from({ length: 17 }, () => config) }]) {
+            const refused = await worker.send(ask(storeFile, bad));
+            assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'bad-request', JSON.stringify(bad).slice(0, 80));
+        }
     });
 
     test('a history set aside is named once, by its file name, in the next answer', async () => {

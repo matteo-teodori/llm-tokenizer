@@ -14,9 +14,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { accountKey } from './accounts';
+import type { ConfiguredAccounts } from './claudeAccounts';
 import { comparablePath, isWithin, projectOf, sessionRoot } from './projects';
 import { buildReport, rangeSince, rangeUntil, type RangeKey, type ReportSession, type UsageReport } from './report';
-import type { UsageStore } from './store';
+import type { AccountName, UsageStore } from './store';
 import type { SessionSighting } from './types';
 
 export interface ReportQuery {
@@ -26,6 +28,10 @@ export interface ReportQuery {
     workspaceFolders: string[] | null;
     now: number;
     platform: NodeJS.Platform;
+    /** One account's sessions only, by key; every session when absent. */
+    account?: string;
+    /** What Claude Code's configuration says now of its accounts. */
+    configured?: ConfiguredAccounts;
     /** Resolves symlinks; the path itself when it no longer exists (tests). */
     realpath?: (p: string) => string;
 }
@@ -41,11 +47,36 @@ export function queryReport(store: UsageStore, query: ReportQuery): UsageReport 
         compactions: store.compactions(since, until),
         limitHits: store.limitHits(since, until),
         coverage: store.coverage(until),
+        accountNames: store.accountNames(),
     }));
+    const configured = query.configured ?? { names: [], current: [] };
     return buildReport(
-        { ...input, sessions: reportSessions(input.sessions, query) },
-        { range: query.range, zone: query.zone, now: query.now, scope: query.workspaceFolders ? 'workspace' : 'all' },
+        {
+            ...input,
+            sessions: reportSessions(input.sessions, query),
+            accountNames: mergeNames(configured.names, input.accountNames),
+            currentAccounts: configured.current.map(accountKey),
+        },
+        { range: query.range, zone: query.zone, now: query.now, scope: query.workspaceFolders ? 'workspace' : 'all', account: query.account },
     );
+}
+
+/**
+ * The names Claude Code's configuration gives now, over those the history
+ * kept: a name it gives now is the newer one, and one it no longer gives is
+ * kept as it was.
+ */
+function mergeNames(now: AccountName[], kept: AccountName[]): AccountName[] {
+    const merged = new Map(kept.map(n => [accountKey(n), n]));
+    for (const n of now) {
+        const before = merged.get(accountKey(n));
+        merged.set(accountKey(n), {
+            ...n,
+            email: n.email ?? before?.email ?? null,
+            organizationName: n.organizationName ?? before?.organizationName ?? null,
+        });
+    }
+    return [...merged.values()];
 }
 
 /** Each stored session with its project, its grouping key and whether it is in the workspace. */
@@ -75,6 +106,7 @@ export function reportSessions(
             inWorkspace: real !== null && folders.some(folder => isWithin(real, folder, query.platform)),
             firstTs: s.firstTs,
             lastTs: s.lastTs,
+            owner: s.owner ?? null,
         };
     });
 }

@@ -14,6 +14,11 @@
  *   `…/subagents/workflows/wf_<run>/agent-<id>.jsonl` a workflow agent (the
  *   latter undocumented); a subagent's records are only in its own file;
  * - `journal.jsonl` holds no usage (0 markers in 6,730 lines) and is skipped;
+ * - a session's owner, the Claude account and organization it was signed in
+ *   to, is a `session-owner` record in its main transcript only (863 of 863
+ *   on 5,102 files), written since Claude Code 2.1.318 or so, in October
+ *   2026, and again with the rest of a session's metadata, so that a session
+ *   from before then, resumed since, has one too: ids only, never a name;
  * - `<project>` is the cwd with every non-alphanumeric character replaced, so
  *   it is lossy and never decoded.
  *
@@ -28,13 +33,29 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { isSyntheticModel, variantOf } from './modelIds';
-import type { Compaction, LimitHit, TranscriptKind, UsageRequest } from './types';
+import type { Compaction, LimitHit, SessionOwner, TranscriptKind, UsageRequest } from './types';
 
 /**
- * Bumped whenever what a line becomes changes; a bump re-reads every file.
+ * Bumped whenever what a line becomes changes.
  * 2: each request's `usage.speed` and `usage.inference_geo`.
+ * 3: a session's owner, from its main transcript's `session-owner` records.
  */
-export const PARSER_VERSION = 2;
+export const PARSER_VERSION = 3;
+
+/**
+ * The oldest parser whose rows this one keeps. A file it or a later one read
+ * is read on from its checkpoint; one an older parser read is read again
+ * whole, its rows replaced. Parser 3 only reads lines parser 2 passed over,
+ * so parser 2's rows stand: what parser 3 needs from the bytes before such a
+ * checkpoint, a main transcript's owner, is searched for there alone (see
+ * `OWNERS_SINCE`). On the heaviest history measured that is a scan of the
+ * main transcripts, 678 MB of its 12.6 GB, where reading every file again
+ * would have replaced all of its 405,584 requests.
+ */
+export const ROWS_SINCE = 2;
+
+/** The first parser that reads owners: a main transcript's bytes before an older one's checkpoint are searched for them. */
+export const OWNERS_SINCE = 3;
 
 /** Bytes read at a time. */
 const CHUNK_BYTES = 1 << 20;
@@ -82,6 +103,12 @@ const ASSISTANT = Buffer.from('assistant"');
 const SYSTEM = Buffer.from('system"');
 const COMPACT_BOUNDARY = Buffer.from('"subtype":"compact_boundary"');
 const API_ERROR = Buffer.from('"subtype":"api_error"');
+const SESSION_OWNER = Buffer.from('session-owner"');
+/** The whole key and value, which the scan of bytes an older parser read looks for alone. */
+const SESSION_OWNER_TYPE = Buffer.from('"type":"session-owner"');
+
+/** A Claude account's or organization's id, as Claude Code writes them; lower-cased when kept. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Bounds on the strings kept, so a hostile record cannot bloat the store. */
 const MAX_ID = 200;
@@ -333,6 +360,11 @@ export interface ReadResult {
     firstCwdTs: number | null;
     /** The session id the records gave, for files whose path does not. */
     sessionId: string | null;
+    /**
+     * Each session's owner, by the session its records name: the last one
+     * read, as Claude Code takes it. Only from a main transcript.
+     */
+    owners: Map<string, SessionOwner>;
     newestVersion: string | null;
     synthetic: number;
     apiErrors: number;
@@ -371,6 +403,7 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
             firstCwd: null,
             firstCwdTs: null,
             sessionId: null,
+            owners: new Map(),
             newestVersion: null,
             synthetic: 0,
             apiErrors: 0,
@@ -394,6 +427,11 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
         const start = result.restarted === null ? (previous?.offset ?? 0) : 0;
         result.checkpoint.offset = start;
 
+        if (start > 0 && previous && needsOwnerScan(file, previous)) {
+            // Before the lines read on from the checkpoint, so that the last
+            // owner read is still the last one written.
+            readLines(fd, 0, start, file, result, progress, 'owners');
+        }
         readLines(fd, start, state.size, file, result, progress);
         result.checkpoint.tailHash = tailHash(fd, result.checkpoint.offset);
         return result;
@@ -423,7 +461,15 @@ function restartReason(fd: number, state: FileState, previous: ReadCheckpoint): 
             return 'rewritten';
         }
     }
-    return previous.parserVersion < PARSER_VERSION ? 'parser' : null;
+    return previous.parserVersion < ROWS_SINCE ? 'parser' : null;
+}
+
+/**
+ * Whether the bytes before `previous`'s checkpoint are to be searched for
+ * owner records: a main transcript's, read by a parser before OWNERS_SINCE.
+ */
+export function needsOwnerScan(file: Pick<TranscriptFile, 'kind'>, previous: Pick<ReadCheckpoint, 'parserVersion'>): boolean {
+    return file.kind === 'main' && previous.parserVersion < OWNERS_SINCE;
 }
 
 /** A hash of the TAIL_BYTES before `offset`, or null at the start of a file. */
@@ -443,15 +489,27 @@ function tailHash(fd: number, offset: number): string | null {
  * The unterminated tail is held as a list of chunks and joined only once its
  * newline arrives, never on every read: joining on every chunk is quadratic
  * on a long line.
+ *
+ * `owners`: bytes an older parser has read already, searched for owner
+ * records alone, up to the checkpoint. Nothing else in them is used again,
+ * and a line too long to read was counted when they were read.
  */
-function readLines(fd: number, start: number, size: number, file: TranscriptFile, result: ReadResult, progress?: () => void): void {
+function readLines(
+    fd: number,
+    start: number,
+    size: number,
+    file: TranscriptFile,
+    result: ReadResult,
+    progress?: () => void,
+    mode: 'all' | 'owners' = 'all',
+): void {
     const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
     let position = start;
     let lineStart = start;
     let pending: Buffer[] = [];
     let pendingBytes = 0;
     let skipping = false;
-    let needCwd = file.kind === 'main';
+    let needCwd = file.kind === 'main' && mode === 'all';
 
     while (position < size) {
         progress?.();
@@ -485,15 +543,22 @@ function readLines(fd: number, start: number, size: number, file: TranscriptFile
             if (skipping || pendingBytes + piece.length > MAX_LINE_BYTES) {
                 // Too long to be a record: dropped, and the checkpoint moves
                 // past it anyway.
-                result.oversize++;
-                count(result.malformed, 'oversize');
+                if (mode === 'all') {
+                    result.oversize++;
+                    count(result.malformed, 'oversize');
+                }
                 skipping = false;
             } else {
                 const line = pendingBytes === 0 ? piece : Buffer.concat([...pending, piece], pendingBytes + piece.length);
-                needCwd = useLine(line, lineOffset, file, result, needCwd);
+                if (mode === 'all') {
+                    needCwd = useLine(line, lineOffset, file, result, needCwd);
+                } else {
+                    useOwnerLine(line, file, result);
+                }
             }
             pending = [];
             pendingBytes = 0;
+            // Bytes searched for owners end where the checkpoint is already.
             result.checkpoint.offset = lineStart;
             from = newline + 1;
         }
@@ -503,7 +568,7 @@ function readLines(fd: number, start: number, size: number, file: TranscriptFile
 
 /**
  * What a line may hold, from its bytes: an assistant record, a compaction,
- * an API error, or nothing worth parsing.
+ * an API error, a session's owner, or nothing worth parsing.
  *
  * One pass over the line, for every `"type":"` in it, overlapping ones
  * included, so it finds every `"type":"assistant"` that searching for the
@@ -512,14 +577,19 @@ function readLines(fd: number, start: number, size: number, file: TranscriptFile
  * exactly the lines the three separate needles did, in 1.46 s against
  * 2.78 s: those scanned each user line, most of the bytes, three times.
  */
-function lineKind(bytes: Buffer): 'assistant' | 'compaction' | 'api-error' | null {
+function lineKind(bytes: Buffer): 'assistant' | 'compaction' | 'api-error' | 'owner' | null {
     let system = false;
+    let owner = false;
     for (let i = bytes.indexOf(TYPE_KEY); i !== -1; i = bytes.indexOf(TYPE_KEY, i + 1)) {
         const value = i + TYPE_KEY.length;
         if (startsAt(bytes, ASSISTANT, value)) {
             return 'assistant';
         }
         system ||= startsAt(bytes, SYSTEM, value);
+        owner ||= startsAt(bytes, SESSION_OWNER, value);
+    }
+    if (owner) {
+        return 'owner';
     }
     if (!system) {
         return null;
@@ -588,8 +658,49 @@ function useLine(line: Buffer, offset: number, file: TranscriptFile, result: Rea
         parseCompaction(r, file, result);
     } else if (r.type === 'system' && r.subtype === 'api_error') {
         result.apiErrors++;
+    } else if (r.type === 'session-owner' && file.kind === 'main') {
+        parseOwner(r, file, result);
     }
     return needCwd;
+}
+
+/** A line of bytes an older parser read: used only when it is a session's owner. */
+function useOwnerLine(line: Buffer, file: TranscriptFile, result: ReadResult): void {
+    const bytes = line.length > 0 && line[line.length - 1] === 0x0d ? line.subarray(0, line.length - 1) : line;
+    if (bytes.length > MAX_PARSED_LINE_BYTES || !bytes.includes(SESSION_OWNER_TYPE)) {
+        return;
+    }
+    let record: unknown;
+    try {
+        record = JSON.parse(bytes.toString('utf8'));
+    } catch {
+        // Counted, if it held a record, when these bytes were read.
+        return;
+    }
+    const r = objectOf(record);
+    if (r?.type === 'session-owner') {
+        parseOwner(r, file, result);
+    }
+}
+
+/**
+ * A session's owner: the account and, where it names one, the organization
+ * it was signed in to, by id. Claude Code takes the last such record of a
+ * session as its owner, and so does this.
+ */
+function parseOwner(r: Record<string, unknown>, file: TranscriptFile, result: ReadResult): void {
+    const account = r.accountUuid;
+    const organization = r.organizationUuid;
+    const sessionId = boundedString(r.sessionId, MAX_ID) ?? file.sessionId;
+    const organizationOk = organization === undefined || organization === null || organization === '' || (typeof organization === 'string' && UUID.test(organization));
+    if (typeof account !== 'string' || !UUID.test(account) || !organizationOk || !sessionId) {
+        count(result.malformed, 'bad-field:session-owner');
+        return;
+    }
+    result.owners.set(sessionId, {
+        accountUuid: account.toLowerCase(),
+        organizationUuid: typeof organization === 'string' && organization !== '' ? organization.toLowerCase() : null,
+    });
 }
 
 function parseAssistant(r: Record<string, unknown>, offset: number, file: TranscriptFile, result: ReadResult): void {

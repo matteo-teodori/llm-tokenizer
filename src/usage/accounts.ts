@@ -1,0 +1,167 @@
+/**
+ * Claude accounts as the usage panel tells them apart: a key for each
+ * account and organization a session was signed in to, and the label Claude
+ * Code itself gives it, `email (Organization)`, from what its configuration
+ * named while the history was kept.
+ *
+ * Pure, and free of `vscode`: the report and the page both use it.
+ */
+
+import type { AccountName } from './store';
+import type { SessionOwner } from './types';
+
+/** The key of the sessions whose transcripts record no owner. */
+export const NOT_RECORDED = 'none';
+/** The filter that keeps every session. */
+export const ALL_ACCOUNTS = 'all';
+
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const KEY = new RegExp(`^${UUID}/(${UUID})?$`);
+const ACCOUNT_ID = new RegExp(`^${UUID}$`);
+
+/** An owner's key: its account and its organization, empty where it names none; NOT_RECORDED for none. */
+export function accountKey(owner: SessionOwner | null | undefined): string {
+    return owner ? `${owner.accountUuid}/${owner.organizationUuid ?? ''}` : NOT_RECORDED;
+}
+
+/** Whether `value` is a key `accountKey` could have made. */
+export function isAccountKey(value: unknown): value is string {
+    return value === NOT_RECORDED || (typeof value === 'string' && KEY.test(value));
+}
+
+/** Whether `value` is an account filter: every session, or one key's. */
+export function isAccountFilter(value: unknown): value is string {
+    return value === ALL_ACCOUNTS || isAccountKey(value);
+}
+
+/** Whether `value` is an account's own id, as the names you give accounts are keyed. */
+export function isAccountId(value: unknown): value is string {
+    return typeof value === 'string' && ACCOUNT_ID.test(value);
+}
+
+/** An account in the history, and when it was first used: what numbers the ones with no name. */
+export interface AccountSeen {
+    key: string;
+    owner: SessionOwner | null;
+    firstTs: number | null;
+}
+
+/** How one account is shown: its label, and what tells it apart besides. */
+export interface AccountLabel {
+    label: string;
+    /** The name Claude Code gives it, where you gave it another. */
+    claudeName: string | null;
+    /** Whether you named it, in the setting. */
+    named: boolean;
+}
+
+/** Claude Code's longest label, which it cuts there. */
+const MAX_LABEL = 80;
+
+/** Control, format and bidirectional characters: none can hide or reorder what a name shows. */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const UNSHOWABLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+
+/** `value` as a name can be shown: no character that hides or reorders others, its spaces collapsed, cut to `max`; null when nothing is left. */
+export function showable(value: unknown, max: number): string | null {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const shown = value.replace(UNSHOWABLE, ' ').replace(/\s+/g, ' ').trim();
+    return shown === '' ? null : [...shown].slice(0, max).join('');
+}
+
+/** The longest name you can give an account. */
+export const MAX_GIVEN_NAME = 60;
+
+/**
+ * The names you gave accounts, from the setting as settings.json has it:
+ * only an account id with a name that can be shown, each one cut to
+ * MAX_GIVEN_NAME.
+ */
+export function givenNames(setting: unknown): Record<string, string> {
+    const names: Record<string, string> = {};
+    if (typeof setting !== 'object' || setting === null || Array.isArray(setting)) {
+        return names;
+    }
+    for (const [id, name] of Object.entries(setting)) {
+        const shown = showable(name, MAX_GIVEN_NAME);
+        if (isAccountId(id.toLowerCase()) && shown) {
+            names[id.toLowerCase()] = shown;
+        }
+    }
+    return names;
+}
+
+/**
+ * Each account's label, by key, for `seen` in the order of first use.
+ *
+ * As Claude Code labels an account: its email, then its organization's name
+ * in brackets, unless that is the one Claude Code gives a personal account,
+ * `<email>'s Organization`. An account with no name is `Account 2`, by the
+ * order accounts were first used in, so that its number stays as accounts
+ * are named, or as more of them come. A name given in the setting, by
+ * account id, stands in place of the email. An account with two
+ * organizations, one unnamed, calls that one `organization 2` by the same
+ * order.
+ */
+export function accountLabels(seen: readonly AccountSeen[], names: readonly AccountName[], given: Readonly<Record<string, string>>): Map<string, AccountLabel> {
+    const named = new Map(names.map(n => [accountKey(n), n]));
+    // An account's email, wherever one of its organizations gave it.
+    const emails = new Map<string, string>();
+    for (const n of names) {
+        if (n.email !== null && !emails.has(n.accountUuid)) {
+            emails.set(n.accountUuid, n.email);
+        }
+    }
+    const ordered = [...seen].sort((a, b) => (a.firstTs ?? Infinity) - (b.firstTs ?? Infinity) || compareText(a.key, b.key));
+    const accountNumbers = new Map<string, number>();
+    const organizationNumbers = new Map<string, number>();
+    const organizations = new Map<string, number>();
+    for (const s of ordered) {
+        if (!s.owner) {
+            continue;
+        }
+        if (!accountNumbers.has(s.owner.accountUuid)) {
+            accountNumbers.set(s.owner.accountUuid, accountNumbers.size + 1);
+        }
+        const count = (organizations.get(s.owner.accountUuid) ?? 0) + 1;
+        organizations.set(s.owner.accountUuid, count);
+        organizationNumbers.set(s.key, count);
+    }
+
+    const labels = new Map<string, AccountLabel>();
+    for (const s of ordered) {
+        if (!s.owner) {
+            labels.set(s.key, { label: 'Not recorded', claudeName: null, named: false });
+            continue;
+        }
+        const email = emails.get(s.owner.accountUuid) ?? null;
+        const organizationName = named.get(s.key)?.organizationName ?? null;
+        const several = (organizations.get(s.owner.accountUuid) ?? 0) > 1;
+        const organization =
+            organizationName !== null && organizationName !== `${email}'s Organization`
+                ? organizationName
+                : several && organizationName === null
+                  ? `organization ${organizationNumbers.get(s.key)}`
+                  : null;
+        const withOrganization = (base: string) => cut(organization ? `${base} (${organization})` : base);
+        const own = given[s.owner.accountUuid]?.trim();
+        const claudeName = email !== null ? withOrganization(email) : null;
+        if (own) {
+            labels.set(s.key, { label: withOrganization(own), claudeName, named: true });
+        } else {
+            labels.set(s.key, { label: claudeName ?? withOrganization(`Account ${accountNumbers.get(s.owner.accountUuid)}`), claudeName: null, named: false });
+        }
+    }
+    return labels;
+}
+
+function cut(label: string): string {
+    const chars = [...label];
+    return chars.length > MAX_LABEL ? `${chars.slice(0, MAX_LABEL - 1).join('')}…` : label;
+}
+
+function compareText(a: string, b: string): number {
+    return a < b ? -1 : a > b ? 1 : 0;
+}

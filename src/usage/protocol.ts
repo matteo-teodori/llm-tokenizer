@@ -16,21 +16,52 @@ import type { Compaction } from './types';
 /** A session id becomes part of a file name, so only what Claude Code's ids are made of. */
 export const SESSION_ID = /^[A-Za-z0-9_-]{1,200}$/;
 
+/** More configuration files than this are not Claude Code's: one or two a root. */
+export const MAX_ACCOUNT_FILES = 16;
+
+/** Whether `files` is a list of configuration files the worker may read. */
+export function isAccountFiles(files: unknown): files is string[] {
+    return Array.isArray(files) && files.length <= MAX_ACCOUNT_FILES && files.every(f => typeof f === 'string' && f.length > 0 && f.length <= 4096);
+}
+
 export type UsageWorkerRequest =
     /**
      * With `paths`, only those transcripts: the ones a watcher reported
      * changed. `holder` names the window, so that a worker it restarts is
      * the same holder of the import lease as the one that died. `crashed`:
      * the window saw its last worker crash, so a read it left unfinished
-     * counts as a crash of that file.
+     * counts as a crash of that file. `accountFiles`: Claude Code's
+     * configuration files, whose account names the history keeps.
      */
-    | { type: 'import'; id: number; storeFile: string; roots: string[]; paths?: string[]; holder?: string; crashed?: boolean }
+    | {
+          type: 'import';
+          id: number;
+          storeFile: string;
+          roots: string[];
+          paths?: string[];
+          holder?: string;
+          crashed?: boolean;
+          accountFiles?: string[];
+      }
     /**
      * `workspaceFolders` null reports every project. `progress`: with how
      * many files the running pass has to go through, which takes a walk of
      * every root; asked only once the page says how far a pass has gone.
+     * `account`: one account's sessions only, by `accountKey`, or those that
+     * recorded none; every session when absent. `accountFiles`: where the
+     * account signed in now is named.
      */
-    | { type: 'query'; id: number; storeFile: string; range: RangeKey; zone: string; workspaceFolders: string[] | null; progress?: boolean }
+    | {
+          type: 'query';
+          id: number;
+          storeFile: string;
+          range: RangeKey;
+          zone: string;
+          workspaceFolders: string[] | null;
+          progress?: boolean;
+          account?: string;
+          accountFiles?: string[];
+      }
     /** Bring one session's main transcript up to date, then read its latest request and compactions. */
     | { type: 'liveContext'; id: number; storeFile: string; roots: string[]; sessionId: string; holder?: string; crashed?: boolean }
     | { type: 'clear'; id: number; storeFile: string }

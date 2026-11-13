@@ -34,6 +34,7 @@ import type {
     Compaction,
     LimitHit,
     PromptSize,
+    SessionOwner,
     SessionSighting,
     StoreCoverage,
     TranscriptKind,
@@ -42,7 +43,7 @@ import type {
 } from './types';
 
 /** `PRAGMA user_version` of the schema this code writes. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** How old a lease's heartbeat must be before another window may take it. */
 export const LEASE_TAKEOVER_MS = 20_000;
@@ -142,6 +143,15 @@ export interface FileCheckpoint {
     oversizeLines: number;
     malformedLines: number;
     newestVersion: string | null;
+}
+
+/**
+ * A Claude account's name, as Claude Code's configuration gives it: its
+ * email, and the name of the organization, where it gives them.
+ */
+export interface AccountName extends SessionOwner {
+    email: string | null;
+    organizationName: string | null;
 }
 
 /** What `latestMainRequest` returns: when, on which model, and the three input counters. */
@@ -387,8 +397,30 @@ INSERT OR REPLACE INTO meta (key, value) SELECT '${NEWEST_PARSER}', value FROM m
 INSERT OR REPLACE INTO meta (key, value) VALUES ('${OLD_NEWEST_PARSER}', '${Number.MAX_SAFE_INTEGER}');
 `;
 
+/**
+ * Version 4: each session's owner, the Claude account and organization its
+ * main transcript says it was signed in to, by id; and `accounts`, the names
+ * Claude Code's own configuration gave those ids while this history was kept
+ * (`organization_uuid` is empty where it named no organization), so that an
+ * account signed out of since keeps its name. A session read before has no
+ * owner until its main transcript is searched again (see `OWNERS_SINCE`).
+ */
+const MIGRATE_TO_4 = `
+ALTER TABLE sessions ADD COLUMN account_uuid TEXT;
+ALTER TABLE sessions ADD COLUMN organization_uuid TEXT;
+CREATE TABLE accounts (
+    provider TEXT NOT NULL DEFAULT 'claude-code',
+    account_uuid TEXT NOT NULL,
+    organization_uuid TEXT NOT NULL,
+    email TEXT,
+    organization_name TEXT,
+    seen_ts INTEGER NOT NULL,
+    PRIMARY KEY (provider, account_uuid, organization_uuid)
+) STRICT;
+`;
+
 /** Tables that hold history, and the bookkeeping of reading it: everything Clear empties. */
-const DATA_TABLES = ['files', 'read_guards', 'requests', 'paths', 'sessions', 'compactions', 'limit_hits'];
+const DATA_TABLES = ['files', 'read_guards', 'requests', 'paths', 'sessions', 'compactions', 'limit_hits', 'accounts'];
 
 /**
  * Migrations by the version they produce. Forward-only, each in one
@@ -397,12 +429,14 @@ const DATA_TABLES = ['files', 'read_guards', 'requests', 'paths', 'sessions', 'c
  * neither, until its file is read again. Version 3 keeps each path once (see
  * MIGRATE_TO_3), and is the one that is not additive: the file is compacted
  * after it, and a build before it told to stop writing. On 229,000 requests
- * it took 3.1 to 3.8 s, backup included.
+ * it took 3.1 to 3.8 s, backup included. Version 4 keeps each session's
+ * owner (see MIGRATE_TO_4).
  */
 const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
     1: db => db.exec(SCHEMA),
     2: db => db.exec('ALTER TABLE requests ADD COLUMN speed TEXT; ALTER TABLE requests ADD COLUMN inference_geo TEXT;'),
     3: db => db.exec(MIGRATE_TO_3),
+    4: db => db.exec(MIGRATE_TO_4),
 };
 
 /**
@@ -756,26 +790,41 @@ export class UsageStore {
     /**
      * Merge what an import saw of a session. Its cwd is the earliest one seen,
      * by record time and then by text, so the order files are read in never
-     * matters; its span only ever widens.
+     * matters; its span only ever widens. Its owner is the last one read, as
+     * Claude Code takes it: a sighting with none leaves the stored one be.
      */
     upsertSession(provider: UsageProvider, s: SessionSighting): void {
         this.assertWritable();
         const earlier = `excluded.cwd IS NOT NULL AND (sessions.cwd IS NULL
             OR (excluded.cwd_ts IS NOT NULL AND (sessions.cwd_ts IS NULL OR excluded.cwd_ts < sessions.cwd_ts))
             OR (excluded.cwd_ts IS sessions.cwd_ts AND excluded.cwd < sessions.cwd))`;
+        const owned = 'excluded.account_uuid IS NOT NULL';
         this.db
             .prepare(
-                `INSERT INTO sessions (provider, session_id, root, cwd, cwd_ts, project_dir, first_ts, last_ts)
-                 VALUES (:provider, :sessionId, :root, :cwd, :cwdTs, :projectDir, :firstTs, :lastTs)
+                `INSERT INTO sessions (provider, session_id, root, cwd, cwd_ts, project_dir, first_ts, last_ts, account_uuid, organization_uuid)
+                 VALUES (:provider, :sessionId, :root, :cwd, :cwdTs, :projectDir, :firstTs, :lastTs, :accountUuid, :organizationUuid)
                  ON CONFLICT (provider, session_id) DO UPDATE SET
                      cwd = CASE WHEN ${earlier} THEN excluded.cwd ELSE sessions.cwd END,
                      cwd_ts = CASE WHEN ${earlier} THEN excluded.cwd_ts ELSE sessions.cwd_ts END,
                      first_ts = CASE WHEN sessions.first_ts IS NULL OR excluded.first_ts < sessions.first_ts
                                      THEN coalesce(excluded.first_ts, sessions.first_ts) ELSE sessions.first_ts END,
                      last_ts = CASE WHEN sessions.last_ts IS NULL OR excluded.last_ts > sessions.last_ts
-                                    THEN coalesce(excluded.last_ts, sessions.last_ts) ELSE sessions.last_ts END`,
+                                    THEN coalesce(excluded.last_ts, sessions.last_ts) ELSE sessions.last_ts END,
+                     account_uuid = CASE WHEN ${owned} THEN excluded.account_uuid ELSE sessions.account_uuid END,
+                     organization_uuid = CASE WHEN ${owned} THEN excluded.organization_uuid ELSE sessions.organization_uuid END`,
             )
-            .run({ provider, ...s });
+            .run({
+                provider,
+                sessionId: s.sessionId,
+                root: s.root,
+                cwd: s.cwd,
+                cwdTs: s.cwdTs,
+                projectDir: s.projectDir,
+                firstTs: s.firstTs,
+                lastTs: s.lastTs,
+                accountUuid: s.owner?.accountUuid ?? null,
+                organizationUuid: s.owner ? s.owner.organizationUuid : null,
+            });
     }
 
     /**
@@ -789,7 +838,8 @@ export class UsageStore {
                 `SELECT provider, session_id, root, cwd, cwd_ts, project_dir, first_ts,
                         CASE WHEN last_ts >= :until
                              THEN (SELECT max(ts) FROM requests r WHERE r.provider = s.provider AND r.session_id = s.session_id AND r.ts < :until)
-                             ELSE last_ts END AS last_ts
+                             ELSE last_ts END AS last_ts,
+                        account_uuid, organization_uuid
                  FROM sessions s ORDER BY session_id`,
             )
             .all({ until: untilMs })
@@ -802,6 +852,10 @@ export class UsageStore {
                 projectDir: row.project_dir as string,
                 firstTs: row.first_ts as number | null,
                 lastTs: row.last_ts as number | null,
+                owner:
+                    typeof row.account_uuid === 'string'
+                        ? { accountUuid: row.account_uuid, organizationUuid: row.organization_uuid as string | null }
+                        : null,
             }));
     }
 
@@ -983,6 +1037,40 @@ export class UsageStore {
                 timestamp: row.ts as number,
                 limitType: row.limit_type as string,
                 resetsAt: row.resets_at as number | null,
+            }));
+    }
+
+    /**
+     * Keep the names Claude Code's configuration gives `accounts` now, each
+     * replacing the one kept for its account and organization, so that an
+     * account keeps its name once Claude Code has signed out of it. Call
+     * inside `transaction`.
+     */
+    rememberAccounts(provider: UsageProvider, accounts: Iterable<AccountName>, seenTs: number): void {
+        this.assertWritable();
+        const upsert = this.db.prepare(
+            `INSERT INTO accounts (provider, account_uuid, organization_uuid, email, organization_name, seen_ts)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (provider, account_uuid, organization_uuid) DO UPDATE SET
+                 email = coalesce(excluded.email, accounts.email),
+                 organization_name = coalesce(excluded.organization_name, accounts.organization_name),
+                 seen_ts = max(excluded.seen_ts, accounts.seen_ts)`,
+        );
+        for (const a of accounts) {
+            upsert.run(provider, a.accountUuid, a.organizationUuid ?? '', a.email, a.organizationName, seenTs);
+        }
+    }
+
+    /** The names kept for accounts, newest first. */
+    accountNames(): AccountName[] {
+        return this.db
+            .prepare('SELECT account_uuid, organization_uuid, email, organization_name FROM accounts ORDER BY seen_ts DESC, account_uuid, organization_uuid')
+            .all()
+            .map(row => ({
+                accountUuid: row.account_uuid as string,
+                organizationUuid: (row.organization_uuid as string) || null,
+                email: row.email as string | null,
+                organizationName: row.organization_name as string | null,
             }));
     }
 

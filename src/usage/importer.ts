@@ -20,8 +20,10 @@ import { dedupe } from './accounting';
 import {
     GUARDED_READ_BYTES,
     PARSER_VERSION,
+    ROWS_SINCE,
     fileState,
     isUnchanged,
+    needsOwnerScan,
     readTranscript,
     transcriptsAt,
     walkProjects,
@@ -238,7 +240,7 @@ async function runImport(
             }
 
             let guard: ReadGuard | undefined;
-            if (unreadBytes(previous, state) > guardedReadBytes) {
+            if (unreadBytes(file, previous, state) > guardedReadBytes) {
                 flush();
                 guard = guardRead(store, file.path, now(), writeIfCurrent, countCrashes, () => summary.interrupted++);
                 if (!guard && cleared) {
@@ -380,16 +382,18 @@ function guardRead(
 
 /**
  * How many bytes reading `state` will take: from the checkpoint, or the whole
- * file where it is new, replaced, truncated or due for a newer parser. A
- * rewrite in place is only found by reading, so it is not foreseen here.
+ * file where it is new, replaced, truncated, due to be read again by a newer
+ * parser, or searched for owners before its checkpoint. A rewrite in place is
+ * only found by reading, so it is not foreseen here.
  */
-function unreadBytes(previous: FileCheckpoint | undefined, state: FileState): number {
-    const restarts =
+function unreadBytes(file: TranscriptFile, previous: FileCheckpoint | undefined, state: FileState): number {
+    const whole =
         !previous ||
-        previous.parserVersion < PARSER_VERSION ||
+        previous.parserVersion < ROWS_SINCE ||
+        needsOwnerScan(file, previous) ||
         state.size < previous.offset ||
         (previous.ino !== null && state.ino !== null && (state.ino !== previous.ino || state.dev !== previous.dev));
-    return restarts ? state.size : state.size - previous.offset;
+    return whole ? state.size : state.size - previous.offset;
 }
 
 /** Record that a guarded read ended without crashing, keeping its count. */
@@ -442,6 +446,10 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
             cwdTs: own ? result.firstCwdTs : null,
             projectDir: file.projectDir,
             ...span,
+            // Only for a session this file has a row for: an owner naming
+            // one it does not would start that session's row here, in what
+            // may not be its project.
+            owner: result.owners.get(id) ?? null,
         };
         store.upsertSession(PROVIDER, sighting);
     }

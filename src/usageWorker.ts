@@ -26,7 +26,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parentPort, workerData } from 'worker_threads';
 
+import { isAccountFilter } from './usage/accounts';
 import { isTimeZone } from './usage/aggregate';
+import { readClaudeAccounts } from './usage/claudeAccounts';
 import { importUnderLease } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS, rangeUntil } from './usage/report';
@@ -35,6 +37,7 @@ import { HistoryFileError, claimFound, createHistory, publishHistory, removeHist
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import {
     SESSION_ID,
+    isAccountFiles,
     type ImportProgress,
     type SqliteResult,
     type UsageFailure,
@@ -348,7 +351,12 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
 
     switch (request.type) {
         case 'query': {
-            if (!RANGE_KEYS.includes(request.range) || !isTimeZone(request.zone)) {
+            if (
+                !RANGE_KEYS.includes(request.range) ||
+                !isTimeZone(request.zone) ||
+                (request.account !== undefined && !isAccountFilter(request.account)) ||
+                (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles))
+            ) {
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
             }
@@ -358,6 +366,8 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 workspaceFolders: request.workspaceFolders,
                 now: Date.now(),
                 platform: process.platform,
+                account: request.account,
+                configured: readClaudeAccounts(request.accountFiles ?? []),
             });
             reply({
                 type: 'report',
@@ -371,7 +381,10 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
         }
         case 'import': {
             const paths = request.paths;
-            if (paths !== undefined && !(Array.isArray(paths) && paths.length <= MAX_PATHS && paths.every(p => typeof p === 'string' && p.length <= 4096))) {
+            if (
+                (paths !== undefined && !(Array.isArray(paths) && paths.length <= MAX_PATHS && paths.every(p => typeof p === 'string' && p.length <= 4096))) ||
+                (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles))
+            ) {
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
             }
@@ -403,6 +416,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             } finally {
                 pass = undefined;
             }
+            rememberNames(store, request.accountFiles ?? []);
             reply(
                 summary
                     ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false, ...takeRecovered() }
@@ -441,6 +455,35 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             reply({ type: 'cleared', id: request.id, generation: store.generation(), settled, copiesLeft });
             return;
         }
+    }
+}
+
+/** What the configuration said when its names were last kept, in which history and generation of it. */
+let remembered: string | undefined;
+
+/**
+ * Keep the names Claude Code's configuration gives its accounts now, so
+ * that an account keeps its name in the history once signed out of. After
+ * each pass, whichever window held the lease: the configuration is read
+ * again only once it has changed, and kept again only once it says
+ * something else, or the history was cleared. Never in a history a newer
+ * version writes. A failure here is only a name not kept yet: the pass's
+ * answer goes out all the same.
+ */
+function rememberNames(store: UsageStore, files: string[]): void {
+    try {
+        if (store.readOnly || store.outdated(PARSER_VERSION)) {
+            return;
+        }
+        const { names } = readClaudeAccounts(files);
+        const said = JSON.stringify([store.file, store.storeId(), store.generation(), names]);
+        if (names.length === 0 || said === remembered) {
+            return;
+        }
+        store.transaction(() => store.rememberAccounts('claude-code', names, Date.now()));
+        remembered = said;
+    } catch {
+        // Busy, say: kept after the next pass.
     }
 }
 

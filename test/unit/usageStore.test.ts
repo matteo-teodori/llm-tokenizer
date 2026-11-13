@@ -68,12 +68,26 @@ function ready(result: OpenResult): UsageStore {
  * or where it ran. The newest parser to hold the lease is where those builds
  * kept it.
  */
-function asSchema(file: string, schema: 1 | 2): void {
+function asSchema(file: string, schema: 1 | 2 | 3): void {
     assert.ok(sqlite, 'this runtime has no node:sqlite');
     const db = new sqlite.DatabaseSync(file);
+    // Schema 4 only added to schema 3.
+    const before4 = `
+        DROP TABLE accounts;
+        ALTER TABLE sessions DROP COLUMN account_uuid;
+        ALTER TABLE sessions DROP COLUMN organization_uuid;`;
+    if (schema === 3) {
+        try {
+            db.exec(`BEGIN; ${before4} PRAGMA user_version = 3; COMMIT;`);
+        } finally {
+            db.close();
+        }
+        return;
+    }
     try {
         db.exec(`
             BEGIN;
+            ${before4}
             DROP TRIGGER clear_paths;
             CREATE TABLE old_requests (
                 provider TEXT NOT NULL DEFAULT 'claude-code',
@@ -196,7 +210,7 @@ suite('usage history store', () => {
         assert.strictEqual(store.generation(), 0);
         assert.match(store.storeId(), /^[0-9a-z]+-[0-9a-z]+$/);
         assert.ok(fs.existsSync(file));
-        assert.strictEqual(SCHEMA_VERSION, 3);
+        assert.strictEqual(SCHEMA_VERSION, 4);
     });
 
     test("a transcript's path is kept once, not in every request read from it", () => {
@@ -672,6 +686,85 @@ suite('usage history store', () => {
         assert.deepStrictEqual(migrated.finishClear(), { settled: true, copiesLeft: 0 });
         assert.strictEqual(fs.statSync(`${file}-wal`).size, 0, 'the log was left as large as the table');
         assert.ok(fs.existsSync(`${file}.bak-v2`), "the migration's backup went with it");
+    });
+
+    test("a version 3 history gains each session's owner and account names, with no backup or compaction, and older backups go", () => {
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertRequests([req({ messageId: 'kept' })]);
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: '/work', cwdTs: 1, projectDir: 'p', firstTs: 1, lastTs: 2 });
+        });
+        store.close();
+        opened.length = 0;
+        asSchema(file, 3);
+        // What 2.2.1 and 2.3.0 left beside it, a backup cut short, and another history's backup.
+        const beside = (name: string) => path.join(path.dirname(file), name);
+        const base = path.basename(file);
+        for (const name of [`${base}.bak-v1`, `${base}.bak-v2`, `${base}.bak-v2.0123456789ab`, 'usage-0000000000000000000a.sqlite.bak-v2']) {
+            fs.writeFileSync(beside(name), 'a copy');
+        }
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const prototype = sqlite.DatabaseSync.prototype as unknown as { exec: (this: unknown, sql: string) => void };
+        const exec = prototype.exec;
+        const statements: string[] = [];
+        prototype.exec = function (this: unknown, sql: string) {
+            statements.push(sql);
+            exec.call(this, sql);
+        };
+        let migrated: UsageStore;
+        try {
+            migrated = ready(open());
+        } finally {
+            prototype.exec = exec;
+        }
+        assert.deepStrictEqual(statements.filter(sql => /VACUUM/.test(sql)), [], 'it only adds: nothing to back up or give back');
+        assert.deepStrictEqual(
+            fs.readdirSync(path.dirname(file)).filter(name => name.includes('.bak-v')).sort(),
+            ['usage-0000000000000000000a.sqlite.bak-v2', `${base}.bak-v2.0123456789ab`],
+        );
+        assert.deepStrictEqual([...migrated.requests()].map(r => r.messageId), ['kept']);
+        assert.deepStrictEqual(migrated.sessions().map(s => [s.sessionId, s.cwd, s.owner]), [['session-a', '/work', null]]);
+        assert.deepStrictEqual(migrated.accountNames(), []);
+    });
+
+    test("a session's owner is the last one a sighting names; a sighting that names none keeps it", () => {
+        const store = ready(open());
+        const sight = (owner?: { accountUuid: string; organizationUuid: string | null } | null) =>
+            store.transaction(() =>
+                store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: 1, lastTs: 2, owner }),
+            );
+        const owners = () => store.sessions().map(s => s.owner);
+        sight();
+        assert.deepStrictEqual(owners(), [null]);
+        sight({ accountUuid: 'a', organizationUuid: 'o' });
+        sight(null);
+        sight();
+        assert.deepStrictEqual(owners(), [{ accountUuid: 'a', organizationUuid: 'o' }]);
+        // Another account, with no organization: both replaced.
+        sight({ accountUuid: 'b', organizationUuid: null });
+        assert.deepStrictEqual(owners(), [{ accountUuid: 'b', organizationUuid: null }]);
+    });
+
+    test('account names are kept as Claude Code last gave them, and kept once it no longer does', () => {
+        const store = ready(open());
+        store.transaction(() =>
+            store.rememberAccounts(
+                'claude-code',
+                [
+                    { accountUuid: 'a', organizationUuid: 'o', email: 'one@example.com', organizationName: 'Org' },
+                    { accountUuid: 'b', organizationUuid: null, email: 'two@example.com', organizationName: null },
+                ],
+                1,
+            ),
+        );
+        // Signed in to a again later, its organization renamed, its email not given this time.
+        store.transaction(() => store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: 'o', email: null, organizationName: 'Org 2' }], 2));
+        assert.deepStrictEqual(store.accountNames(), [
+            { accountUuid: 'a', organizationUuid: 'o', email: 'one@example.com', organizationName: 'Org 2' },
+            { accountUuid: 'b', organizationUuid: null, email: 'two@example.com', organizationName: null },
+        ]);
+        store.clear();
+        assert.deepStrictEqual(store.accountNames(), [], 'Clear forgets them with the rest');
     });
 
     test('a build before this schema that had the history open as it was migrated stops writing, and says to reload', () => {
