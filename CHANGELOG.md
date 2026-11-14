@@ -4,7 +4,7 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
-## [2.4.0] - 2026-11-13
+## [2.4.0] - 2026-11-14
 
 ### Added
 - **Tokens by account.** Claude Code records, in each session's transcript,
