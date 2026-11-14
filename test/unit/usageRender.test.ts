@@ -520,7 +520,7 @@ suite('usage page', () => {
         assert.ok(!all.includes('≈'), '≈ is for estimates, and nothing here is one');
     });
 
-    test('the off page lists what turning it on reads and keeps, as the README does', () => {
+    test('the off page lists what turning it on reads and keeps, and what it shows tokens by, as the README does', () => {
         // The T shows to everyone with Claude Code's extension: this page is
         // where turning the feature on is decided.
         const readme = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'README.md'), 'utf8');
@@ -532,6 +532,10 @@ suite('usage page', () => {
         for (const item of items) {
             assert.ok(off.includes(item), `the off page does not say: ${item}`);
         }
+        // And what it shows tokens by, as the README's summary of the feature says it.
+        const by = /tokens Claude Code processed, by (.+?), read from/.exec(readme.replace(/\s+/g, ' '))?.[1];
+        assert.ok(by, "the README's summary of the feature was not found");
+        assert.strictEqual(by, /tokens Claude Code processed: by (.+?)\./.exec(off)?.[1]);
     });
 
     test('while the history is read, the page says how far, every total is a lower bound, and Refresh is busy', () => {

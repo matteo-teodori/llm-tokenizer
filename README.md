@@ -50,7 +50,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 - **Selection Counting**: Count only the text you highlighted
 - **Runs off the UI thread**: Tokenizing happens in a worker thread, so the editor never blocks
 - **Persistent Preferences**: Your model choice is remembered
-- **Claude Code usage (optional, off by default)**: how many tokens Claude Code processed, by day, project, session and model, read from its own records on your machine. See [Claude Code Usage](#claude-code-usage).
+- **Claude Code usage (optional, off by default)**: how many tokens Claude Code processed, by day, account, project, session and model, read from its own records on your machine. See [Claude Code Usage](#claude-code-usage).
 
 ### 🔒 Privacy
 **Your code never leaves your machine.** There is no telemetry and no network
