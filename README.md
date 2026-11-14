@@ -219,10 +219,11 @@ so an account you have since signed out of keeps its name; one never named
 there is *Account 3*, by a number the history gives each account as it first
 sees it, and keeps. Below each, when it was used and in which projects tell
 it apart, and **Name…** gives it a name of your own, kept in **Claude Code
-Account Names** by its id (on hover). Labels that would read alike end with
-the first digits of their accounts' ids: two organizations of one name, say,
-or letters of another script that show as the other's do, as Unicode lists
-them confusable. A session resumed under another
+Account Names** by its id (on hover). Labels that would read alike, two
+organizations of one name say, or letters of another script that show as the
+other's do (as Unicode lists them confusable), end with the first digits of
+what tells them apart: their accounts' ids, and their organizations' where
+one account is there twice. A session resumed under another
 account, after a usage limit say, counts under each for its own requests, and
 the limit under the account that reached it; one from before Claude Code
 recorded accounts counts under the first account it records, its older
