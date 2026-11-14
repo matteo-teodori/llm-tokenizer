@@ -13,8 +13,10 @@
  * Each entry is a source character, its prototype, and their gap from the
  * entry before, in code points base 36; a run whose sources and prototypes
  * both step by one is one entry. Prototypes are kept decomposed, as the
- * skeleton's last step makes them, and it refuses a file in which one is not
- * its own skeleton, as UTS #39 makes them.
+ * skeleton's last step makes them. A source that draws nothing is left out:
+ * a skeleton drops it before it looks anything up. It refuses a file in which
+ * a prototype is not its own skeleton, as UTS #39 makes them, by the skeleton
+ * src/usage/accounts.ts takes.
  */
 
 import { createHash } from 'node:crypto';
@@ -36,7 +38,9 @@ if (!version || !date) {
 }
 
 const hexes = field => field.trim().split(/\s+/).map(hex => Number.parseInt(hex, 16));
+const IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
 const entries = [];
+let unread = 0;
 for (const line of text.split('\n')) {
     if (!/^[0-9A-F]/.test(line)) {
         continue;
@@ -47,13 +51,23 @@ for (const line of text.split('\n')) {
         console.error(`An entry this table cannot hold: ${line}`);
         process.exit(1);
     }
+    // Never looked up: a skeleton drops what draws nothing first.
+    if (String.fromCodePoint(sources[0]).replace(IGNORABLE, '') === '') {
+        unread++;
+        continue;
+    }
     // Decomposed, as the skeleton's last step makes them: five are not, their marks out of order.
     entries.push([sources[0], [...String.fromCodePoint(...hexes(to)).normalize('NFD')].map(c => c.codePointAt(0))]);
 }
 entries.sort((a, b) => a[0] - b[0]);
 
 const prototypes = new Map(entries.map(([s, p]) => [String.fromCodePoint(s), String.fromCodePoint(...p)]));
-const skeleton = value => [...value.normalize('NFD')].map(c => prototypes.get(c) ?? c).join('').normalize('NFD');
+// As accounts.ts reads one: decomposed, without what draws nothing, each character as its prototype, decomposed.
+const skeleton = value =>
+    [...value.normalize('NFD').replace(IGNORABLE, '')]
+        .map(c => prototypes.get(c) ?? c)
+        .join('')
+        .normalize('NFD');
 for (const [s, p] of entries) {
     const prototype = String.fromCodePoint(...p);
     if (skeleton(prototype) !== prototype) {
@@ -106,9 +120,10 @@ writeFileSync(
         '',
         '/**',
         ` * The ${entries.length} characters Unicode lists as confusable, each with the`,
-        ' * prototype it reads as, joined. In code points base 36: the gap from the',
-        " * entry before, `*n` for a run of n whose sources and prototypes both step",
-        " * by one, `:`, then the prototype's code points with `.` between them; `,`",
+        ' * prototype it reads as, joined; those that draw nothing, which a skeleton',
+        ' * drops first, left out. In code points base 36: the gap from the entry',
+        " * before, `*n` for a run of n whose sources and prototypes both step by",
+        " * one, `:`, then the prototype's code points with `.` between them; `,`",
         ' * between entries.',
         ' */',
         'export const CONFUSABLES: readonly string[] = [',
@@ -117,4 +132,6 @@ writeFileSync(
         '',
     ].join('\n'),
 );
-console.log(`Wrote ${entries.length} confusables of Unicode ${version} (${date}) in ${encoded.length} entries, ${table.length} characters.`);
+console.log(
+    `Wrote ${entries.length} confusables of Unicode ${version} (${date}) in ${encoded.length} entries, ${table.length} characters; left out ${unread} that draw nothing.`,
+);
