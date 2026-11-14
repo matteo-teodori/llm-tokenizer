@@ -668,23 +668,26 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
             counted.set(key, sessionId);
             a.sessions++;
         }
-        a.firstTs = from === null ? a.firstTs : a.firstTs === null ? from : Math.min(a.firstTs, from);
+        // Never after its end there: a session's first record, or the one that began a change,
+        // can be dated past the clock, before uses dated earlier.
+        const start = from !== null && to !== null ? Math.min(from, to) : from;
+        a.firstTs = start === null ? a.firstTs : a.firstTs === null ? start : Math.min(a.firstTs, start);
         a.lastTs = to === null ? a.lastTs : a.lastTs === null ? to : Math.max(a.lastTs, to);
         seen.set(key, a);
     };
     for (const s of sessions) {
         const spans = usedOwners(s);
-        // Made with one account or none: its last request, or a limit its
-        // owner reached after it, never one another account reached.
+        // Made with one account or none: its last request, or a limit reached
+        // after it, the account's own or one that records none, which ownerAt
+        // gives that account.
         const unowned = s.limitSpans.find(h => h.owner === null) ?? null;
         const lastSpan = spans[spans.length - 1];
         const ownedEnd = lastSpan
             ? s.limitSpans.filter(h => h.owner !== null && keyOf(h.owner) === keyOf(lastSpan.owner)).reduce<number | null>((m, h) => latest(m, h.lastTs), null)
             : null;
-        const unownedEnd = unowned && (!lastSpan || lastSpan.sinceTs === null || unowned.lastTs >= lastSpan.sinceTs) ? unowned.lastTs : null;
-        const last = latest(s.lastTs, latest(ownedEnd, unownedEnd));
+        const last = latest(s.lastTs, latest(ownedEnd, unowned?.lastTs ?? null));
         // The sessions that record none: from requests and limits before the clock, as nothing numbers them.
-        if (spans.length === 0 && (s.firstTs !== null || unowned !== null)) {
+        if (spans.length === 0 && (s.lastTs !== null || unowned !== null)) {
             note(null, s.sessionId, earliest(s.firstTs, unowned?.firstTs ?? null), last);
         }
         // Made with more than one account: each one's last use, those that record none by their time.

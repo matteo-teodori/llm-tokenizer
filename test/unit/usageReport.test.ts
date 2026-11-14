@@ -911,6 +911,41 @@ suite('usage report', () => {
             assert.ok(!('none' in seen), JSON.stringify(Object.keys(seen)));
         });
 
+        test("an account's dates never run backwards where a transcript's clock went back, a refusal that records no owner is the one account's, and records past the clock offer no Not recorded", async () => {
+            const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
+            // Resumed under B, whose first request is dated past the clock (a wrong one), its next before it.
+            transcript('-repo-one', 'w1.jsonl', [
+                owner('w1', A, ORG_A),
+                assistantRecord('w1', 'm-w1-a', '2026-10-09T09:00:00Z', 1),
+                owner('w1', B),
+                assistantRecord('w1', 'm-w1-b-ahead', '2026-10-20T09:00:00Z', 1),
+                assistantRecord('w1', 'm-w1-b', '2026-10-09T10:00:00Z', 1),
+            ]);
+            // C's only account: a request past the clock, one before it, then its subagent's request and refusal, which record no owner.
+            transcript('-repo-one', 'w2.jsonl', [
+                owner('w2', C),
+                userRecord('w2', '/repo/one', '2026-10-09T08:59:00Z'),
+                assistantRecord('w2', 'm-w2-ahead', '2026-10-20T09:00:00Z', 1),
+                assistantRecord('w2', 'm-w2', '2026-10-09T09:00:00Z', 1),
+            ]);
+            transcript('-repo-one', path.join('w2', 'subagents', 'agent-z.jsonl'), [
+                { ...assistantRecord('w2', 'm-w2-agent', '2026-10-09T09:30:00Z', 1), isSidechain: true, agentId: 'z' },
+                { ...limitHit('w2', 'hit-w2-agent', '2026-10-09T10:00:00Z'), isSidechain: true, agentId: 'z' },
+            ]);
+            // A session that records no account, its only request past the clock: nothing to offer.
+            transcript('-repo-one', 'w3.jsonl', [userRecord('w3', '/repo/one', '2026-10-20T08:59:00Z'), assistantRecord('w3', 'm-w3-ahead', '2026-10-20T09:00:00Z', 1)]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const seen = Object.fromEntries(queryReport(store, query()).accountsSeen.map(a => [a.key, [a.firstTs, a.lastTs]]));
+            assert.deepStrictEqual(seen, {
+                [keyA]: [Date.parse('2026-10-09T09:00:00Z'), Date.parse('2026-10-09T09:00:00Z')],
+                // From no later than its own last use there, though the change began with a request dated the 20th.
+                [keyB]: [Date.parse('2026-10-09T10:00:00Z'), Date.parse('2026-10-09T10:00:00Z')],
+                // Until its subagent's refusal, after its last request, though its change began past the clock.
+                [`${C}/`]: [Date.parse('2026-10-09T09:00:00Z'), Date.parse('2026-10-09T10:00:00Z')],
+            });
+        });
+
         test('a session a transcript names only by a copied change of owner and limit has its row: its limit is offered as the account it is shown under', async () => {
             // s9 holds records copied from s10, whose own transcript was gone
             // before the history first read it: its owner, then a refusal.
