@@ -796,8 +796,16 @@ suite('usage report', () => {
         test('an account is used from its first request or limit to its last, whichever records its owner, and the history starts at its first record', async () => {
             const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
             const D = '4d5e6f7a-8b9c-4dae-8f0a-2b3c4d5e6f7a';
-            // C's request on the 9th, then a session under C, its owner first, only refused, on the 10th, twice.
-            transcript('-repo-one', 'c1.jsonl', [owner('c1', C), userRecord('c1', '/repo/one', '2026-10-09T09:00:00Z'), assistantRecord('c1', 'm-c1', '2026-10-09T09:00:01Z', 3)]);
+            const E = '5e6f7a8b-9cad-4ebf-8a0b-3c4d5e6f7a8b';
+            // C's request on the 9th, its refusal on the 10th, and a request after it, its last use;
+            // then a session under C, its owner first, only refused, on the 10th, twice.
+            transcript('-repo-one', 'c1.jsonl', [
+                owner('c1', C),
+                userRecord('c1', '/repo/one', '2026-10-09T09:00:00Z'),
+                assistantRecord('c1', 'm-c1', '2026-10-09T09:00:01Z', 3),
+                limitHit('c1', 'hit-c1', '2026-10-10T09:00:00Z'),
+                assistantRecord('c1', 'm-c1-after', '2026-10-10T09:30:00Z', 3),
+            ]);
             // One more, dated ahead of the report's clock, as only a wrong clock writes: not counted yet.
             transcript('-repo-one', 'c2.jsonl', [
                 owner('c2', C),
@@ -813,28 +821,52 @@ suite('usage report', () => {
                 userRecord('d1', '/repo/one', '2026-10-09T12:00:00Z'),
                 assistantRecord('d1', 'm-d1', '2026-10-09T12:00:01Z', 5),
             ]);
+            // E's request, and its refusal after it, its last use.
+            transcript('-repo-one', 'e1.jsonl', [owner('e1', E), assistantRecord('e1', 'm-e1', '2026-10-10T10:00:00Z', 2), limitHit('e1', 'hit-e1', '2026-10-10T10:30:00Z')]);
+            // Its subagent's requests, which record no owner: one under D, one the very moment C's began, C's.
+            transcript('-repo-one', path.join('d1', 'subagents', 'agent-z.jsonl'), [
+                { ...assistantRecord('d1', 'm-d1-agent-d', '2026-10-07T08:00:00Z', 1), isSidechain: true, agentId: 'z' },
+                { ...assistantRecord('d1', 'm-d1-agent-c', '2026-10-09T12:00:01Z', 1), isSidechain: true, agentId: 'z' },
+            ]);
             const store = freshStore();
             await importRoots(store, [path.join(tmp, 'root')]);
             const report = queryReport(store, query());
             assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.firstTs, a.lastTs]), [
-                // D until C began in that session.
-                [`${D}/`, Date.parse('2026-10-07T07:00:00Z'), Date.parse('2026-10-09T12:00:01Z')],
-                [`${C}/`, Date.parse('2026-10-09T09:00:01Z'), Date.parse('2026-10-10T08:30:00Z')],
+                // D until its own last use in that session, its subagent's request, not C's after it.
+                [`${D}/`, Date.parse('2026-10-07T07:00:00Z'), Date.parse('2026-10-07T08:00:00Z')],
+                [`${C}/`, Date.parse('2026-10-09T09:00:01Z'), Date.parse('2026-10-10T09:30:00Z')],
+                [`${E}/`, Date.parse('2026-10-10T10:00:00Z'), Date.parse('2026-10-10T10:30:00Z')],
             ]);
             // D was used first: it is 1, by its limit, not by C's request after it.
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2 });
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
             // Everything held starts at that limit, and lists it; it ends at its newest record, the last limit before the clock.
             assert.strictEqual(report.coverage.start, Date.parse('2026-10-07T07:00:00Z'));
-            assert.strictEqual(report.coverage.newest, Date.parse('2026-10-10T08:30:00Z'));
+            assert.strictEqual(report.coverage.newest, Date.parse('2026-10-10T10:30:00Z'));
             assert.ok(report.limitWindows.some(w => w.account === `${D}/`));
         });
 
         test("a session's last account is never dated to a limit another reached, an account used only by a limit dated ahead is offered as it is numbered, and a session with only such a limit is no Not recorded", async () => {
             const F = '6f7a8b9c-adbe-4fc0-8b1c-4d5e6f7a8b9c';
             // One session, its transcripts in two folders: under A in one, a request and later A's own refusal; under B in the other, a request between.
-            transcript('-repo-one', 's1.jsonl', [owner('s1', A, ORG_A), assistantRecord('s1', 'm-a', '2026-10-09T10:10:00Z', 3), limitHit('s1', 'hit-a', '2026-10-09T10:50:00Z')]);
-            transcript('-repo-two', 's1.jsonl', [owner('s1', B), userRecord('s1', '/repo/two', '2026-10-09T10:20:00Z'), assistantRecord('s1', 'm-b', '2026-10-09T10:20:01Z', 5)]);
+            // Each with one more, dated ahead of the clock: not counted yet.
+            transcript('-repo-one', 's1.jsonl', [
+                owner('s1', A, ORG_A),
+                assistantRecord('s1', 'm-a', '2026-10-09T10:10:00Z', 3),
+                limitHit('s1', 'hit-a', '2026-10-09T10:50:00Z'),
+                limitHit('s1', 'hit-a-ahead', '2026-10-12T11:00:00Z'),
+            ]);
+            transcript('-repo-two', 's1.jsonl', [
+                owner('s1', B),
+                userRecord('s1', '/repo/two', '2026-10-09T10:20:00Z'),
+                assistantRecord('s1', 'm-b', '2026-10-09T10:20:01Z', 5),
+                assistantRecord('s1', 'm-b-ahead', '2026-10-12T11:30:00Z', 100),
+            ]);
+            // Its subagent's requests, which record no owner: each the owner's at its time, A's before B's request, B's after.
+            transcript('-repo-one', path.join('s1', 'subagents', 'agent-y.jsonl'), [
+                { ...assistantRecord('s1', 'm-s1-agent-a', '2026-10-09T10:15:00Z', 1), isSidechain: true, agentId: 'y' },
+                { ...assistantRecord('s1', 'm-s1-agent-b', '2026-10-09T10:30:00Z', 1), isSidechain: true, agentId: 'y' },
+            ]);
             // A session signed in to F, nothing asked, whose only use is a refusal in its subagent's transcript, dated two days ahead of the clock (a wrong one).
             transcript('-repo-one', 's2.jsonl', [owner('s2', F), userRecord('s2', '/repo/one', '2026-10-09T09:00:00Z')]);
             transcript('-repo-one', path.join('s2', 'subagents', 'agent-x.jsonl'), [{ ...limitHit('s2', 'hit-f', '2026-10-12T12:00:00Z'), isSidechain: true, agentId: 'x' }]);
@@ -843,8 +875,12 @@ suite('usage report', () => {
             await importRoots(store, [path.join(tmp, 'root')]);
             const report = queryReport(store, query());
             const seen = Object.fromEntries(report.accountsSeen.map(a => [a.key, [a.firstTs, a.lastTs]]));
-            assert.deepStrictEqual(seen[keyA], [Date.parse('2026-10-09T10:10:00Z'), Date.parse('2026-10-09T10:20:01Z')]);
-            assert.deepStrictEqual(seen[keyB], [Date.parse('2026-10-09T10:20:01Z'), Date.parse('2026-10-09T10:20:01Z')]);
+            // Each until its own last use, though their transcripts took turns: A its refusal, B its subagent's request.
+            assert.deepStrictEqual(seen[keyA], [Date.parse('2026-10-09T10:10:00Z'), Date.parse('2026-10-09T10:50:00Z')]);
+            assert.deepStrictEqual(seen[keyB], [Date.parse('2026-10-09T10:20:01Z'), Date.parse('2026-10-09T10:30:00Z')]);
+            // As the report counts their tokens: the subagent's first request A's, its second B's.
+            const tokens = Object.fromEntries(report.accounts.map(a => [a.key, a.totals.output]));
+            assert.deepStrictEqual([tokens[keyA], tokens[keyB]], [4, 6]);
             // F is used by that refusal: offered as the numbering takes it.
             store.transaction(() => store.numberAccounts('claude-code'));
             assert.ok(`${F}/` in seen, JSON.stringify(Object.keys(seen)));
@@ -983,9 +1019,9 @@ suite('usage report', () => {
                 [['r1', [keyA, keyB], 1163], ['r2', [keyB], 1]],
             );
             assert.deepStrictEqual(all.limitWindows.map(w => [w.account, w.hits]), [[keyA, 1], [keyB, 1]]);
-            // Each account from its first request in a session to the next one's.
+            // Each account from its first request in a session to its own last use there: A to its limit, before B's request.
             assert.deepStrictEqual(all.accountsSeen.map(a => [a.key, a.sessions, a.firstTs, a.lastTs]), [
-                [keyA, 1, Date.parse('2026-10-09T09:50:01Z'), Date.parse('2026-10-09T10:07:00Z')],
+                [keyA, 1, Date.parse('2026-10-09T09:50:01Z'), Date.parse('2026-10-09T10:05:00Z')],
                 [keyB, 2, Date.parse('2026-10-09T10:07:00Z'), Date.parse('2026-10-09T11:00:01Z')],
             ]);
             const ofA = queryReport(store, query({ account: keyA }));
@@ -1088,7 +1124,7 @@ suite('usage report', () => {
             firstTs: Date.UTC(2026, 9, 9) + i,
             lastTs: Date.UTC(2026, 9, 9) + i,
             owners: [{ owner: owner(i), sinceTs: null }],
-            unownedHitTs: null, limitSpans: [],
+            unownedHitTs: null, limitSpans: [], uses: [],
         }));
         // One more session for each of the last ten accounts: the ten with most sessions.
         const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
@@ -1152,7 +1188,7 @@ suite('usage report', () => {
             firstTs,
             lastTs: firstTs,
             owners: [{ owner: { accountUuid, organizationUuid: null }, sinceTs: null }],
-            unownedHitTs: null, limitSpans: [],
+            unownedHitTs: null, limitSpans: [], uses: [],
         });
         const sum = (sessionId: string, input: number) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
@@ -1265,7 +1301,7 @@ suite('usage report', () => {
         const report = buildReport(
             {
                 sums,
-                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null, limitSpans: [] }],
+                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null, limitSpans: [], uses: [] }],
                 compactions: [],
                 limitHits: [],
                 coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },

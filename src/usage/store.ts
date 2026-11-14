@@ -161,6 +161,14 @@ export interface StoredSession extends SessionSighting {
     unownedHitTs: number | null;
     /** Its limits before the report's end, by the owner each records, null for none: when first and last. */
     limitSpans: { owner: SessionOwner | null; firstTs: number; lastTs: number }[];
+    /**
+     * Made with more than one account (see SWITCHED_SESSIONS): its requests
+     * and limits before the report's end, when first and last, by the owner
+     * each records, and those that record none by the change of owner in
+     * force at their time (null, as a report gives them the owner then).
+     * Empty for any other session.
+     */
+    uses: { owner: SessionOwner | null; firstTs: number; lastTs: number }[];
 }
 
 /**
@@ -1233,20 +1241,39 @@ export class UsageStore {
      * requests before any are counted under. Of two at one time, a change a
      * file says now comes after one it said before it was read again. With
      * them, when it first reached a usage limit that records no owner, and
-     * when it first and last reached one, by the owner each records.
+     * when it first and last reached one, by the owner each records; and for
+     * one made with more than one account, when it first and last used each.
      */
     sessions(untilMs = Number.MAX_SAFE_INTEGER): StoredSession[] {
         const accounts = this.owners();
-        const limitSpans = new Map<string, { owner: SessionOwner | null; firstTs: number; lastTs: number }[]>();
-        for (const row of this.db
-            .prepare('SELECT session_id, owner, min(ts) AS first_ts, max(ts) AS last_ts FROM limit_hits WHERE ts < ? GROUP BY session_id, owner')
-            .all(untilMs)) {
-            const id = row.session_id as string;
-            const owner = row.owner === null ? null : (accounts.get(row.owner as number) ?? null);
-            const list = limitSpans.get(id) ?? [];
-            list.push({ owner, firstTs: row.first_ts as number, lastTs: row.last_ts as number });
-            limitSpans.set(id, list);
-        }
+        const spansOf = (sql: string) => {
+            const spans = new Map<string, { owner: SessionOwner | null; firstTs: number; lastTs: number }[]>();
+            for (const row of this.db.prepare(sql).all({ until: untilMs })) {
+                const id = row.session_id as string;
+                const owner = row.owner === null ? null : (accounts.get(row.owner as number) ?? null);
+                const list = spans.get(id) ?? [];
+                list.push({ owner, firstTs: row.first_ts as number, lastTs: row.last_ts as number });
+                spans.set(id, list);
+            }
+            return spans;
+        };
+        const limitSpans = spansOf('SELECT session_id, owner, min(ts) AS first_ts, max(ts) AS last_ts FROM limit_hits WHERE ts < :until GROUP BY session_id, owner');
+        // Looked for first, as for the sums: most histories have none.
+        const switched = this.db.prepare(`SELECT EXISTS (${SWITCHED_SESSIONS}) AS any`).get() as { any: number };
+        const inForce = (table: string) =>
+            `CASE WHEN owner IS NULL THEN (SELECT max(o.since_ts) FROM owner_changes o WHERE o.session_id = ${table}.session_id AND o.since_ts <= ${table}.ts) END`;
+        const uses = switched.any
+            ? spansOf(
+                  `SELECT session_id, owner, min(ts) AS first_ts, max(ts) AS last_ts FROM (
+                       SELECT session_id, owner, ${inForce('requests')} AS in_force, ts FROM requests
+                       WHERE session_id IN (${SWITCHED_SESSIONS}) AND ts < :until
+                       UNION ALL
+                       SELECT session_id, owner, ${inForce('limit_hits')} AS in_force, ts FROM limit_hits
+                       WHERE session_id IN (${SWITCHED_SESSIONS}) AND ts < :until
+                   )
+                   GROUP BY session_id, owner, in_force`,
+              )
+            : new Map<string, { owner: SessionOwner | null; firstTs: number; lastTs: number }[]>();
         const owners = new Map<string, OwnerSpan[]>();
         const changes = this.db
             .prepare(
@@ -1290,6 +1317,7 @@ export class UsageStore {
                 owners: owners.get(row.session_id as string) ?? [],
                 unownedHitTs: row.first_unowned as number | null,
                 limitSpans: limitSpans.get(row.session_id as string) ?? [],
+                uses: uses.get(row.session_id as string) ?? [],
             }));
     }
 

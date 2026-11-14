@@ -109,6 +109,7 @@ export function reportSessions(
             owners: s.owners,
             unownedHitTs: s.unownedHitTs,
             limitSpans: s.limitSpans,
+            uses: s.uses,
         };
     });
 }

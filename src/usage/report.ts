@@ -43,6 +43,13 @@ export interface ReportSession {
     unownedHitTs: number | null;
     /** Its limits before the report's end, by the owner each records, null for none: when first and last. */
     limitSpans: { owner: SessionOwner | null; firstTs: number; lastTs: number }[];
+    /**
+     * Made with more than one account: its requests and limits before the
+     * report's end, when first and last, by the owner each records, null for
+     * those that record none, one entry for each change of owner in force at
+     * their time, which `ownerAt` gives them. Empty for any other session.
+     */
+    uses: { owner: SessionOwner | null; firstTs: number; lastTs: number }[];
 }
 
 export interface ReportInput {
@@ -642,11 +649,15 @@ function usedOwners(s: ReportSession): OwnerSpan[] {
  * used, which tells an account apart. A session counts for each account it
  * used: its first owner from the first of the session's first request, its
  * change's time and its first limit that records no owner; a later one from
- * its change's time, the request or limit after it; each until the next
- * one's, and the last until the session's last request, or a limit it
- * reached after that. A session that used none counts for the sessions that
- * record none, once it has a request or has reached a limit, which a report
- * then gives them too.
+ * its change's time, the request or limit after it. Where it used one, that
+ * one until the session's last request, or a limit it reached after that;
+ * where it used more, each until its own last request or limit there, as the
+ * report counts them (see `ownerAt`), so that a session whose transcripts in
+ * two folders took turns dates each as it was used; one with none before the
+ * report's end until the next one's change, the last until the session's
+ * last request. A session that used none counts for the sessions that record
+ * none, once it has a request or has reached a limit, which a report then
+ * gives them too.
  */
 function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
     const seen = new Map<string, AccountSeen>();
@@ -677,6 +688,14 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
         if (spans.length === 0 && (s.firstTs !== null || unowned !== null)) {
             note(null, s.sessionId, earliest(s.firstTs, unowned?.firstTs ?? null), last);
         }
+        // Made with more than one account: each one's last use, those that record none by their time.
+        const lastUse = new Map<string, number>();
+        for (const use of s.uses) {
+            const owner = use.owner ?? ownerAt(s.owners, use.firstTs);
+            if (owner) {
+                lastUse.set(keyOf(owner), Math.max(lastUse.get(keyOf(owner)) ?? use.lastTs, use.lastTs));
+            }
+        }
         // Dated as the history numbers them: the first from the first of the
         // session's first request, its own change's time and the first limit
         // that records no owner; a later one from its change's.
@@ -685,7 +704,7 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
                 o.owner,
                 s.sessionId,
                 i === 0 ? earliest(earliest(s.firstTs, o.sinceTs), s.unownedHitTs) : o.sinceTs,
-                spans[i + 1]?.sinceTs ?? last,
+                lastUse.get(keyOf(o.owner)) ?? spans[i + 1]?.sinceTs ?? last,
             ),
         );
     }
