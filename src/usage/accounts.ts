@@ -7,6 +7,7 @@
  * Pure, and free of `vscode`: the report and the page both use it.
  */
 
+import { CONFUSABLES } from './confusables';
 import type { AccountName } from './store';
 import type { SessionOwner } from './types';
 
@@ -249,13 +250,90 @@ function labelOf(base: string, organization: string | null): string {
 /** The filter's own options, whose labels no account's may take. */
 const TAKEN = ['All accounts'];
 
+/** What UTS #39 leaves out of a skeleton: every character Unicode says draws nothing. */
+const IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
+
+let prototypes: Map<string, string> | undefined;
+
+/** Each character Unicode lists as confusable, by the prototype it reads as: CONFUSABLES, read once. */
+function prototypesOf(): Map<string, string> {
+    if (prototypes === undefined) {
+        prototypes = new Map();
+        let source = 0;
+        for (const entry of CONFUSABLES.join('').split(',')) {
+            const [gap = '', to = ''] = entry.split(':');
+            const [step = '', count = '1'] = gap.split('*');
+            const run = Number.parseInt(count, 36);
+            const prototype = to.split('.').map(code => Number.parseInt(code, 36));
+            source += Number.parseInt(step, 36);
+            for (let i = 0; i < run; i++) {
+                prototypes.set(String.fromCodePoint(source + i), String.fromCodePoint(...(run > 1 ? prototype.map(code => code + i) : prototype)));
+            }
+            source += run - 1;
+        }
+    }
+    return prototypes;
+}
+
 /**
- * A label as two that read alike share it: in one compatibility form, so
- * that letters drawn in another style are the letters they show, and in one
- * case. Letters of another script that look alike are not folded.
+ * `text` as Unicode's confusables read it, its skeleton (UTS #39):
+ * decomposed, without what draws nothing, each character as the prototype it
+ * reads as. Two texts that show the same have one skeleton.
  */
-function readAs(label: string): string {
-    return label.normalize('NFKC').toLowerCase();
+export function skeleton(text: string): string {
+    const table = prototypesOf();
+    let read = '';
+    for (const c of text.normalize('NFD').replace(IGNORABLE, '')) {
+        read += table.get(c) ?? c;
+    }
+    return read.normalize('NFD');
+}
+
+/**
+ * What a label reads as, in the ways two that read alike share one: as it
+ * shows, as that shows in lower case, and in one compatibility form and case,
+ * so that letters drawn in another style are the letters they show, as that
+ * shows; each as Unicode's confusables read it, so that letters of another
+ * script that show the same are the same.
+ */
+function readings(label: string): string[] {
+    const shown = skeleton(label);
+    return [shown, skeleton(shown.toLowerCase()), skeleton(label.normalize('NFKC').toLowerCase())];
+}
+
+/**
+ * The keys of `labels` whose labels read alike, in sets: two that share a
+ * reading are in one, and so is a third that shares one with either.
+ */
+function alikeSets(labels: ReadonlyMap<string, string>): string[][] {
+    const readingsOf = new Map([...labels].map(([key, label]) => [key, readings(label)]));
+    const byReading = new Map<string, string[]>();
+    for (const [key, read] of readingsOf) {
+        for (const reading of new Set(read)) {
+            byReading.set(reading, [...(byReading.get(reading) ?? []), key]);
+        }
+    }
+    const placed = new Set<string>();
+    const sets: string[][] = [];
+    for (const key of labels.keys()) {
+        if (placed.has(key)) {
+            continue;
+        }
+        const set = [key];
+        placed.add(key);
+        for (let i = 0; i < set.length; i++) {
+            for (const reading of readingsOf.get(set[i]) ?? []) {
+                for (const other of byReading.get(reading) ?? []) {
+                    if (!placed.has(other)) {
+                        placed.add(other);
+                        set.push(other);
+                    }
+                }
+            }
+        }
+        sets.push(set);
+    }
+    return sets;
 }
 
 /**
@@ -267,11 +345,15 @@ function readAs(label: string): string {
  */
 function tellApart(labels: Map<string, AccountLabel>, seen: readonly AccountSeen[]): Map<string, AccountLabel> {
     const owners = new Map(seen.map(s => [s.key, s.owner]));
-    const byLabel = new Map<string, string[]>(TAKEN.map(label => [readAs(label), ['']]));
-    for (const [key, label] of labels) {
-        byLabel.set(readAs(label.label), [...(byLabel.get(readAs(label.label)) ?? []), key]);
-    }
-    const alike = [...byLabel.values()].filter(keys => keys.length > 1);
+    const alike = (shown: ReadonlyMap<string, AccountLabel>) => {
+        // The filter's own labels too, by keys no account's can be.
+        const all = new Map<string, string>(TAKEN.map((label, i) => [`taken ${i}`, label]));
+        for (const [key, label] of shown) {
+            all.set(key, label.label);
+        }
+        return alikeSets(all).filter(keys => keys.length > 1);
+    };
+    const sets = alike(labels);
     const told = new Map(labels);
     const tell = (keys: string[], digits: number) => {
         const accounts = keys.map(key => owners.get(key)?.accountUuid);
@@ -287,15 +369,12 @@ function tellApart(labels: Map<string, AccountLabel>, seen: readonly AccountSeen
             told.set(key, { ...label, label: `${label.label} · ${twice ? `${account}/${owner.organizationUuid?.slice(0, digits) ?? 'no organization'}` : account}` });
         }
     };
-    for (const keys of alike) {
+    for (const keys of sets) {
         tell(keys, 8);
     }
-    const counts = new Map<string, number>(TAKEN.map(label => [readAs(label), 1]));
-    for (const label of told.values()) {
-        counts.set(readAs(label.label), (counts.get(readAs(label.label)) ?? 0) + 1);
-    }
-    for (const keys of alike) {
-        if (keys.some(key => (counts.get(readAs(told.get(key)?.label ?? '')) ?? 0) > 1)) {
+    const still = new Set(alike(told).flat());
+    for (const keys of sets) {
+        if (keys.some(key => still.has(key))) {
             tell(keys, 36);
         }
     }

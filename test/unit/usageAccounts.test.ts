@@ -15,6 +15,7 @@ import {
     nameReplaces,
     numberAccounts,
     showable,
+    skeleton,
     type AccountSeen,
 } from '../../src/usage/accounts';
 import { MAX_CONFIG_BYTES, readClaudeAccounts, topLevel } from '../../src/usage/claudeAccounts';
@@ -209,6 +210,81 @@ suite('usage accounts: keys and labels', () => {
         assert.deepStrictEqual([...labels.values()].map(l => l.label), [`Acme · ${A.slice(0, 8)}`, `${styled} · ${B.slice(0, 8)}`, `ACME · ${C.slice(0, 8)}`]);
         const all = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2)], [], { [A]: 'All accounts' });
         assert.deepStrictEqual([all.get(`${A}/`)?.label, all.get(`${B}/`)?.label], [`All accounts · ${A.slice(0, 8)}`, 'Account 2']);
+    });
+
+    test('labels that show the same, in letters of another script or as Unicode lists them confusable, are told apart, and labels that show otherwise are not', () => {
+        const toldApart = (a: string, b: string) => {
+            const labels = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2)], [], { [A]: a, [B]: b });
+            return [labels.get(`${A}/`)?.label, labels.get(`${B}/`)?.label].every(label => label?.includes(' · ') === true);
+        };
+        const [cyrillicA, cyrillicSmallA, cyrillicSmallEm] = [char(0x0410), char(0x0430), char(0x043c)];
+        const cyrillicIbm = String.fromCodePoint(0x0406, 0x0412, 0x041c);
+        const alike: [string, string][] = [
+            // A Cyrillic capital A where the Latin one is; in lower case, as either.
+            ['Acme', `${cyrillicA}cme`],
+            ['ACME', `${cyrillicSmallA}cme`],
+            [`p${cyrillicSmallA}yp${cyrillicSmallA}l`, 'paypal'],
+            // Three Cyrillic capitals that show as IBM.
+            ['IBM', cyrillicIbm],
+            // Letters of one script that Unicode lists as confusable: rn and m, I and l, 0 and O, and so in lower case.
+            ['matteo@example.com', 'rnatteo@example.com'],
+            ['MATTEO@EXAMPLE.COM', 'rnatteo@example.com'],
+            ['Ian', 'lan'],
+            ['lan', 'IAN'],
+            ['G00GLE', 'GOOGLE'],
+            ['Account 1', 'Account l'],
+            // Katakana ro and the ideograph for mouth.
+            [char(0x30ed), char(0x53e3)],
+            // In one compatibility form, as before, though Unicode's confusables read it as another: a superscript two;
+            // and that form as they read it, beside an m.
+            [`x${char(0xb2)}`, 'x2'],
+            [`m${char(0xb2)}`, 'rn2'],
+            // A Cyrillic capital em shows as M, which in lower case shows as rn.
+            [`${char(0x41c)}atteo@example.com`, 'rnatteo@example.com'],
+            // A superscript zero, whose compatibility form 0 shows as O.
+            ['acmeO', `acme${char(0x2070)}`],
+        ];
+        for (const [a, b] of alike) {
+            assert.ok(toldApart(a, b), `${a} and ${b}`);
+        }
+        const otherwise: [string, string][] = [
+            // A Cyrillic small em shows as a small capital M, not as m.
+            ['Acme', `A${char(0x0441)}${cyrillicSmallEm}e`],
+            // A dotted i is not an l, and nothing makes r, t, u and y one letter.
+            ['ian', 'lan'],
+            ['Ali', 'All'],
+            ['matt@example.com', 'mary@example.com'],
+            ['peter@example.com', 'petey@example.com'],
+            ['straße', 'strasse'],
+        ];
+        for (const [a, b] of otherwise) {
+            assert.ok(!toldApart(a, b), `${a} and ${b}`);
+        }
+        // A name you gave of two capital I where the filter's own has l.
+        const all = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2)], [], { [A]: 'AII accounts' });
+        assert.deepStrictEqual([all.get(`${A}/`)?.label, all.get(`${B}/`)?.label], [`AII accounts · ${A.slice(0, 8)}`, 'Account 2']);
+        // ian reads as Ian in one case, which shows as lan: all three told apart, though ian does not show as lan.
+        const three = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2), seenAs(ownerOf(C), 3)], [], { [A]: 'ian', [B]: 'Ian', [C]: 'lan' });
+        assert.deepStrictEqual([...three.values()].map(l => l.label), [`ian · ${A.slice(0, 8)}`, `Ian · ${B.slice(0, 8)}`, `lan · ${C.slice(0, 8)}`]);
+    });
+
+    test("a skeleton is a text as Unicode's confusables read it, from the table's first entry to its last", () => {
+        // The first entry and the last; a run of fullwidth letters, its first and last and the one after it, which is not one more.
+        assert.strictEqual(skeleton('"'), "''");
+        assert.strictEqual(skeleton(char(0x32a8f)), char(0x2edb5));
+        assert.deepStrictEqual([skeleton(char(0xff12)), skeleton(char(0xff28)), skeleton(char(0xff29)), skeleton(char(0xff2a)), skeleton(char(0xff3f)), skeleton(char(0xff40))], ['2', 'H', 'l', 'J', '_', "'"]);
+        // A prototype of more than one character, one Unicode gives with its marks out of order, and one character of each kind left as it is.
+        assert.strictEqual(skeleton('m'), 'rn');
+        assert.strictEqual(skeleton(char(0xfdf2)), String.fromCodePoint(0x6c, 0x644, 0x644, 0xe48, 0x10d27, 0x6f));
+        assert.deepStrictEqual([skeleton('a'), skeleton('l'), skeleton('O'), skeleton('rn')], ['a', 'l', 'O', 'rn']);
+        // Decomposed, before and after, so that two marks whose prototypes take each other's order are in order;
+        // without what draws nothing; and the same for text that shows the same.
+        assert.strictEqual(skeleton('é'), `e${char(0x301)}`);
+        assert.strictEqual(skeleton(char(0x451)), `e${char(0x308)}`);
+        assert.strictEqual(skeleton(`a${char(0x5a4)}${char(0x5ad)}`), `a${char(0x596)}${char(0x59a)}`);
+        assert.strictEqual(skeleton(`a${char(0xad)}b`), 'ab');
+        assert.strictEqual(skeleton(`p${char(0x0430)}yp${char(0x0430)}l`), skeleton('paypal'));
+        assert.strictEqual(skeleton(String.fromCodePoint(0x1d400)), 'A');
     });
 
     test('a name you give stands in place of the email, as its labels show it, else of its number, or of its id until it has one', () => {

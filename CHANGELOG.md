@@ -24,10 +24,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   it, and keeps, and **Name…** gives it a name of your own, kept in a new
   setting, **Claude Code Account Names**, which Settings Sync leaves out
   while LLM Tokenizer is installed in the Default profile, whose settings
-  hold it. Sessions with no account recorded, from before Claude Code
-  recorded it, signed in with an API key or through a cloud provider, or
-  whose transcripts Claude Code had deleted before this version first read
-  them, are *Not recorded*.
+  hold it. Labels that would read alike end with the first digits of their
+  accounts' ids, letters of another script that look the same included, as
+  Unicode lists them confusable. Sessions with no account recorded, from
+  before Claude Code recorded it, signed in with an API key or through a
+  cloud provider, or whose transcripts Claude Code had deleted before this
+  version first read them, are *Not recorded*.
 - **One account at a time.** A filter beside the scope narrows the whole
   page to one account, or to the sessions that record none: totals, days,
   models, projects, sessions and usage limits.
