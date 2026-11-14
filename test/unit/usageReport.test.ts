@@ -848,11 +848,13 @@ suite('usage report', () => {
 
         test("a session's last account is never dated to a limit another reached, an account used only by a limit dated ahead is offered as it is numbered, and a session with only such a limit is no Not recorded", async () => {
             const F = '6f7a8b9c-adbe-4fc0-8b1c-4d5e6f7a8b9c';
+            const [G, H, I] = ['7a8b9cad-bec0-4d1e-8f2a-5b6c7d8e9f0a', '8b9cadbe-c0d1-4e2f-9a3b-6c7d8e9f0a1b', '9cadbec0-d1e2-4f3a-8b4c-7d8e9f0a1b2c'];
             // One session, its transcripts in two folders: under A in one, a request and later A's own refusal; under B in the other, a request between.
             // Each with one more, dated ahead of the clock: not counted yet.
             transcript('-repo-one', 's1.jsonl', [
                 owner('s1', A, ORG_A),
                 assistantRecord('s1', 'm-a', '2026-10-09T10:10:00Z', 3),
+                assistantRecord('s1', 'm-a-later', '2026-10-09T10:40:00Z', 0),
                 limitHit('s1', 'hit-a', '2026-10-09T10:50:00Z'),
                 limitHit('s1', 'hit-a-ahead', '2026-10-12T11:00:00Z'),
             ]);
@@ -862,10 +864,20 @@ suite('usage report', () => {
                 assistantRecord('s1', 'm-b', '2026-10-09T10:20:01Z', 5),
                 assistantRecord('s1', 'm-b-ahead', '2026-10-12T11:30:00Z', 100),
             ]);
-            // Its subagent's requests, which record no owner: each the owner's at its time, A's before B's request, B's after.
+            // Its subagent's requests and refusal, which record no owner: each the owner's at its time, A's before B's request, B's after.
             transcript('-repo-one', path.join('s1', 'subagents', 'agent-y.jsonl'), [
                 { ...assistantRecord('s1', 'm-s1-agent-a', '2026-10-09T10:15:00Z', 1), isSidechain: true, agentId: 'y' },
                 { ...assistantRecord('s1', 'm-s1-agent-b', '2026-10-09T10:30:00Z', 1), isSidechain: true, agentId: 'y' },
+                { ...limitHit('s1', 'hit-agent-b', '2026-10-09T10:35:00Z'), isSidechain: true, agentId: 'y' },
+            ]);
+            // One more under G, then resumed under H and I, both only past the clock (a wrong one): neither takes an end from it.
+            transcript('-repo-one', 's4.jsonl', [
+                owner('s4', G),
+                assistantRecord('s4', 'm-s4-g', '2026-10-09T09:30:00Z', 1),
+                owner('s4', H),
+                assistantRecord('s4', 'm-s4-h', '2026-10-12T11:00:00Z', 1),
+                owner('s4', I),
+                assistantRecord('s4', 'm-s4-i', '2026-10-12T12:00:00Z', 1),
             ]);
             // A session signed in to F, nothing asked, whose only use is a refusal in its subagent's transcript, dated two days ahead of the clock (a wrong one).
             transcript('-repo-one', 's2.jsonl', [owner('s2', F), userRecord('s2', '/repo/one', '2026-10-09T09:00:00Z')]);
@@ -875,9 +887,19 @@ suite('usage report', () => {
             await importRoots(store, [path.join(tmp, 'root')]);
             const report = queryReport(store, query());
             const seen = Object.fromEntries(report.accountsSeen.map(a => [a.key, [a.firstTs, a.lastTs]]));
-            // Each until its own last use, though their transcripts took turns: A its refusal, B its subagent's request.
+            // Each until its own last use, though their transcripts took turns: A its refusal, after its own request and B's;
+            // B its subagent's refusal, which records no owner, not A's request after it.
             assert.deepStrictEqual(seen[keyA], [Date.parse('2026-10-09T10:10:00Z'), Date.parse('2026-10-09T10:50:00Z')]);
-            assert.deepStrictEqual(seen[keyB], [Date.parse('2026-10-09T10:20:01Z'), Date.parse('2026-10-09T10:30:00Z')]);
+            assert.deepStrictEqual(seen[keyB], [Date.parse('2026-10-09T10:20:01Z'), Date.parse('2026-10-09T10:35:00Z')]);
+            // G until its request; H and I from their changes, as the numbering takes them, and with no end.
+            assert.deepStrictEqual(
+                [seen[`${G}/`], seen[`${H}/`], seen[`${I}/`]],
+                [
+                    [Date.parse('2026-10-09T09:30:00Z'), Date.parse('2026-10-09T09:30:00Z')],
+                    [Date.parse('2026-10-12T11:00:00Z'), null],
+                    [Date.parse('2026-10-12T12:00:00Z'), null],
+                ],
+            );
             // As the report counts their tokens: the subagent's first request A's, its second B's.
             const tokens = Object.fromEntries(report.accounts.map(a => [a.key, a.totals.output]));
             assert.deepStrictEqual([tokens[keyA], tokens[keyB]], [4, 6]);

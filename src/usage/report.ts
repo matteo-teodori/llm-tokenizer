@@ -653,11 +653,10 @@ function usedOwners(s: ReportSession): OwnerSpan[] {
  * one until the session's last request, or a limit it reached after that;
  * where it used more, each until its own last request or limit there, as the
  * report counts them (see `ownerAt`), so that a session whose transcripts in
- * two folders took turns dates each as it was used; one with none before the
- * report's end until the next one's change, the last until the session's
- * last request. A session that used none counts for the sessions that record
- * none, once it has a request or has reached a limit, which a report then
- * gives them too.
+ * two folders took turns dates each as it was used, and one with none there
+ * before the report's end takes no end from it: nothing there counts as its.
+ * A session that used none counts for the sessions that record none, once it
+ * has a request or has reached a limit, which a report then gives them too.
  */
 function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
     const seen = new Map<string, AccountSeen>();
@@ -675,8 +674,8 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
     };
     for (const s of sessions) {
         const spans = usedOwners(s);
-        // A session's last use: its last request, or a limit its last owner
-        // reached after it, never one another account reached.
+        // Made with one account or none: its last request, or a limit its
+        // owner reached after it, never one another account reached.
         const unowned = s.limitSpans.find(h => h.owner === null) ?? null;
         const lastSpan = spans[spans.length - 1];
         const ownedEnd = lastSpan
@@ -704,7 +703,7 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
                 o.owner,
                 s.sessionId,
                 i === 0 ? earliest(earliest(s.firstTs, o.sinceTs), s.unownedHitTs) : o.sinceTs,
-                lastUse.get(keyOf(o.owner)) ?? spans[i + 1]?.sinceTs ?? last,
+                spans.length > 1 ? (lastUse.get(keyOf(o.owner)) ?? null) : last,
             ),
         );
     }
