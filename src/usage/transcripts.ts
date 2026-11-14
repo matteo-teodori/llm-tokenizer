@@ -14,6 +14,13 @@
  *   `…/subagents/workflows/wf_<run>/agent-<id>.jsonl` a workflow agent (the
  *   latter undocumented); a subagent's records are only in its own file;
  * - `journal.jsonl` holds no usage (0 markers in 6,730 lines) and is skipped;
+ * - a session's owner, the Claude account and organization it was signed in
+ *   to, is a `session-owner` record in its main transcript only (863 of 863
+ *   on 5,102 files), written since Claude Code 2.1.318 or so, in November
+ *   2026: when a session starts, before its first request, again with the
+ *   rest of its metadata, and when it is resumed under another account, so
+ *   that a session from before then, resumed since, has one too, after its
+ *   older requests: ids only, never a name;
  * - `<project>` is the cwd with every non-alphanumeric character replaced, so
  *   it is lossy and never decoded.
  *
@@ -28,13 +35,44 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { isSyntheticModel, variantOf } from './modelIds';
-import type { Compaction, LimitHit, TranscriptKind, UsageRequest } from './types';
+import type { Compaction, LimitHit, OwnerChange, SessionOwner, TranscriptKind, UsageRequest } from './types';
 
 /**
- * Bumped whenever what a line becomes changes; a bump re-reads every file.
+ * Bumped whenever what a line becomes changes.
  * 2: each request's `usage.speed` and `usage.inference_geo`.
+ * 3, 4: builds of 2.4.0 made before its release, and no other: the account
+ *    each request was made with, from its main transcript's `session-owner`
+ *    records, some taken by time, and changes of owner begun at an error's
+ *    placeholder.
+ * 5: only the owner a request's own transcript records before it, none for
+ *    a subagent's; a change of owner begins with the next request kept or
+ *    limit reached, never an error's placeholder, and of several before
+ *    one, only the last. What parsers 3 and 4 wrote is undone where it
+ *    differs (see `completeSchema4` in store.ts): their main transcripts are
+ *    searched for their owners again, the owners they took by time dropped,
+ *    and their other files kept as they are; the bump also stops a window
+ *    still running one (see `outdated`).
  */
-export const PARSER_VERSION = 2;
+export const PARSER_VERSION = 5;
+
+/**
+ * The oldest parser whose rows this one keeps. A file it or a later one read
+ * is read on from its checkpoint; one an older parser read is read again
+ * whole, its rows replaced. Parser 3 only reads lines parser 2 passed over,
+ * so parser 2's rows stand: what parser 3 needs from the bytes before such a
+ * checkpoint, a main transcript's owner, is searched for there alone (see
+ * `OWNERS_SINCE`). On the heaviest history measured that is a scan of the
+ * main transcripts, 678 MB of its 12.6 GB, where reading every file again
+ * would have replaced all of its 405,584 requests.
+ */
+export const ROWS_SINCE = 2;
+
+/**
+ * The first parser that reads owners: a main transcript's bytes before an
+ * older one's checkpoint are searched for them, and the rows read from them
+ * then given theirs by where they are in the file (see `UsageStore.giveOwners`).
+ */
+export const OWNERS_SINCE = 3;
 
 /** Bytes read at a time. */
 const CHUNK_BYTES = 1 << 20;
@@ -82,6 +120,14 @@ const ASSISTANT = Buffer.from('assistant"');
 const SYSTEM = Buffer.from('system"');
 const COMPACT_BOUNDARY = Buffer.from('"subtype":"compact_boundary"');
 const API_ERROR = Buffer.from('"subtype":"api_error"');
+const SESSION_OWNER = Buffer.from('session-owner"');
+/** The whole key and value, which the scan of bytes an older parser read looks for alone. */
+const SESSION_OWNER_TYPE = Buffer.from('"type":"session-owner"');
+/** And a request's, which that scan parses only while an owner it found waits for its time. */
+const ASSISTANT_TYPE = Buffer.from('"type":"assistant"');
+
+/** A Claude account's or organization's id, as Claude Code writes them; lower-cased when kept. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Bounds on the strings kept, so a hostile record cannot bloat the store. */
 const MAX_ID = 200;
@@ -333,12 +379,38 @@ export interface ReadResult {
     firstCwdTs: number | null;
     /** The session id the records gave, for files whose path does not. */
     sessionId: string | null;
+    /**
+     * Each session's owner changing, in the order of the transcript: an
+     * owner record that names another account than the one before it, the
+     * same one written again with the session's metadata left out. Only in a
+     * main transcript, and each request read is stamped with the owner then.
+     */
+    ownerChanges: OwnerChange[];
+    /**
+     * Each session's first request in this read, by its time, where it
+     * comes before any change of the session's owner in this read: what
+     * gives the change an earlier read left at the file's end its time. A
+     * change read first instead leaves that one with none, as one no
+     * request was ever made under.
+     */
+    firstRequestTs: Map<string, number>;
     newestVersion: string | null;
     synthetic: number;
     apiErrors: number;
     oversize: number;
     malformed: Map<MalformedCategory, number>;
     checkpoint: ReadCheckpoint;
+}
+
+/** A read in progress: what it has found, and each session's owner where it is. */
+interface Reading {
+    result: ReadResult;
+    /** The owner each session's records are under at this point of the file. */
+    inForce: Map<string, SessionOwner>;
+    /** Owner changes no request has followed yet, by session: the next one gives the last of them its time. */
+    pending: Map<string, OwnerChange[]>;
+    /** Sessions whose owner changed in this read: their requests no longer settle an earlier read's change. */
+    changed: Set<string>;
 }
 
 /**
@@ -350,9 +422,18 @@ export interface ReadResult {
  * Only whole lines are consumed: the checkpoint never passes the last newline,
  * so a line Claude Code is still writing is read once it is complete.
  *
+ * `inForce`: each session's owner at the checkpoint, as earlier reads of the
+ * file left it; the records read on from there are under it until another
+ * owner record. Not used when the file is read from its start.
+ *
  * @throws the file system's error, for the caller to count as a skip reason.
  */
-export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | undefined, progress?: () => void): ReadResult {
+export function readTranscript(
+    file: TranscriptFile,
+    previous: ReadCheckpoint | undefined,
+    progress?: () => void,
+    inForce?: ReadonlyMap<string, SessionOwner>,
+): ReadResult {
     // Non-blocking, so that a FIFO under the projects folder cannot hang the
     // worker in open(); anything but a regular file is then refused.
     const fd = fs.openSync(file.path, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
@@ -371,6 +452,8 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
             firstCwd: null,
             firstCwdTs: null,
             sessionId: null,
+            ownerChanges: [],
+            firstRequestTs: new Map(),
             newestVersion: null,
             synthetic: 0,
             apiErrors: 0,
@@ -393,8 +476,16 @@ export function readTranscript(file: TranscriptFile, previous: ReadCheckpoint | 
         result.restarted = previous ? restartReason(fd, state, previous) : 'new';
         const start = result.restarted === null ? (previous?.offset ?? 0) : 0;
         result.checkpoint.offset = start;
+        // Bytes an older parser read are searched from the start, owners and all.
+        const scan = start > 0 && previous !== undefined && needsOwnerScan(file, previous);
+        const reading: Reading = { result, inForce: new Map(start > 0 && !scan ? (inForce ?? []) : []), pending: new Map(), changed: new Set() };
 
-        readLines(fd, start, state.size, file, result, progress);
+        if (scan) {
+            // Before the lines read on from the checkpoint, so that these are
+            // under the last owner written before them.
+            readLines(fd, 0, start, file, reading, progress, 'owners');
+        }
+        readLines(fd, start, state.size, file, reading, progress);
         result.checkpoint.tailHash = tailHash(fd, result.checkpoint.offset);
         return result;
     } finally {
@@ -423,7 +514,15 @@ function restartReason(fd: number, state: FileState, previous: ReadCheckpoint): 
             return 'rewritten';
         }
     }
-    return previous.parserVersion < PARSER_VERSION ? 'parser' : null;
+    return previous.parserVersion < ROWS_SINCE ? 'parser' : null;
+}
+
+/**
+ * Whether the bytes before `previous`'s checkpoint are to be searched for
+ * owner records: a main transcript's, read by a parser before OWNERS_SINCE.
+ */
+export function needsOwnerScan(file: Pick<TranscriptFile, 'kind'>, previous: Pick<ReadCheckpoint, 'parserVersion'>): boolean {
+    return file.kind === 'main' && previous.parserVersion < OWNERS_SINCE;
 }
 
 /** A hash of the TAIL_BYTES before `offset`, or null at the start of a file. */
@@ -443,15 +542,29 @@ function tailHash(fd: number, offset: number): string | null {
  * The unterminated tail is held as a list of chunks and joined only once its
  * newline arrives, never on every read: joining on every chunk is quadratic
  * on a long line.
+ *
+ * `owners`: bytes an older parser has read already, searched for owner
+ * records alone, up to the checkpoint, and for the time of the request after
+ * each. Nothing else in them is used again, and a line too long to read was
+ * counted when they were read.
  */
-function readLines(fd: number, start: number, size: number, file: TranscriptFile, result: ReadResult, progress?: () => void): void {
+function readLines(
+    fd: number,
+    start: number,
+    size: number,
+    file: TranscriptFile,
+    reading: Reading,
+    progress?: () => void,
+    mode: 'all' | 'owners' = 'all',
+): void {
+    const result = reading.result;
     const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
     let position = start;
     let lineStart = start;
     let pending: Buffer[] = [];
     let pendingBytes = 0;
     let skipping = false;
-    let needCwd = file.kind === 'main';
+    let needCwd = file.kind === 'main' && mode === 'all';
 
     while (position < size) {
         progress?.();
@@ -485,15 +598,22 @@ function readLines(fd: number, start: number, size: number, file: TranscriptFile
             if (skipping || pendingBytes + piece.length > MAX_LINE_BYTES) {
                 // Too long to be a record: dropped, and the checkpoint moves
                 // past it anyway.
-                result.oversize++;
-                count(result.malformed, 'oversize');
+                if (mode === 'all') {
+                    result.oversize++;
+                    count(result.malformed, 'oversize');
+                }
                 skipping = false;
             } else {
                 const line = pendingBytes === 0 ? piece : Buffer.concat([...pending, piece], pendingBytes + piece.length);
-                needCwd = useLine(line, lineOffset, file, result, needCwd);
+                if (mode === 'all') {
+                    needCwd = useLine(line, lineOffset, file, reading, needCwd);
+                } else {
+                    useOwnerLine(line, lineOffset, file, reading);
+                }
             }
             pending = [];
             pendingBytes = 0;
+            // Bytes searched for owners end where the checkpoint is already.
             result.checkpoint.offset = lineStart;
             from = newline + 1;
         }
@@ -503,7 +623,7 @@ function readLines(fd: number, start: number, size: number, file: TranscriptFile
 
 /**
  * What a line may hold, from its bytes: an assistant record, a compaction,
- * an API error, or nothing worth parsing.
+ * an API error, a session's owner, or nothing worth parsing.
  *
  * One pass over the line, for every `"type":"` in it, overlapping ones
  * included, so it finds every `"type":"assistant"` that searching for the
@@ -512,14 +632,19 @@ function readLines(fd: number, start: number, size: number, file: TranscriptFile
  * exactly the lines the three separate needles did, in 1.46 s against
  * 2.78 s: those scanned each user line, most of the bytes, three times.
  */
-function lineKind(bytes: Buffer): 'assistant' | 'compaction' | 'api-error' | null {
+function lineKind(bytes: Buffer): 'assistant' | 'compaction' | 'api-error' | 'owner' | null {
     let system = false;
+    let owner = false;
     for (let i = bytes.indexOf(TYPE_KEY); i !== -1; i = bytes.indexOf(TYPE_KEY, i + 1)) {
         const value = i + TYPE_KEY.length;
         if (startsAt(bytes, ASSISTANT, value)) {
             return 'assistant';
         }
         system ||= startsAt(bytes, SYSTEM, value);
+        owner ||= startsAt(bytes, SESSION_OWNER, value);
+    }
+    if (owner) {
+        return 'owner';
     }
     if (!system) {
         return null;
@@ -532,7 +657,8 @@ function startsAt(bytes: Buffer, needle: Buffer, at: number): boolean {
 }
 
 /** Use one whole line. Returns whether a main transcript still needs its cwd. */
-function useLine(line: Buffer, offset: number, file: TranscriptFile, result: ReadResult, needCwd: boolean): boolean {
+function useLine(line: Buffer, offset: number, file: TranscriptFile, reading: Reading, needCwd: boolean): boolean {
+    const result = reading.result;
     // Tolerate a CRLF file: the record is the same.
     const bytes = line.length > 0 && line[line.length - 1] === 0x0d ? line.subarray(0, line.length - 1) : line;
     if (bytes.length === 0) {
@@ -583,16 +709,132 @@ function useLine(line: Buffer, offset: number, file: TranscriptFile, result: Rea
     }
 
     if (r.type === 'assistant') {
-        parseAssistant(r, offset, file, result);
+        parseAssistant(r, offset, file, reading);
     } else if (r.type === 'system' && r.subtype === 'compact_boundary') {
         parseCompaction(r, file, result);
     } else if (r.type === 'system' && r.subtype === 'api_error') {
         result.apiErrors++;
+    } else if (r.type === 'session-owner' && file.kind === 'main') {
+        parseOwner(r, offset, file, reading);
     }
     return needCwd;
 }
 
-function parseAssistant(r: Record<string, unknown>, offset: number, file: TranscriptFile, result: ReadResult): void {
+/**
+ * A line of bytes an older parser read: used only when it is a session's
+ * owner, or, while an owner found waits for its time, a request, whose time
+ * gives it.
+ */
+function useOwnerLine(line: Buffer, offset: number, file: TranscriptFile, reading: Reading): void {
+    const bytes = line.length > 0 && line[line.length - 1] === 0x0d ? line.subarray(0, line.length - 1) : line;
+    if (bytes.length > MAX_PARSED_LINE_BYTES) {
+        return;
+    }
+    const owner = bytes.includes(SESSION_OWNER_TYPE);
+    if (!owner && !(reading.pending.size > 0 && bytes.includes(ASSISTANT_TYPE))) {
+        return;
+    }
+    let record: unknown;
+    try {
+        record = JSON.parse(bytes.toString('utf8'));
+    } catch {
+        // Counted, if it held a record, when these bytes were read.
+        return;
+    }
+    const r = objectOf(record);
+    if (r?.type === 'session-owner') {
+        parseOwner(r, offset, file, reading);
+    } else if (r?.type === 'assistant') {
+        const timestamp = recordTime(r.timestamp);
+        const sessionId = boundedString(r.sessionId, MAX_ID) ?? file.sessionId;
+        if (timestamp !== null && sessionId && isUse(r)) {
+            settlePending(reading, sessionId, timestamp);
+        }
+    }
+}
+
+/**
+ * Whether an assistant record is a use of the account a session is under:
+ * a request kept (a model's, with an id and usage), or a limit reached.
+ * An error's placeholder, such as a request refused for a bad key, is not:
+ * nothing is ever shown under the account for it. As `parseAssistant` keeps
+ * them.
+ */
+function isUse(r: Record<string, unknown>): boolean {
+    const m = objectOf(r.message);
+    const model = m && boundedString(m.model, MAX_MODEL);
+    if (!m || !model) {
+        return false;
+    }
+    return limitOf(r) !== null || (!isSyntheticModel(model) && boundedString(m.id, MAX_ID) !== null && objectOf(m.usage) !== undefined);
+}
+
+/** A refused request's limit: its type, and the record's id. */
+function limitOf(r: Record<string, unknown>): { quota: Record<string, unknown>; uuid: string; limitType: string } | null {
+    const quota = objectOf(r.quotaLimits);
+    const uuid = boundedString(r.uuid, MAX_ID);
+    const limitType = boundedString(quota?.rateLimitType, MAX_ID);
+    return quota && uuid && limitType ? { quota, uuid, limitType } : null;
+}
+
+/**
+ * A session's owner: the account and, where it names one, the organization
+ * it was signed in to, by id. The records after it are under it, until the
+ * next; one that names the account already in force is the session's
+ * metadata written again, and changes nothing.
+ */
+function parseOwner(r: Record<string, unknown>, offset: number, file: TranscriptFile, reading: Reading): void {
+    const account = r.accountUuid;
+    const organization = r.organizationUuid;
+    const sessionId = boundedString(r.sessionId, MAX_ID) ?? file.sessionId;
+    const organizationOk = organization === undefined || organization === null || organization === '' || (typeof organization === 'string' && UUID.test(organization));
+    if (typeof account !== 'string' || !UUID.test(account) || !organizationOk || !sessionId) {
+        count(reading.result.malformed, 'bad-field:session-owner');
+        return;
+    }
+    const owner: SessionOwner = {
+        accountUuid: account.toLowerCase(),
+        organizationUuid: typeof organization === 'string' && organization !== '' ? organization.toLowerCase() : null,
+    };
+    const before = reading.inForce.get(sessionId);
+    if (before && before.accountUuid === owner.accountUuid && before.organizationUuid === owner.organizationUuid) {
+        return;
+    }
+    const change: OwnerChange = { sessionId, offset, owner, sinceTs: null };
+    reading.result.ownerChanges.push(change);
+    reading.pending.set(sessionId, [...(reading.pending.get(sessionId) ?? []), change]);
+    reading.inForce.set(sessionId, owner);
+    reading.changed.add(sessionId);
+}
+
+/**
+ * A session's request at `timestamp`: the last owner change that waits for
+ * one begins then. Those before it were never in force for a request, a
+ * session resumed under one account and then another before it asked
+ * anything, and keep no time: no account is counted as used for them.
+ */
+function settlePending(reading: Reading, sessionId: string, timestamp: number): void {
+    const pending = reading.pending.get(sessionId);
+    if (pending && pending.length > 0) {
+        pending[pending.length - 1].sinceTs = timestamp;
+    }
+    reading.pending.delete(sessionId);
+}
+
+/**
+ * A use of the account at `timestamp` (see `isUse`): it begins the owner
+ * change waiting for one, and is the session's first in this read, which
+ * gives an earlier read's change its time, unless a change came first.
+ */
+function began(reading: Reading, sessionId: string, timestamp: number): void {
+    settlePending(reading, sessionId, timestamp);
+    if (!reading.result.firstRequestTs.has(sessionId) && !reading.changed.has(sessionId)) {
+        reading.result.firstRequestTs.set(sessionId, timestamp);
+    }
+}
+
+function parseAssistant(r: Record<string, unknown>, offset: number, file: TranscriptFile, reading: Reading): void {
+    const result = reading.result;
     const message = r.message;
     if (typeof message !== 'object' || message === null) {
         count(result.malformed, 'bad-field:message');
@@ -614,15 +856,21 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         count(result.malformed, 'bad-field:sessionId');
         return;
     }
+    // The account it was made with, where its own transcript says: the
+    // session's owner at this point of it. Where none does, a subagent's
+    // transcript among them, a report goes by the time of the request and
+    // the session's owners (see report.ts), never fixed here by what has
+    // been read so far.
+    const owner = reading.inForce.get(sessionId) ?? null;
 
     // A refused request records which limit it hit. Measured, all 657 such
     // records are the <synthetic> placeholders with zero usage, so this comes
     // before they are set aside below. It is a log of hits, not a gauge of how
     // much of an allowance is used.
-    const quota = objectOf(r.quotaLimits);
-    const uuid = boundedString(r.uuid, MAX_ID);
-    const limitType = boundedString(quota?.rateLimitType, MAX_ID);
-    if (quota && uuid && limitType) {
+    const limit = limitOf(r);
+    if (limit) {
+        const { quota, uuid, limitType } = limit;
+        began(reading, sessionId, timestamp);
         const resetsAt = quota.resetsAt;
         result.limitHits.push({
             uuid,
@@ -637,6 +885,7 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
                 resetsAt * 1000 < LATEST_TIME
                     ? resetsAt
                     : null,
+            owner,
         });
     }
 
@@ -654,6 +903,7 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         count(result.malformed, 'bad-field:message.usage');
         return;
     }
+    began(reading, sessionId, timestamp);
 
     const cacheCreation = objectOf(usage.cache_creation);
     const serverTools = objectOf(usage.server_tool_use);
@@ -708,6 +958,7 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         file: file.path,
         byteOffset: offset,
         parserVersion: PARSER_VERSION,
+        owner,
     });
 }
 

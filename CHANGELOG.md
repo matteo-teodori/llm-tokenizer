@@ -4,6 +4,55 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.4.0] - 2026-11-14
+
+### Added
+- **Tokens by account.** Claude Code records, in each session's transcript,
+  which Claude account and organization the session is signed in to, by id,
+  since version 2.1.318 or so, and again when it is resumed under another.
+  A new **Accounts** section splits the tokens by the account each request
+  was made with, a session's subagents included, so that a session resumed
+  under another account after a usage limit counts under each for its own
+  requests; with each one's sessions, tokens and share, and, below it, when
+  it was used and in which projects.
+  An account is named as Claude Code names it, by its email and, unless it
+  is a personal one, its organization, from Claude Code's own configuration
+  file: the one it is signed in to now, marked *signed in now*, and every
+  one it keeps a list of. The history keeps those names, so an account you
+  have since signed out of keeps its name; one never named there is
+  *Account 3*, by a number the history gives each account as it first sees
+  it, and keeps, and **Name…** gives it a name of your own, kept in a new
+  setting, **Claude Code Account Names**, which Settings Sync leaves out
+  while LLM Tokenizer is installed in the Default profile, whose settings
+  hold it. Labels that would read alike, letters of another script that
+  look the same included, as Unicode lists them confusable, end with the
+  first digits of what tells them apart: their accounts' ids, and their
+  organizations' where one account is there twice. Sessions with no account
+  recorded, from before Claude Code recorded it, signed in with an API key
+  or through a cloud provider, or whose transcripts Claude Code had deleted
+  before this version first read them, are *Not recorded*.
+- **One account at a time.** A filter beside the scope narrows the whole
+  page to one account, or to the sessions that record none: totals, days,
+  models, projects, sessions and usage limits.
+
+### Changed
+- **A usage limit is an account's.** Limits reached on two accounts are no
+  longer merged into one: each counts under the account that reached it,
+  even in a session since resumed under another, and says whose it is while
+  the page shows more than one account.
+- **Copy Sessions** adds each session's `account`, and both exports' notes
+  say which account they hold when one is chosen.
+- **Updating reads only what it must.** Picking up the accounts of requests
+  read before searches the main transcripts' earlier bytes for owner
+  records, and the time of the request after each, alone: on 12.6 GB of
+  transcripts, 1.5 s, where reading every file again took 22 s and would
+  have rewritten every request.
+- **Old copies of the history go.** A version that only adds to the history
+  no longer copies all of it first, and once the history is converted, the
+  copies earlier versions kept are removed: 371 MB on the heaviest history
+  measured. A version that builds part of it anew still keeps the copy it
+  started from.
+
 ## [2.3.0] - 2026-11-12
 
 ### Changed

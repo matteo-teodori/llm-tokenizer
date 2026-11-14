@@ -15,6 +15,9 @@
  * being bundled drops out and a new one cannot be forgotten. Nothing needs
  * building first: the bundles, encodings included, are listed in
  * `bundles.mjs`, and esbuild resolves them from source.
+ *
+ * Last comes Unicode's licence, for the table of confusable characters that
+ * scripts/confusables.mjs makes from its data, at the version the table says.
  */
 
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
@@ -52,17 +55,36 @@ const sections = [...bundled].sort().map(name => {
     ].join('\n');
 });
 
+// Not a package: the table of confusable characters, made from Unicode's data
+// by scripts/confusables.mjs, which says the version it is from.
+const unicodeVersion = /CONFUSABLES_VERSION = '([\d.]+)'/.exec(readFileSync(new URL('src/usage/confusables.ts', root), 'utf8'))?.[1];
+if (!unicodeVersion) {
+    console.error('src/usage/confusables.ts says no version.');
+    process.exit(1);
+}
+const unicode = [
+    `## Unicode confusables (UTS #39) ${unicodeVersion}`,
+    '',
+    'Unicode-3.0 · https://www.unicode.org/reports/tr39/',
+    '',
+    '```',
+    readFileSync(new URL('scripts/unicode-license.txt', root), 'utf8').trim(),
+    '```',
+].join('\n');
+
 const updated = `${[
     '# Third-party notices',
     '',
     'The extension is shipped as a bundle: every dependency is compiled into',
     '`out/*.js` and no `node_modules` directory is packaged. The licences of the',
-    'code compiled in are reproduced in full below. The extension itself is MIT;',
-    'see LICENSE.',
+    'code compiled in, and of the Unicode data its table of confusable characters',
+    'is made from, are reproduced in full below. The extension itself is MIT; see',
+    'LICENSE.',
     '',
     'This file is generated — run `npm run notices` after changing dependencies.',
     '',
     ...sections,
+    unicode,
 ].join('\n')}\n`;
 
 if (check) {
@@ -72,8 +94,8 @@ if (check) {
         console.error('Run `npm run notices` and commit the result.');
         process.exit(1);
     }
-    console.log(`Third-party notices are up to date (${bundled.size} bundled packages).`);
+    console.log(`Third-party notices are up to date (${bundled.size} bundled packages, Unicode ${unicodeVersion}).`);
 } else {
     writeFileSync(noticesPath, updated);
-    console.log(`Wrote notices for ${bundled.size} bundled packages: ${[...bundled].sort().join(', ')}.`);
+    console.log(`Wrote notices for ${bundled.size} bundled packages: ${[...bundled].sort().join(', ')}; and Unicode ${unicodeVersion}.`);
 }

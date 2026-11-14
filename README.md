@@ -50,7 +50,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 - **Selection Counting**: Count only the text you highlighted
 - **Runs off the UI thread**: Tokenizing happens in a worker thread, so the editor never blocks
 - **Persistent Preferences**: Your model choice is remembered
-- **Claude Code usage (optional, off by default)**: how many tokens Claude Code processed, by day, project, session and model, read from its own records on your machine. See [Claude Code Usage](#claude-code-usage).
+- **Claude Code usage (optional, off by default)**: how many tokens Claude Code processed, by day, account, project, session and model, read from its own records on your machine. See [Claude Code Usage](#claude-code-usage).
 
 ### 🔒 Privacy
 **Your code never leaves your machine.** There is no telemetry and no network
@@ -58,8 +58,9 @@ request that contains file contents. The only network access is a one-time
 download of a model's *vocabulary file* from huggingface.co, which you can turn
 off with `llm-tokenizer.downloadTokenizers`; a repository's own settings can
 turn it off for that repository, never back on. Claude Code usage, if you turn it
-on, reads Claude Code's own session records on this machine and sends nothing
-anywhere.
+on, reads Claude Code's own session records, the accounts its configuration
+file names and its settings files, of which it keeps three entries, on this
+machine, and sends nothing anywhere.
 
 ### ⚙️ Configuration
 - `llm-tokenizer.defaultModel`: Model used until you pick one
@@ -70,6 +71,7 @@ anywhere.
 - `llm-tokenizer.enableClaudeCodeUsage`: Read Claude Code's session records to show its usage (off by default)
 - `llm-tokenizer.claudeCodeDataDirectory`: Claude Code's configuration folder, when Claude Code's own rules would not find it
 - `llm-tokenizer.showClaudeCodeUsageInStatusBar`: Show the live context of the Claude Code session in this workspace (off by default)
+- `llm-tokenizer.claudeCodeAccountNames`: Names of your own for Claude accounts in Claude Code usage, by account id (set with **Name…**)
 
 ## Supported Models
 
@@ -142,7 +144,7 @@ Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
 - **Ignore Gitignored Files**: exclude `.gitignore` matches from counts (on by default)
 - **Enable Project Scan**: turn off workspace-wide counting on very large repositories
 - **Download Tokenizers**: allow the one-time download that makes counts exact
-- **Enable Claude Code Usage**, **Claude Code Data Directory** and **Show Claude Code Usage in Status Bar**: see [Claude Code Usage](#claude-code-usage)
+- **Enable Claude Code Usage**, **Claude Code Data Directory**, **Show Claude Code Usage in Status Bar** and **Claude Code Account Names**: see [Claude Code Usage](#claude-code-usage)
 
 ### Context Warnings
 - **Normal**: under 80% of the model's usable input limit
@@ -163,22 +165,24 @@ way. While it is off, the page says what turning it on reads and keeps, with
 the T, right-click the editor's title bar and choose
 **Hide 'Show Claude Code Usage'**.
 
-<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, down to its projects, turns to the second page of its sessions, each with its active time, and the status item's tooltip shows the running session's context">
+<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, to its accounts and one account alone and back, down to its projects, turns to the second page of its sessions, each with its active time, and the status item's tooltip shows the running session's context">
 
 **The panel** shows today, the last 7 or 30 days, or everything since the
-history starts, for all projects or for this workspace:
+history starts, for all projects or for this workspace, and for every Claude
+account or one:
 - tokens processed, split into input, cache writes, cache reads and output,
   with the share of it that was cache reads;
 - a column per day, in your time zone;
 - models, the main conversation against subagents and workflows, and effort;
-- projects and sessions, sortable, each session with its active time, and
-  the usage limits you reached, newest first; a long list shows ten rows a
-  page, and a swipe or the ‹ › beside its heading turns the page;
+- the Claude accounts the requests were made with, projects and sessions,
+  sortable, each session with its active time, and the usage limits you
+  reached, newest first; a long list shows ten rows a page, and a swipe or
+  the ‹ › beside its heading turns the page;
 - diagnostics: what was read, what was skipped and why, and where from.
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days: 1.7B tokens processed, 95% of them cache reads, in 12,455 requests and 85 sessions, split into cache reads, cache writes, input and output, by day and by model">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days, every account: 1.6B tokens processed, 95% of them cache reads, in 12,050 requests and 87 sessions, split into cache reads, cache writes, input and output, by day and by model">
 </picture>
 
 *Processed* is everything a request sent or received: input, cache writes,
@@ -194,6 +198,40 @@ many of the files it has gone through, and shows the totals as they grow.
 included, leaving out every pause of over 15 minutes: Claude and its tools at
 work, and your replies within that, rather than how long the session stayed
 open.
+
+**Accounts.** Claude Code records, in each session's transcript, which Claude
+account and organization the session is signed in to, by id, and records it
+again when the session is resumed under another; the Accounts section splits
+the tokens by the account each request was made with, a session's subagents
+included, and the filter beside the scope shows one account at a time: its
+totals, days, models, projects, sessions and usage limits, each limit said to
+be the account's that reached it. An account is named as Claude Code names it, by its email and,
+unless it is a personal one, its organization, from Claude Code's own
+configuration file (`~/.claude.json`, or `.claude.json` in
+`CLAUDE_CONFIG_DIR`, or `.config.json` in Claude Code's configuration folder,
+`~/.claude` or `CLAUDE_CONFIG_DIR`, the name older versions gave it): the
+account it is signed in to now, marked *signed in now*, and every account it
+keeps a list of. Where both `~/.claude.json` and
+`~/.claude/.claude.json` are in use, by Claude Code started without
+`CLAUDE_CONFIG_DIR` and with it, both name accounts, the newer name first,
+and the one written last says which is signed in now. The history keeps those names,
+so an account you have since signed out of keeps its name; one never named
+there is *Account 3*, by a number the history gives each account as it first
+sees it, and keeps. Below each, when it was used and in which projects tell
+it apart, and **Name…** gives it a name of your own, kept in **Claude Code
+Account Names** by its id (on hover). Labels that would read alike, two
+organizations of one name say, or letters of another script that show as the
+other's do (as Unicode lists them confusable), end with the first digits of
+what tells them apart: their accounts' ids, and their organizations' where
+one account is there twice. A session resumed under another
+account, after a usage limit say, counts under each for its own requests, and
+the limit under the account that reached it; one from before Claude Code
+recorded accounts counts under the first account it records, its older
+requests included. Sessions whose transcripts record no account are *Not
+recorded*: those Claude Code wrote before it began
+recording accounts, around version 2.1.318 in November 2026, those signed in
+with an API key or through a cloud provider, and those whose transcripts
+Claude Code had deleted before this version first read the history.
 
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
 the context of the Claude Code session running in this workspace is, as a
@@ -221,8 +259,9 @@ by what a request's price depends on besides its model: its speed (`fast` is
 billed higher), where it ran (`us` is billed higher), and its prompt size (up to
 100,000 tokens, up to 200,000, or more: Claude Haiku 5.5 prices a request over
 100,000 higher). Its notes say how to read each of those. It gives no prices.
-**Copy** copies the sessions, with each one's active minutes, for a
-spreadsheet.
+**Copy Sessions** copies the sessions, with each one's active minutes and
+account, for a spreadsheet. Both say in their notes which account they hold, when one is
+chosen.
 
 **What is kept, and where.** A database in this extension's own storage
 (the `claude-code-usage` folder in VS Code's global storage for LLM
@@ -231,9 +270,14 @@ Tokenizer) keeps:
   Claude Code version, and its ids: message, request, session, and the
   subagent or workflow run it came from;
 - the folder each session started in;
+- the Claude account and organization each request was made with, by id,
+  and where each session's changed in its transcript; for each account its
+  number in the history, and the email and organization name Claude Code
+  last gave it, with when;
 - each transcript's path, size, file id and how far it was read, with a hash
   of the last 64 bytes read, to tell what changed;
-- compactions' sizes, and the usage limits reached, with when they reset;
+- compactions' sizes, and the usage limits reached, with when they reset and
+  the account that reached each, by id;
 - the window's process id and this machine's name, which each import writes
   so that two windows never import at once.
 
@@ -241,22 +285,47 @@ Prompts, responses, thinking and tool inputs or results are never kept, and
 nothing is sent anywhere. The history outlives Claude Code's own records,
 which Claude Code deletes after 30 days by default. A history that can no
 longer be read is set aside, left as it is, and a new one started, and the
-panel says so until it is cleared; a version that converts the history to a
-newer format keeps a copy of it as it was. **Clear Claude Code Usage
+panel says so until it is cleared; a version that builds part of the history
+anew keeps a copy of it as it was, and the copies earlier versions kept are
+removed once the history is converted. **Clear Claude Code Usage
 History** removes the history and every such copy, and leaves nothing of
 them readable on disk. What another window still holds, a copy it has open or a
 read it has not finished, goes once that window lets go of it, the next
 time any window uses the history; Clear says when a copy has to wait.
 Anything still on disk is read again at the next refresh. The panel also
-remembers its range, its scope and your time zone, in the editor's own
-state.
+remembers its range, its scope, the account chosen and your time zone, in the
+editor's own state.
+
+From Claude Code's configuration file it reads only the account signed in now
+(`oauthAccount`) and the accounts it keeps a list of (`knownAccounts`): their
+ids, emails and organizations' names. Nothing else in that file is parsed,
+and the diagnostics say which files they were. From its settings files,
+`settings.json` in `~/.claude` and in each data folder and the organization's
+managed settings files, it keeps three `env` entries and nothing else:
+`CLAUDE_CONFIG_DIR`, which says where the records are,
+`CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
 
 Its settings are machine settings, so a repository's settings cannot turn it
-on or point it at another folder. In a dev container, though, the container's
-settings can come from the repository's `devcontainer.json`.
+on or point it at another folder; the names you give accounts are an
+application setting, which only your own settings hold: the Default profile's,
+whichever profile is in use. Settings Sync leaves each of them out while LLM
+Tokenizer is installed in the profile whose settings hold it. Where it is not,
+add them to `settingsSync.ignoredSettings` to keep them on this machine: the
+names with LLM Tokenizer installed only in a profile other than Default, or in
+a remote window, where it runs on the remote; and all four
+(`llm-tokenizer.enableClaudeCodeUsage`,
+`llm-tokenizer.claudeCodeDataDirectory`,
+`llm-tokenizer.showClaudeCodeUsageInStatusBar` and
+`llm-tokenizer.claudeCodeAccountNames`) with it in a profile that uses another
+profile's settings. In a dev container, though, the container's settings can
+come from the repository's `devcontainer.json`.
 
 **Before uninstalling**, run **Clear Claude Code Usage History**: the editor
-may leave this extension's storage on disk after the extension is gone.
+may leave this extension's storage on disk after the extension is gone. The
+names you gave accounts stay in your settings until you remove **Claude Code
+Account Names**, and once LLM Tokenizer is gone Settings Sync no longer leaves
+them, or the usage settings, out: with Settings Sync on, remove them first, or
+add them to `settingsSync.ignoredSettings`.
 
 ### What it counts, and what it cannot see
 
@@ -274,6 +343,11 @@ may leave this extension's storage on disk after the extension is gone.
 - Records dated more than a day after this machine's clock, which only a
   wrong clock writes: they are kept, and counted once this clock reaches
   them.
+- The account of a session Claude Code wrote before it recorded accounts,
+  signed in with an API key or through a cloud provider, or whose transcript
+  Claude Code had deleted before this version read it: Not recorded. A
+  session from before then that was resumed since records the account it was
+  resumed with, and its older requests count under that one.
 
 The records' format is internal to Claude Code and may change with it; the
 diagnostics say when lines could not be read.

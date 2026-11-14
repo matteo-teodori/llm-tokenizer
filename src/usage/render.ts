@@ -18,9 +18,10 @@
 import { RANKED_BARS_CSS, THEME_TOKENS_CSS, rankedBars, type RankedValue } from '../charts';
 import { PAGE_TEXT_HELPERS, embed, escapeHtml } from '../html';
 import { formatNumber } from '../utils';
+import { ALL_ACCOUNTS, NOT_RECORDED, accountLabels, type AccountLabel } from './accounts';
 import type { UsageTotals } from './aggregate';
 import { totalPrefix } from './provenance';
-import { ACTIVE_PAUSE_MS, type ModelRow, type RangeKey, type UsageReport } from './report';
+import { ACTIVE_PAUSE_MS, type AccountRow, type ModelRow, type RangeKey, type UsageReport } from './report';
 import type { Reading, UsageStatus } from './usageService';
 
 /** What the panel shows besides the report: status, scope, and diagnostics. */
@@ -30,6 +31,10 @@ export interface PanelView {
     reading: Reading | undefined;
     range: RangeKey;
     scope: 'all' | 'workspace';
+    /** The account filter: ALL_ACCOUNTS, or one account's key. */
+    account: string;
+    /** The names you gave accounts, by account id, from the setting. */
+    givenNames: Readonly<Record<string, string>>;
     zone: string;
     /** "on <host>" in a remote window, empty locally. */
     where: string;
@@ -39,6 +44,8 @@ export interface PanelView {
     modelLabel(id: string): string;
     /** Each root considered, as shown: `~`-relative, with what chose it in words. */
     roots: { path: string; source: string; exists: boolean; notAbsolute?: true }[];
+    /** Claude Code's configuration files the account names are read from, as shown: `~`-relative. */
+    accountFiles: string[];
     historyDisabled: boolean;
     lastImport: LastImport | undefined;
     sqliteRuntime: { node: string; electron: string | null } | undefined;
@@ -66,9 +73,31 @@ export interface LastImport {
     elapsedMs: number;
 }
 
+/**
+ * The range, scope and account as chosen, and what the account filter
+ * offers: what the page brings its controls up to date from, in place.
+ */
+export interface Choices {
+    range: RangeKey;
+    scope: 'all' | 'workspace';
+    /** The text of the button for everything held: `Since` and the day the history starts. */
+    since: string;
+    /** The account filter, where the page shows one. */
+    account: { value: string; options: { value: string; label: string; disabled?: true }[] } | null;
+}
+
 /** What one post carries: the fragments, and the rows the page's exports are built from. */
 export interface PanelFragments {
+    /**
+     * The range, scope and account, as the page first shows them; after
+     * that, `choices` brings them up to date in place, so that a control in
+     * use is never rebuilt under it. Rebuilt from this only when the account
+     * filter comes or goes.
+     */
     controls: string;
+    choices: Choices | null;
+    /** Refresh and when the page was refreshed: changed whenever a pass reads or ends. */
+    status: string;
     body: string;
     diagnostics: string;
     /** Every input of a hand-made cost calculation, by day and model; never a price. */
@@ -97,13 +126,16 @@ function emptyState(view: PanelView): string | undefined {
             <section class="empty-state">
                 <h2>Claude Code usage is off</h2>
                 <p>Turned on, LLM Tokenizer reads Claude Code's own session records ${view.where ? escapeHtml(view.where) : 'on this machine'},
-                in the projects folder of its configuration folder (<code>~/.claude</code> by default), and shows how many tokens Claude Code processed: by day, project, session and model.</p>
+                in the projects folder of its configuration folder (<code>~/.claude</code> by default), and shows how many tokens Claude Code processed: by day, account, project, session and model.
+                From Claude Code's configuration file (<code>~/.claude.json</code> by default, or <code>.claude.json</code> in its configuration folder, or <code>.config.json</code> there, the name older versions gave it) it reads only the Claude accounts it names,
+                and from its settings files (<code>settings.json</code> in <code>~/.claude</code> and in its configuration folder, and the organization's managed settings) it keeps three <code>env</code> entries alone: where its records are, and two switches.</p>
                 <p>Kept, in a database in this extension's own storage:</p>
                 <ul>
                     <li>each request's token counts, model, effort, speed, where it ran, time and Claude Code version, and its ids: message, request, session, and the subagent or workflow run it came from;</li>
                     <li>the folder each session started in;</li>
+                    <li>the Claude account and organization each request was made with, by id, and where each session's changed in its transcript; for each account its number in the history, and the email and organization name Claude Code last gave it, with when;</li>
                     <li>each transcript's path, size, file id and how far it was read, with a hash of the last 64 bytes read, to tell what changed;</li>
-                    <li>compactions' sizes, and the usage limits reached, with when they reset;</li>
+                    <li>compactions' sizes, and the usage limits reached, with when they reset and the account that reached each, by id;</li>
                     <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
                 </ul>
                 <p>Never kept: prompts, responses, thinking, tool inputs or results. Nothing is sent anywhere. The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Claude Code Usage History removes it.</p>
@@ -197,14 +229,40 @@ function mark(view: PanelView, provenance: UsageTotals['provenance']): '' | '≥
     return view.reading ? '≥' : totalPrefix(provenance);
 }
 
-/** The range and scope buttons, and the refresh line. */
-function controls(view: PanelView): string {
+/** The range and scope chosen, the account, and what the filter offers. */
+function choicesOf(view: PanelView): Choices {
     const report = view.report;
-    const since = report?.coverage.start != null ? ` ${view.formatDate(report.coverage.start)}` : '';
+    return {
+        range: view.range,
+        scope: view.scope,
+        since: `${RANGE_LABELS.coverage}${report?.coverage.start != null ? ` ${view.formatDate(report.coverage.start)}` : ''}`,
+        account: accountFilter(view),
+    };
+}
+
+/** The range and scope buttons, and the account filter. */
+function controls(choices: Choices): string {
     const range = (key: RangeKey) =>
-        `<button type="button" data-range="${key}" aria-pressed="${view.range === key}">${RANGE_LABELS[key]}${key === 'coverage' ? escapeHtml(since) : ''}</button>`;
+        `<button type="button" data-range="${key}" aria-pressed="${choices.range === key}">${escapeHtml(key === 'coverage' ? choices.since : RANGE_LABELS[key])}</button>`;
     const scope = (key: 'all' | 'workspace', label: string) =>
-        `<button type="button" data-scope="${key}" aria-pressed="${view.scope === key}">${label}</button>`;
+        `<button type="button" data-scope="${key}" aria-pressed="${choices.scope === key}">${label}</button>`;
+    const filter = choices.account
+        ? `<select class="account-filter" data-account-filter aria-label="Account">${choices.account.options
+              .map(
+                  o =>
+                      `<option value="${escapeHtml(o.value)}"${o.value === choices.account?.value && !o.disabled ? ' selected' : ''}${o.disabled ? ' disabled' : ''}>${escapeHtml(o.label)}</option>`,
+              )
+              .join('')}</select>`
+        : '';
+    return `
+        <div class="segmented" role="group" aria-label="Range">${(['today', '7d', '30d', 'coverage'] as const).map(range).join('')}</div>
+        <div class="segmented" role="group" aria-label="Scope">${scope('all', 'All projects')}${scope('workspace', 'This workspace')}</div>
+        ${filter}`;
+}
+
+/** Refresh, and the line that says when the page was refreshed and how new its newest record is. */
+function status(view: PanelView): string {
+    const report = view.report;
     const newest = report?.coverage.newest != null ? `newest record ${escapeHtml(view.formatTime(report.coverage.newest))}` : '';
     const refreshed = view.refreshedAt !== undefined ? `refreshed ${escapeHtml(view.formatTime(view.refreshedAt))}` : '';
     // Busy while a pass reads, rather than a click that seems to do nothing:
@@ -213,10 +271,49 @@ function controls(view: PanelView): string {
         ? '<button type="button" data-action="refresh" aria-disabled="true">Reading…</button>'
         : '<button type="button" data-action="refresh">Refresh</button>';
     return `
-        <div class="segmented" role="group" aria-label="Range">${(['today', '7d', '30d', 'coverage'] as const).map(range).join('')}</div>
-        <div class="segmented" role="group" aria-label="Scope">${scope('all', 'All projects')}${scope('workspace', 'This workspace')}</div>
         ${refresh}
         <span class="muted">${[refreshed, newest].filter(Boolean).join(' · ')}${view.where ? ` · ${escapeHtml(view.where)}` : ''}</span>`;
+}
+
+/** Whether the history has seen any account: until it has, nothing on the page speaks of them. */
+function hasAccounts(report: UsageReport | undefined): report is UsageReport {
+    return report !== undefined && report.accountsSeen.some(a => a.owner !== null);
+}
+
+/** Every account's label, by key: see accounts.ts. */
+function labelsOf(view: PanelView): Map<string, AccountLabel> {
+    return view.report ? accountLabels(view.report.accountsSeen, view.report.accountNames, view.givenNames) : new Map<string, AccountLabel>();
+}
+
+/** A key's label; one past the lists' caps, or no longer in the history, by the first digits of its account's id. */
+function labelOf(labels: Map<string, AccountLabel>, key: string): string {
+    return labels.get(key)?.label ?? (key === NOT_RECORDED ? 'Not recorded' : `Account ${key.slice(0, 8)}`);
+}
+
+/**
+ * The account filter, once the history has seen two: every account by its
+ * number, and the sessions that record none. One chosen that the history no
+ * longer holds, after a Clear, is still offered while it is.
+ */
+function accountFilter(view: PanelView): Choices['account'] {
+    const report = view.report;
+    if (!hasAccounts(report) || (report.accountsSeen.length < 2 && view.account === ALL_ACCOUNTS)) {
+        return null;
+    }
+    const labels = labelsOf(view);
+    const keys = report.accountsSeen.map(a => a.key);
+    if (view.account !== ALL_ACCOUNTS && !keys.includes(view.account)) {
+        keys.push(view.account);
+    }
+    const more = report.omitted.accountsSeen;
+    return {
+        value: view.account,
+        options: [
+            { value: ALL_ACCOUNTS, label: 'All accounts' },
+            ...keys.map(key => ({ value: key, label: labelOf(labels, key) })),
+            ...(more > 0 ? [{ value: '', label: `…and ${more.toLocaleString('en-US')} more, with fewer sessions`, disabled: true as const }] : []),
+        ],
+    };
 }
 
 /**
@@ -419,12 +516,16 @@ function limitWindows(report: UsageReport, view: PanelView): string {
     }
     // Newest first: the page in view on opening is the latest limits.
     const windows = [...report.limitWindows].reverse();
+    // A limit is an account's: where the page holds more than one account's
+    // sessions, each says whose, though one account alone hit any.
+    const labels = labelsOf(view);
+    const whose = new Set(windows.map(w => w.account)).size > 1 || (view.account === ALL_ACCOUNTS && report.accountsSeen.length > 1);
     const pages = pagesOf(windows).map(
         (page, i) =>
             `<ul class="page plain-list"${i > 0 ? ' inert' : ''}>${page
                 .map(
                     w =>
-                        `<li><span>${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
+                        `<li><span>${whose ? `${escapeHtml(labelOf(labels, w.account))}: ` : ''}${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
                             w.hits === 1 ? 'request' : 'requests'
                         } refused from ${escapeHtml(view.formatTime(w.firstTs))}</span><span class="reason">${
                             w.resetsAt !== null ? `reset ${escapeHtml(view.formatTime(w.resetsAt * 1000))}` : ''
@@ -437,7 +538,7 @@ function limitWindows(report: UsageReport, view: PanelView): string {
         ${sectionHead('Usage limits reached', 'limits', windows.length)}
         ${strip('limits', 'Usage limits reached', windows.length, pages)}
         ${report.omitted.limitWindows > 0 ? `<p class="truncation">…and ${report.omitted.limitWindows.toLocaleString('en-US')} earlier ones, not listed.</p>` : ''}
-        <p class="note">For the whole account, whichever project hit them, newest first.</p>
+        <p class="note">${whose ? 'Each for its whole account' : 'For the whole account'}, whichever project hit them, newest first.</p>
     </section>`;
 }
 
@@ -485,6 +586,93 @@ function table(
         ${strip(id, title, rows.length, pages, ` data-sort="${initial}" data-ascending="false"`)}`;
 }
 
+/**
+ * The accounts the range's tokens went through, with what tells each apart:
+ * its name, when it was used, and in which projects. Shown once the history
+ * has seen an account, and while every account is: one chosen is the whole
+ * page.
+ */
+function accounts(report: UsageReport, view: PanelView): string {
+    if (view.account !== ALL_ACCOUNTS || !report.accounts.some(a => a.owner !== null)) {
+        return '';
+    }
+    const total = report.totals.processed;
+    const labels = labelsOf(view);
+    const seen = new Map(report.accountsSeen.map(a => [a.key, a]));
+    const current = new Set(report.currentAccounts);
+    const unrecorded = report.accounts.some(a => a.owner === null);
+    return `
+    <section class="panel">
+        ${table(
+            'accounts',
+            'Accounts',
+            [
+                { key: 'label', label: 'Account' },
+                { key: 'sessions', label: 'Sessions', numeric: true, width: '14%' },
+                { key: 'processed', label: 'Processed', numeric: true, width: '22%' },
+                { key: 'share', label: 'Share', numeric: true, width: '12%' },
+            ],
+            report.accounts.map(a => {
+                const label = labels.get(a.key);
+                const used = seen.get(a.key);
+                return {
+                    keys: { label: labelOf(labels, a.key), sessions: a.sessions, processed: a.totals.processed, share: a.totals.processed },
+                    cells: [
+                        accountCell(view, a, label, used?.firstTs ?? null, used?.lastTs ?? null, current.has(a.key)),
+                        a.sessions.toLocaleString('en-US'),
+                        processedCell(view, a.totals, a.models),
+                        total > 0 ? cut(a.totals.processed / total, 1) : '—',
+                    ],
+                };
+            }),
+            'processed',
+        )}
+        ${capNote(report.omitted.accounts, 'accounts')}
+        <p class="note">An account is the Claude account and organization a request was made with, as its session's transcript records it, its subagents' included: a session resumed under another account counts under each for its own requests, and one from before Claude Code recorded accounts under the first it records. Its name is the one Claude Code gave it while this history was kept, or the one you give it.${
+            unrecorded
+                ? ' Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in November 2026, those signed in with an API key or through a cloud provider, and those Claude Code had deleted before this version first read them.'
+                : ''
+        }</p>
+    </section>`;
+}
+
+/**
+ * An account's cell: its label, whether Claude Code is signed in to it now,
+ * a button to name it, and, below, when it was used and in which projects,
+ * which tell apart an account with no name. Every id and date on hover.
+ */
+function accountCell(view: PanelView, row: AccountRow, label: AccountLabel | undefined, firstTs: number | null, lastTs: number | null, current: boolean): string {
+    const name = label?.label ?? (row.owner ? `Account ${row.key.slice(0, 8)}` : 'Not recorded');
+    const span = firstTs !== null && lastTs !== null ? `${view.formatDate(firstTs)} – ${view.formatDate(lastTs)}` : '';
+    const hint = [span, row.projects.join(', ')].filter(Boolean).join(' · ');
+    const title = row.owner
+        ? [
+              name,
+              label?.named && label.claudeName ? `Claude Code calls it ${label.claudeName}` : '',
+              current ? 'Claude Code is signed in to it now' : '',
+              `Account ${row.owner.accountUuid}`,
+              row.owner.organizationUuid ? `Organization ${row.owner.organizationUuid}` : 'No organization',
+              firstTs !== null && lastTs !== null ? `Used from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
+              row.projects.length > 0 ? `In ${row.projects.join(', ')}` : '',
+          ]
+        : [
+              'Sessions whose transcripts record no account',
+              firstTs !== null && lastTs !== null ? `Used from ${view.formatTime(firstTs)} to ${view.formatTime(lastTs)}` : '',
+              row.projects.length > 0 ? `In ${row.projects.join(', ')}` : '',
+          ];
+    // Its account's id names it in the setting; its key finds the button
+    // again after an update, as one account's organizations share the id.
+    const verb = label?.named ? 'Rename' : 'Name';
+    const button = row.owner
+        ? `<button type="button" class="name" data-action="nameAccount" data-account="${escapeHtml(row.owner.accountUuid)}" data-key="${escapeHtml(
+              row.key,
+          )}" aria-label="${escapeHtml(`${verb} ${name}`)}" title="${verb} this account in this panel">${verb}…</button>`
+        : '';
+    return `<div class="account-line"><span class="account-name" title="${escapeHtml(title.filter(Boolean).join('\n'))}">${escapeHtml(name)}</span>${
+        current ? '<span class="badge">signed in now</span>' : ''
+    }${button}</div><div class="account-hint">${escapeHtml(hint)}</div>`;
+}
+
 function projects(report: UsageReport, view: PanelView): string {
     const total = report.totals.processed;
     return `
@@ -514,6 +702,7 @@ function projects(report: UsageReport, view: PanelView): string {
 }
 
 function sessions(report: UsageReport, view: PanelView): string {
+    const labels = hasAccounts(report) ? labelsOf(view) : undefined;
     return `
     <section class="panel">
         ${table(
@@ -543,7 +732,9 @@ function sessions(report: UsageReport, view: PanelView): string {
                         compactions: s.compactions.length,
                     },
                     cells: [
-                        `<span title="${escapeHtml(`Session ${s.sessionId}`)}">${escapeHtml(s.firstTs !== null ? view.formatTime(s.firstTs) : '—')}</span>`,
+                        `<span title="${escapeHtml(`Session ${s.sessionId}${labels ? `\n${accountsLine(labels, s.accounts, s.moreAccounts)}` : ''}`)}">${escapeHtml(
+                            s.firstTs !== null ? view.formatTime(s.firstTs) : '—',
+                        )}</span>`,
                         `<span title="${escapeHtml(s.label)}">${escapeHtml(s.label)}</span>`,
                         between ? `<span title="${escapeHtml(between)}">${formatActive(s.activeMs)}</span>` : formatActive(s.activeMs),
                         s.totals.coverage.requests.toLocaleString('en-US'),
@@ -559,6 +750,12 @@ function sessions(report: UsageReport, view: PanelView): string {
             ACTIVE_PAUSE_MS / 60_000
         } minutes: Claude and its tools at work, and your replies within that.</p>
     </section>`;
+}
+
+/** The accounts a session's requests were made with, as its hover says: one resumed under another names both, the first used first. */
+function accountsLine(labels: Map<string, AccountLabel>, keys: string[], more: number): string {
+    const named = keys.map(key => labelOf(labels, key)).join(', then ');
+    return `${keys.length + more > 1 ? 'Accounts' : 'Account'}: ${named}${more > 0 ? `, and ${more.toLocaleString('en-US')} more` : ''}`;
 }
 
 /** The most models a row's Processed cell names on hover; the rest are counted. */
@@ -648,6 +845,12 @@ function diagnostics(view: PanelView): string {
     if (view.recoveredFrom) {
         rows.push(['Set aside', escapeHtml(view.recoveredFrom)]);
     }
+    rows.push([
+        'Account names',
+        view.accountFiles.length > 0
+            ? `from ${view.accountFiles.map(f => `<span class="path">${escapeHtml(f)}</span>`).join(', ')}`
+            : "no Claude Code configuration file found",
+    ]);
     rows.push(['Time zone', escapeHtml(view.zone)]);
     return `
     <details class="panel" id="diagnostics">
@@ -665,6 +868,36 @@ function diagnostics(view: PanelView): string {
     </details>`;
 }
 
+/**
+ * A range with no request in it, saying why: nothing read yet, nothing read
+ * of the range yet, or none made in it, by the account chosen or in this
+ * workspace. Refused requests are no requests, but a limit reached in the
+ * range is listed all the same, and said to be.
+ */
+function emptyRange(report: UsageReport, view: PanelView): string {
+    const limits = report.limitWindows.length > 0;
+    const heading = !limits ? 'Nothing in this range' : view.reading ? 'No request read in this range yet' : 'No request in this range';
+    const why =
+        view.reading && limits
+            ? // A range the reading has not reached is not one without requests.
+              'No request has been read in this range yet; the usage limits read in it so far are below.'
+            : report.coverage.requests === 0
+              ? 'No Claude Code requests have been read yet.'
+              : view.reading
+                ? 'Nothing has been read in this range yet.'
+                : view.account !== ALL_ACCOUNTS
+                  ? `${
+                        view.account === NOT_RECORDED
+                            ? 'No request of a session that records no account'
+                            : `No request made with ${escapeHtml(labelOf(labelsOf(view), view.account))}`
+                    } falls in this range${view.scope === 'workspace' ? ' in a folder of this workspace' : ''}.`
+                  : view.scope === 'workspace'
+                    ? 'No session in this range started in a folder of this workspace.'
+                    : 'No requests fall in this range.';
+    const reached = limits && !view.reading ? ' Usage limits were reached in it: they are below.' : '';
+    return `${banner(view)}<section class="empty-state"><h2>${heading}</h2><p>${why}${reached}</p></section>${limitWindows(report, view)}`;
+}
+
 /** The fragments for one post. */
 export function renderFragments(view: PanelView): PanelFragments {
     const empty = emptyState(view);
@@ -673,20 +906,14 @@ export function renderFragments(view: PanelView): PanelFragments {
         empty ??
         (report
             ? report.totals.coverage.requests === 0
-                ? `${banner(view)}<section class="empty-state"><h2>Nothing in this range</h2><p>${
-                      report.coverage.requests === 0
-                          ? 'No Claude Code requests have been read yet.'
-                          : view.reading
-                            ? // A range the reading has not reached yet is not one without requests.
-                              'Nothing has been read in this range yet.'
-                            : view.scope === 'workspace'
-                              ? 'No session in this range started in a folder of this workspace.'
-                              : 'No requests fall in this range.'
-                  }</p></section>`
-                : `${banner(view)}${overview(report, view)}${projects(report, view)}${sessions(report, view)}`
+                ? emptyRange(report, view)
+                : `${banner(view)}${overview(report, view)}${accounts(report, view)}${projects(report, view)}${sessions(report, view)}`
             : `${banner(view)}<p class="muted">Reading Claude Code's records…</p>`);
+    const choices = empty ? null : choicesOf(view);
     return {
-        controls: empty ? '' : controls(view),
+        controls: choices ? controls(choices) : '',
+        choices,
+        status: empty ? '' : status(view),
         body,
         diagnostics: empty && view.status === 'off' ? '' : diagnostics(view),
         csv: csvRows(view),
@@ -749,6 +976,7 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
 
 function copyRows(view: PanelView): PanelFragments['copy'] {
     const report = view.report;
+    const labels = labelsOf(view);
     const rows = (report?.sessions ?? []).map(s => [
         s.firstTs !== null ? view.formatTime(s.firstTs) : '',
         s.label,
@@ -756,13 +984,17 @@ function copyRows(view: PanelView): PanelFragments['copy'] {
         String(s.totals.coverage.requests),
         String(s.totals.processed),
         String(Math.round(s.activeMs / 60_000)),
+        [...s.accounts.map(key => labelOf(labels, key)), ...(s.moreAccounts > 0 ? [`and ${s.moreAccounts.toLocaleString('en-US')} more`] : [])].join('; '),
     ]);
     const notes = exportNotes(view);
     notes.push(`active_minutes is the time between a session's requests in the range, pauses of over ${ACTIVE_PAUSE_MS / 60_000} minutes left out`);
     if (report && report.omitted.sessions > 0) {
         notes.push(`${report.omitted.sessions} smaller sessions are counted in the totals but not listed`);
     }
-    return { header: ['started', 'project', 'session', 'requests', 'processed', 'active_minutes'], rows, notes };
+    notes.push(
+        "account is the Claude account a session's requests were made with, as the panel names it, those of one resumed under another separated by semicolons, the first used first; Not recorded where its transcripts record none",
+    );
+    return { header: ['started', 'project', 'session', 'requests', 'processed', 'active_minutes', 'account'], rows, notes };
 }
 
 /** The `# key: value` lines every export opens with. */
@@ -771,11 +1003,34 @@ function exportNotes(view: PanelView): string[] {
     return [
         `extension: LLM Tokenizer ${view.extensionVersion}`,
         `time zone: ${view.zone}`,
-        `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}`,
+        `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}${accountNote(view)}`,
         'each request is its record with the largest output per message.id',
         `history since: ${report?.coverage.start !== null && report?.coverage.start !== undefined ? new Date(report.coverage.start).toISOString() : ''}`,
     ];
 }
+
+/**
+ * The account an export holds, when one is chosen, for its range note. A
+ * label is another program's text, an organization's name its admin's. In
+ * the CSV, a note line stays one comment, never quoted, so that a reader
+ * that skips lines starting with `#` still does: a comma or a semicolon in
+ * the label, which a spreadsheet splits cells at, as it is set to, would
+ * start a cell, a formula perhaps, so each is written as a space. What
+ * follows a fixed comma of the note then starts with a word of it.
+ */
+function accountNote(view: PanelView): string {
+    if (view.account === ALL_ACCOUNTS) {
+        return '';
+    }
+    return view.account === NOT_RECORDED
+        ? ', the sessions that record no account'
+        : `, account ${labelOf(labelsOf(view), view.account)
+              .replace(/[,;]/g, ' ')
+              .replace(/\s+/g, ' ')}`;
+}
+
+/** How long the account filter's value must stay put before it is sent. */
+export const ACCOUNT_SETTLE_MS = 250;
 
 /** The page: rendered once; everything in it after that arrives as fragments. */
 export function renderUsagePage(nonce: string, csp: string, first: PanelFragments): string {
@@ -799,6 +1054,8 @@ body {
 }
 .wrap { max-width: 960px; margin: 0 auto; }
 #controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 18px; }
+/* Two regions, updated apart, laid out as one row. */
+#choices, #status { display: contents; }
 .segmented { display: inline-flex; }
 button {
     padding: 3px 10px;
@@ -871,6 +1128,22 @@ table.page td, table.page th button { overflow-wrap: anywhere; }
 table.page th button { max-width: 100%; }
 table.page td.label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 0 12px; }
+select.account-filter {
+    max-width: 22em;
+    padding: 2px 6px;
+    font: inherit;
+    color: var(--vscode-dropdown-foreground, var(--ink));
+    background: var(--vscode-dropdown-background, var(--surface));
+    border: 1px solid var(--vscode-dropdown-border, var(--hairline));
+    border-radius: 3px;
+}
+select.account-filter:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+/* An account's name, and what tells it apart below it: each line cut, its title whole. */
+.account-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.account-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.account-line .badge { flex: none; color: var(--ink-muted); font-size: 0.85em; }
+.account-line button.name { flex: none; margin-left: auto; padding: 0 6px; font-size: 0.85em; }
+.account-hint { overflow: hidden; text-overflow: ellipsis; color: var(--ink-muted); font-size: 0.85em; }
 .section-head h2 { margin: 0; }
 .pager { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-muted); font-size: 0.9em; font-variant-numeric: tabular-nums; }
 .pager button { padding: 0 9px; }
@@ -900,19 +1173,21 @@ table.page { table-layout: fixed; }
 </head>
 <body>
 <div class="wrap">
-<div id="controls">${first.controls}</div>
+<div id="controls"><div id="choices">${first.controls}</div><div id="status">${first.status}</div></div>
 <main id="body">${first.body}</main>
 <div id="diagnostics-slot">${first.diagnostics}</div>
 </div>
 <script nonce="${nonce}">
 (function () {
     const vscode = acquireVsCodeApi();
+    const ACCOUNT_SETTLE_MS = ${ACCOUNT_SETTLE_MS};
     let exports = ${embed({ csv: first.csv, copy: first.copy })};
     const sorts = {};
     // The page each list's strip is at, by its id: kept across updates, as sorts are.
     const at = {};
 ${PAGE_TEXT_HELPERS}
-    const controls = document.getElementById('controls');
+    const controls = document.getElementById('choices');
+    const statusLine = document.getElementById('status');
     const body = document.getElementById('body');
     const slot = document.getElementById('diagnostics-slot');
 
@@ -1041,7 +1316,93 @@ ${PAGE_TEXT_HELPERS}
         return out.join('\\n');
     }
 
-    let shown = { controls: null, body: null, diagnostics: null };
+    // The range and scope buttons, and the account filter, as the page shows
+    // them: never rebuilt, so that one in use is not replaced under it, but
+    // brought up to date in place, unless the account filter comes or goes.
+    let choices = ${embed(first.choices)};
+    function showChoices(fragments) {
+        const next = fragments.choices;
+        const select = controls.querySelector('select[data-account-filter]');
+        if (!next || !choices || !next.account !== !select) {
+            if (JSON.stringify(next) !== JSON.stringify(choices)) {
+                controls.innerHTML = fragments.controls;
+                // What was waiting for the select it replaces is not the new one's.
+                deferred = null;
+            }
+            choices = next;
+            return;
+        }
+        controls.querySelectorAll('button[data-range]').forEach(button => {
+            press(button, button.dataset.range === next.range);
+            if (button.dataset.range === 'coverage' && button.textContent !== next.since) { button.textContent = next.since; }
+        });
+        controls.querySelectorAll('button[data-scope]').forEach(button => press(button, button.dataset.scope === next.scope));
+        if (select && next.account) { updateSelect(select, next.account); }
+        choices = next;
+    }
+
+    function press(button, pressed) {
+        if (button.getAttribute('aria-pressed') !== String(pressed)) { button.setAttribute('aria-pressed', String(pressed)); }
+    }
+
+    // An account chosen is sent once the choice has settled: moving through
+    // the list by the arrow keys changes the value at each step, and each
+    // would otherwise read the history again. Each choice sent is numbered,
+    // and the select keeps it until an update says the host has applied it:
+    // one that comes before, for an earlier choice or a pass, never moves the
+    // select back under the next step.
+    let choosing;
+    let sent = 0;
+    let applied = 0;
+    // What the account filter offers now, waiting for it to lose focus.
+    let deferred = null;
+    // In use: focused, in a window that has focus. Left focused while the
+    // editor is in the background, it takes updates as they come.
+    const inUse = select => document.activeElement === select && document.hasFocus();
+    function updateSelect(select, account) {
+        // Not while it is in use: an open list would close under the
+        // pointer, and the next arrow key start from somewhere else.
+        if (inUse(select)) {
+            deferred = account;
+            return;
+        }
+        deferred = null;
+        const options = Array.from(select.options);
+        const same = options.length === account.options.length &&
+            account.options.every((o, i) => options[i].value === o.value && options[i].textContent === o.label && options[i].disabled === !!o.disabled);
+        if (!same) {
+            const value = select.value;
+            const shownOption = select.options[select.selectedIndex];
+            select.replaceChildren(...account.options.map(o => {
+                const option = document.createElement('option');
+                option.value = o.value;
+                option.textContent = o.label;
+                option.disabled = !!o.disabled;
+                return option;
+            }));
+            // A choice not yet applied keeps its option, though the update
+            // no longer offers it: the filter never goes blank under it.
+            if ((choosing !== undefined || applied < sent) && shownOption && !account.options.some(o => o.value === value)) {
+                select.appendChild(shownOption);
+            }
+            select.value = value;
+        }
+        if (choosing === undefined && applied >= sent && select.value !== account.value) {
+            select.value = account.value;
+        }
+    }
+
+    document.addEventListener('focusout', e => {
+        const select = e.target;
+        if (deferred && select && select.matches && select.matches('select[data-account-filter]')) {
+            // Once focus has gone where it goes.
+            setTimeout(() => {
+                if (deferred && select.isConnected && !inUse(select)) { updateSelect(select, deferred); }
+            }, 0);
+        }
+    });
+
+    let shown = { status: null, body: null, diagnostics: null };
     function show(fragments) {
         // Focus is restored to the same control, found again by what it does,
         // and in which table: two share their sort keys.
@@ -1054,7 +1415,11 @@ ${PAGE_TEXT_HELPERS}
             // share their sort keys, and every page has a header.
             const strip = attribute === 'data-sort-key' && focused.closest('.pages[id]');
             const pager = attribute === 'data-page' && focused.closest('nav[data-pages]');
-            const button = attribute ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' : null;
+            // An account's Name… is found again by its row's key: every row has one.
+            const key = focused.getAttribute('data-key');
+            const button = attribute
+                ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' + (key ? '[data-key="' + key + '"]' : '')
+                : null;
             selector = () =>
                 !button ? null
                 : strip ? '#' + strip.id + ' > .page:nth-child(' + ((at[strip.id] || 0) + 1) + ') ' + button
@@ -1067,9 +1432,12 @@ ${PAGE_TEXT_HELPERS}
             selector = () => '#' + id;
         } else if (focused && focused.matches('#diagnostics > summary')) {
             selector = () => '#diagnostics > summary';
+        } else if (focused && focused.matches('select[data-account-filter]')) {
+            selector = () => 'select[data-account-filter]';
         }
         // A region whose page has not changed is left as it is, focus and all.
-        if (fragments.controls !== shown.controls) { controls.innerHTML = fragments.controls; }
+        showChoices(fragments);
+        if (fragments.status !== shown.status) { statusLine.innerHTML = fragments.status; }
         if (fragments.body !== shown.body) { body.innerHTML = fragments.body; }
         if (fragments.diagnostics !== shown.diagnostics) {
             const open = document.getElementById('diagnostics');
@@ -1078,20 +1446,28 @@ ${PAGE_TEXT_HELPERS}
             const details = document.getElementById('diagnostics');
             if (details && wasOpen) { details.open = true; }
         }
-        shown = { controls: fragments.controls, body: fragments.body, diagnostics: fragments.diagnostics };
+        shown = { status: fragments.status, body: fragments.body, diagnostics: fragments.diagnostics };
         exports = { csv: fragments.csv, copy: fragments.copy };
         arrange();
         const restore = selector();
         if (restore) {
             const again = document.querySelector(restore);
-            if (again && again !== document.activeElement) { again.focus(); }
+            if (again && again !== document.activeElement) {
+                // On a page of its list that is not in view, as a row an
+                // update moved: that page first, where it can take focus.
+                const page = again.closest && again.closest('.pages > .page');
+                if (page && page.inert) { turn(page.parentElement, pagesIn(page.parentElement).indexOf(page), false); }
+                again.focus();
+            }
         }
     }
 
     document.addEventListener('click', e => {
         const button = e.target.closest('button');
         if (!button) { return; }
-        if (button.dataset.range) {
+        if (button.dataset.action === 'nameAccount') {
+            vscode.postMessage({ type: 'nameAccount', account: button.dataset.account });
+        } else if (button.dataset.range) {
             vscode.postMessage({ type: 'setRange', range: button.dataset.range });
         } else if (button.dataset.scope) {
             vscode.postMessage({ type: 'setScope', scope: button.dataset.scope });
@@ -1119,11 +1495,29 @@ ${PAGE_TEXT_HELPERS}
         }
     });
 
+    document.addEventListener('change', e => {
+        const select = e.target;
+        if (select && select.matches && select.matches('select[data-account-filter]')) {
+            clearTimeout(choosing);
+            // The account chosen, as it was chosen: an update meanwhile can
+            // change what the select offers, never what is sent.
+            const value = select.value;
+            choosing = setTimeout(() => {
+                choosing = undefined;
+                sent += 1;
+                vscode.postMessage({ type: 'setAccount', account: value, choice: sent });
+            }, ACCOUNT_SETTLE_MS);
+        }
+    });
+
     window.addEventListener('message', e => {
         // The editor's own messages come from this page's origin; another
         // frame in the window could post here too.
         if (e.origin !== window.origin) { return; }
-        if (e.data && e.data.type === 'data') { show(e.data.fragments); }
+        if (e.data && e.data.type === 'data') {
+            if (typeof e.data.choice === 'number') { applied = e.data.choice; }
+            show(e.data.fragments);
+        }
     });
 
     arrange();

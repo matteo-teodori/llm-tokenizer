@@ -432,12 +432,14 @@ const RESCAN_SETTINGS = ['ignoreGitignoredFiles', 'defaultModel', 'statusBarDisp
  */
 export function settingsChangeEffects(
     event: Pick<vscode.ConfigurationChangeEvent, 'affectsConfiguration'>,
-): { rescan: boolean; download: boolean; usage: boolean } {
+): { rescan: boolean; download: boolean; usage: boolean; usagePanel: boolean } {
     return {
         rescan: RESCAN_SETTINGS.some(key => event.affectsConfiguration(`${CONFIG_SECTION}.${key}`)),
         download: event.affectsConfiguration(`${CONFIG_SECTION}.downloadTokenizers`),
         // Handled by the usage service's own listener.
         usage: affectsUsage(event),
+        // The names given to accounts: the usage panel's own listener shows them.
+        usagePanel: event.affectsConfiguration(`${CONFIG_SECTION}.claudeCodeAccountNames`),
     };
 }
 

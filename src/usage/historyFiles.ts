@@ -382,6 +382,23 @@ export function copiesBeside(current: string): string[] {
 }
 
 /**
+ * The whole backups beside `current`, made before its earlier migrations, but
+ * those named in `keep`: what a migration that has gone through removes.
+ * A backup cut short, under a name of its own, is left for Clear.
+ */
+export function backupsBeside(current: string, keep: ReadonlySet<string>): string[] {
+    const backup = new RegExp(`^${path.basename(current).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.bak-v\\d+$`);
+    let names: string[];
+    try {
+        names = fs.readdirSync(path.dirname(current));
+    } catch {
+        // Only tidying: left for the next migration, or Clear.
+        return [];
+    }
+    return names.filter(name => backup.test(name) && !keep.has(name)).map(name => path.join(path.dirname(current), name));
+}
+
+/**
  * The pointer, read as the other small files are: never a link or anything
  * but a small regular file, opened without blocking, checked and read
  * through the descriptor.

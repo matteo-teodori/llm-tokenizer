@@ -20,8 +20,10 @@ import { dedupe } from './accounting';
 import {
     GUARDED_READ_BYTES,
     PARSER_VERSION,
+    ROWS_SINCE,
     fileState,
     isUnchanged,
+    needsOwnerScan,
     readTranscript,
     transcriptsAt,
     walkProjects,
@@ -238,7 +240,7 @@ async function runImport(
             }
 
             let guard: ReadGuard | undefined;
-            if (unreadBytes(previous, state) > guardedReadBytes) {
+            if (unreadBytes(file, previous, state) > guardedReadBytes) {
                 flush();
                 guard = guardRead(store, file.path, now(), writeIfCurrent, countCrashes, () => summary.interrupted++);
                 if (!guard && cleared) {
@@ -255,7 +257,10 @@ async function runImport(
 
             let result: ReadResult;
             try {
-                result = readTranscript(file, previous, options.progress);
+                // Where a main transcript was read to, its sessions' owners
+                // then: the lines read on from there are under them.
+                const inForce = previous && file.kind === 'main' ? store.ownersInForce(PROVIDER, file.path) : undefined;
+                result = readTranscript(file, previous, options.progress, inForce);
             } catch (error) {
                 if (guard) {
                     // A failure the reader caught is not a crash.
@@ -335,6 +340,9 @@ export async function importUnderLease(
         isCancelled: () => lost || (options.isCancelled?.() ?? false),
     };
     try {
+        // What a window of a build made before 2.4.0's release wrote, its pass
+        // under way as this history was brought to this parser, is undone first.
+        store.transaction(() => store.undoPrereleasePasses());
         return await (paths ? importPaths(store, roots, paths, leased) : importRoots(store, roots, leased));
     } finally {
         // Held only for the pass: another window's hint should not wait out
@@ -380,16 +388,18 @@ function guardRead(
 
 /**
  * How many bytes reading `state` will take: from the checkpoint, or the whole
- * file where it is new, replaced, truncated or due for a newer parser. A
- * rewrite in place is only found by reading, so it is not foreseen here.
+ * file where it is new, replaced, truncated, due to be read again by a newer
+ * parser, or searched for owners before its checkpoint. A rewrite in place is
+ * only found by reading, so it is not foreseen here.
  */
-function unreadBytes(previous: FileCheckpoint | undefined, state: FileState): number {
-    const restarts =
+function unreadBytes(file: TranscriptFile, previous: FileCheckpoint | undefined, state: FileState): number {
+    const whole =
         !previous ||
-        previous.parserVersion < PARSER_VERSION ||
+        previous.parserVersion < ROWS_SINCE ||
+        needsOwnerScan(file, previous) ||
         state.size < previous.offset ||
         (previous.ino !== null && state.ino !== null && (state.ino !== previous.ino || state.dev !== previous.dev));
-    return restarts ? state.size : state.size - previous.offset;
+    return whole ? state.size : state.size - previous.offset;
 }
 
 /** Record that a guarded read ended without crashing, keeping its count. */
@@ -411,18 +421,32 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     if (result.restarted === 'parser') {
         store.deleteRequestsFromFile(PROVIDER, file.path);
     }
+    // Each request and limit hit with the owner its own transcript records
+    // before it, where it does; a subagent's records none, and its session's
+    // owner at its time is a report's to take, from every main transcript of
+    // the session, whatever order they are read in.
     const requests = [...dedupe(result.requests).values()];
     store.upsertRequests(requests);
     store.insertCompactions(PROVIDER, result.compactions);
     store.insertLimitHits(PROVIDER, result.limitHits);
+    if (file.kind === 'main') {
+        store.putOwnerChanges(PROVIDER, file.path, file.projectDir, result.ownerChanges, result.firstRequestTs, result.restarted !== null);
+        if (result.restarted === null && previous && previous.offset > 0 && needsOwnerScan(file, previous)) {
+            // The rows an older parser read from the bytes just searched.
+            store.giveOwners(PROVIDER, file.path, result.ownerChanges);
+        }
+    }
 
-    // Every session the file's requests name is sighted, not only the file's
+    // Every session the file's records name is sighted, not only the file's
     // own: a resumed or forked transcript can hold records copied from an
-    // earlier session, and each request needs its session's row.
+    // earlier session, and each request, limit and change of owner needs its
+    // session's row, which the report's sessions and accounts are read from.
     const sessionId = file.sessionId ?? result.sessionId;
     const spans = new Map<string, { firstTs: number | null; lastTs: number | null }>();
-    if (sessionId) {
-        spans.set(sessionId, { firstTs: null, lastTs: null });
+    for (const id of [sessionId, ...result.limitHits.map(h => h.sessionId), ...result.ownerChanges.map(c => c.sessionId)]) {
+        if (id && !spans.has(id)) {
+            spans.set(id, { firstTs: null, lastTs: null });
+        }
     }
     for (const r of requests) {
         const span = spans.get(r.sessionId) ?? { firstTs: null, lastTs: null };

@@ -7,8 +7,11 @@ import type { StatementSync } from 'node:sqlite';
 import { dedupe } from '../../src/usage/accounting';
 import { totalsOf } from '../../src/usage/aggregate';
 import { createHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
+import { queryReport } from '../../src/usage/queries';
+import { ownerAt } from '../../src/usage/report';
 import { LEASE_TAKEOVER_MS, SCHEMA_VERSION, UsageStore, loadSqlite, type FileCheckpoint, type OpenResult } from '../../src/usage/store';
-import type { UsageRequest } from '../../src/usage/types';
+import { OWNERS_SINCE, PARSER_VERSION } from '../../src/usage/transcripts';
+import type { SessionOwner, UsageRequest } from '../../src/usage/types';
 
 const sqlite = loadSqlite();
 
@@ -41,6 +44,7 @@ function req(overrides: Partial<UsageRequest> = {}): UsageRequest {
         file: '/root/projects/p/session-a.jsonl',
         byteOffset: 0,
         parserVersion: 1,
+        owner: null,
         ...overrides,
     };
 }
@@ -68,12 +72,28 @@ function ready(result: OpenResult): UsageStore {
  * or where it ran. The newest parser to hold the lease is where those builds
  * kept it.
  */
-function asSchema(file: string, schema: 1 | 2): void {
+function asSchema(file: string, schema: 1 | 2 | 3): void {
     assert.ok(sqlite, 'this runtime has no node:sqlite');
     const db = new sqlite.DatabaseSync(file);
+    // Schema 4 only added to schema 3.
+    const before4 = `
+        DROP TRIGGER clear_accounts;
+        DROP TABLE accounts;
+        DROP TABLE owner_changes;
+        ALTER TABLE requests DROP COLUMN owner;
+        ALTER TABLE limit_hits DROP COLUMN owner;`;
+    if (schema === 3) {
+        try {
+            db.exec(`BEGIN; ${before4} PRAGMA user_version = 3; COMMIT;`);
+        } finally {
+            db.close();
+        }
+        return;
+    }
     try {
         db.exec(`
             BEGIN;
+            ${before4}
             DROP TRIGGER clear_paths;
             CREATE TABLE old_requests (
                 provider TEXT NOT NULL DEFAULT 'claude-code',
@@ -196,7 +216,7 @@ suite('usage history store', () => {
         assert.strictEqual(store.generation(), 0);
         assert.match(store.storeId(), /^[0-9a-z]+-[0-9a-z]+$/);
         assert.ok(fs.existsSync(file));
-        assert.strictEqual(SCHEMA_VERSION, 3);
+        assert.strictEqual(SCHEMA_VERSION, 4);
     });
 
     test("a transcript's path is kept once, not in every request read from it", () => {
@@ -511,7 +531,7 @@ suite('usage history store', () => {
         }
     }
 
-    test('a version 1 history gains the speed and where each request ran, then keeps each path once, after a backup at each step, and keeps every row', () => {
+    test('a version 1 history gains the speed and where each request ran, then keeps each path once, after a backup, and keeps every row', () => {
         // Only development builds made one.
         const store = ready(open());
         store.transaction(() => store.upsertRequests([req({ messageId: 'kept', input: 5 })]));
@@ -523,9 +543,11 @@ suite('usage history store', () => {
         assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.input, r.speed, r.inferenceGeo, r.file]), [['kept', 5, null, null, req().file]]);
         migrated.transaction(() => migrated.upsertRequests([req({ messageId: 'new', requestId: 'req_2', speed: 'fast', inferenceGeo: 'us' })]));
         assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.speed, r.inferenceGeo]).sort(), [['kept', null, null], ['new', 'fast', 'us']]);
-        // Each backup is the history as that step found it.
-        assert.deepStrictEqual(backedUp(`${file}.bak-v1`), [1, [['kept', req().file]]]);
+        // Backed up only before the step that builds a table anew, as that
+        // step found it: the steps that only add are undone whole if they fail.
+        assert.ok(!fs.existsSync(`${file}.bak-v1`));
         assert.deepStrictEqual(backedUp(`${file}.bak-v2`), [2, [['kept', req().file]]]);
+        assert.ok(!fs.existsSync(`${file}.bak-v3`));
     });
 
     test("a migration's backup is made whole or not at all: a copy cut short is never taken for it", () => {
@@ -627,6 +649,27 @@ suite('usage history store', () => {
         assert.deepStrictEqual([backup[0], backup[1].length, backup[1].find(r => r[0] === 'm1')], [2, 2_000, ['m1', paths[1]]]);
     });
 
+    test('once a migration goes through, the backups earlier ones left go, and nothing else', () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ messageId: 'kept' })]));
+        store.close();
+        opened.length = 0;
+        asSchema(file, 2);
+        // What an earlier build left beside it, a backup a crash cut short, and another history's backup.
+        const base = path.basename(file);
+        for (const name of [`${base}.bak-v1`, `${base}.bak-v1.0123456789ab`, 'usage-0000000000000000000a.sqlite.bak-v1']) {
+            fs.writeFileSync(path.join(path.dirname(file), name), 'a copy');
+        }
+        const migrated = ready(open());
+        assert.deepStrictEqual([...migrated.requests()].map(r => r.messageId), ['kept']);
+        assert.deepStrictEqual(
+            fs.readdirSync(path.dirname(file)).filter(name => name.includes('.bak-v')).sort(),
+            ['usage-0000000000000000000a.sqlite.bak-v1', `${base}.bak-v1.0123456789ab`, `${base}.bak-v2`],
+        );
+        // The one this migration started from is the history as it was.
+        assert.deepStrictEqual(backedUp(`${file}.bak-v2`), [2, [['kept', req().file]]]);
+    });
+
     test("a migration's log that another window's read holds on to is emptied at the next request", () => {
         // The table built anew passes through the log, as large as the table.
         const store = ready(open());
@@ -649,6 +692,705 @@ suite('usage history store', () => {
         assert.deepStrictEqual(migrated.finishClear(), { settled: true, copiesLeft: 0 });
         assert.strictEqual(fs.statSync(`${file}-wal`).size, 0, 'the log was left as large as the table');
         assert.ok(fs.existsSync(`${file}.bak-v2`), "the migration's backup went with it");
+    });
+
+    test("a version 3 history gains each request's owner and account names, with no backup or compaction, and older backups go", () => {
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertRequests([req({ messageId: 'kept' })]);
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: '/work', cwdTs: 1, projectDir: 'p', firstTs: 1, lastTs: 2 });
+        });
+        store.close();
+        opened.length = 0;
+        asSchema(file, 3);
+        // What 2.2.1 and 2.3.0 left beside it, a backup cut short, and another history's backup.
+        const beside = (name: string) => path.join(path.dirname(file), name);
+        const base = path.basename(file);
+        for (const name of [`${base}.bak-v1`, `${base}.bak-v2`, `${base}.bak-v2.0123456789ab`, 'usage-0000000000000000000a.sqlite.bak-v2']) {
+            fs.writeFileSync(beside(name), 'a copy');
+        }
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const prototype = sqlite.DatabaseSync.prototype as unknown as { exec: (this: unknown, sql: string) => void };
+        const exec = prototype.exec;
+        const statements: string[] = [];
+        prototype.exec = function (this: unknown, sql: string) {
+            statements.push(sql);
+            exec.call(this, sql);
+        };
+        let migrated: UsageStore;
+        try {
+            migrated = ready(open());
+        } finally {
+            prototype.exec = exec;
+        }
+        assert.deepStrictEqual(statements.filter(sql => /VACUUM/.test(sql)), [], 'it only adds: nothing to back up or give back');
+        assert.deepStrictEqual(
+            fs.readdirSync(path.dirname(file)).filter(name => name.includes('.bak-v')).sort(),
+            ['usage-0000000000000000000a.sqlite.bak-v2', `${base}.bak-v2.0123456789ab`],
+        );
+        assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.owner]), [['kept', null]]);
+        assert.deepStrictEqual(migrated.sessions().map(s => [s.sessionId, s.cwd, s.owners]), [['session-a', '/work', []]]);
+        assert.deepStrictEqual(migrated.accountNames(), []);
+    });
+
+    const A = { accountUuid: 'a', organizationUuid: 'o' };
+    const B = { accountUuid: 'b', organizationUuid: null };
+    const MAIN = '/root/projects/p/session-a.jsonl';
+    const change = (offset: number, owner: SessionOwner, sinceTs: number | null, sessionId = 'session-a') => ({ sessionId, offset, owner, sinceTs });
+
+    test('owner changes are kept where they are in their transcript: a read on times the last one before it, one from the start retires them', () => {
+        const store = ready(open());
+        const C = { accountUuid: 'c', organizationUuid: null };
+        const owners = () => store.sessions()[0]?.owners;
+        const put = (changes: ReturnType<typeof change>[], first: number | null, fromStart = false) =>
+            store.transaction(() => store.putOwnerChanges('claude-code', MAIN, 'p', changes, new Map(first === null ? [] : [['session-a', first]]), fromStart));
+        store.transaction(() =>
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: 1, lastTs: 100 }),
+        );
+        // Read to its end: A, then B with no request after it yet.
+        put([change(0, A, 10), change(50, B, null)], 10);
+        assert.deepStrictEqual(Object.fromEntries(store.ownersInForce('claude-code', MAIN)), { 'session-a': B });
+        // Read on from 60: its first request is B's first.
+        put([], 30);
+        assert.deepStrictEqual(owners(), [{ owner: A, sinceTs: 10 }, { owner: B, sinceTs: 30 }]);
+        // Resumed under C, then under A, before any request: C was never in
+        // force, and only A takes the time of the request that follows.
+        put([change(120, C, null)], null);
+        put([change(200, A, null)], null);
+        put([], 50);
+        assert.deepStrictEqual(owners(), [{ owner: A, sinceTs: 10 }, { owner: B, sinceTs: 30 }, { owner: A, sinceTs: 50 }, { owner: C, sinceTs: null }]);
+        // Read again from its start: what it says now is in force, and what it
+        // said before is still the session's history, which its rows keep.
+        put([change(0, B, 60)], 60, true);
+        assert.deepStrictEqual(Object.fromEntries(store.ownersInForce('claude-code', MAIN)), { 'session-a': B });
+        assert.deepStrictEqual(owners(), [
+            { owner: A, sinceTs: 10 },
+            { owner: B, sinceTs: 30 },
+            { owner: A, sinceTs: 50 },
+            { owner: B, sinceTs: 60 },
+            { owner: C, sinceTs: null },
+        ]);
+        // A retired change waiting for its time is not given one.
+        put([], 70);
+        assert.strictEqual(owners()?.at(-1)?.sinceTs, null);
+        // Read from its start once more: what was retired stays as it was.
+        put([change(0, A, 80)], 80, true);
+        assert.deepStrictEqual(Object.fromEntries(store.ownersInForce('claude-code', MAIN)), { 'session-a': A });
+        assert.strictEqual(owners()?.length, 6);
+    });
+
+    test('a retired change waiting for its time at the offset of the one in force now is not given the time of a request read on', () => {
+        const store = ready(open());
+        const put = (changes: ReturnType<typeof change>[], first: number | null, fromStart = false) =>
+            store.transaction(() => store.putOwnerChanges('claude-code', MAIN, 'p', changes, new Map(first === null ? [] : [['session-a', first]]), fromStart));
+        store.transaction(() =>
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: 1, lastTs: 100 }),
+        );
+        // A file holding an owner record alone, under B; rewritten with A's in its place.
+        put([change(0, B, null)], null);
+        put([change(0, A, null)], null, true);
+        // Its first request read on: A's, not B's, whose line is gone.
+        put([], 40);
+        assert.deepStrictEqual(store.sessions()[0]?.owners, [
+            { owner: A, sinceTs: 40 },
+            { owner: B, sinceTs: null },
+        ]);
+    });
+
+    test("a session's owners are its changes in every transcript of it, in time order, one after itself told once, those no request followed last", () => {
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: 1, lastTs: 100 });
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, 10), change(100, B, 40), change(200, A, null)], new Map(), false);
+            store.putOwnerChanges('claude-code', '/root/projects/q/session-a.jsonl', 'q', [change(0, A, 20)], new Map(), false);
+        });
+        assert.deepStrictEqual(store.sessions().map(s => s.owners), [
+            [
+                { owner: A, sinceTs: 10 },
+                { owner: B, sinceTs: 40 },
+                { owner: A, sinceTs: null },
+            ],
+        ]);
+    });
+
+    test("a request's owner, once known, is kept by a record that does not know it; a limit hit's is given by a later sighting, never replaced", () => {
+        const store = ready(open());
+        store.transaction(() => store.upsertRequests([req({ owner: A, parserVersion: 3 })]));
+        // A record that represents it instead, with more output, but no owner.
+        store.transaction(() => store.upsertRequests([req({ owner: null, parserVersion: 3, output: 5 })]));
+        assert.deepStrictEqual([...store.requests()].map(r => [r.output, r.owner]), [[5, A]]);
+        // One that does not represent it changes nothing.
+        store.transaction(() => store.upsertRequests([req({ owner: B, parserVersion: 3, output: 1 })]));
+        assert.deepStrictEqual([...store.requests()].map(r => [r.output, r.owner]), [[5, A]]);
+        const hit = { uuid: 'h', sessionId: 'session-a', timestamp: 1, limitType: 'five_hour', resetsAt: null };
+        store.transaction(() => store.insertLimitHits('claude-code', [{ ...hit, owner: null }]));
+        assert.deepStrictEqual(store.limitHits().map(h => h.owner), [null]);
+        store.transaction(() => store.insertLimitHits('claude-code', [{ ...hit, owner: A }]));
+        store.transaction(() => store.insertLimitHits('claude-code', [{ ...hit, owner: B }]));
+        assert.deepStrictEqual(store.limitHits().map(h => h.owner), [A]);
+    });
+
+    test("rows an older parser read get their owners by where they are in the file searched: none before the first, none undone, a subagent's and a limit's left to the report", () => {
+        const store = ready(open());
+        const agent = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        const elsewhere = '/root/projects/q/session-a/subagents/agent-y.jsonl';
+        const hit = (uuid: string, timestamp: number) => ({ uuid, sessionId: 'session-a', timestamp, limitType: 'five_hour', resetsAt: null });
+        store.transaction(() => {
+            store.upsertRequests([
+                req({ messageId: 'm0', file: MAIN, byteOffset: 0, timestamp: 1, parserVersion: 2 }),
+                req({ messageId: 'm1', file: MAIN, byteOffset: 200, timestamp: 10, parserVersion: 2 }),
+                req({ messageId: 'm2', file: MAIN, byteOffset: 400, timestamp: 40, parserVersion: 2 }),
+                req({ messageId: 'n1', file: MAIN, byteOffset: 500, timestamp: 45, parserVersion: 3, owner: A }),
+                req({ messageId: 'x1', file: agent, kind: 'task', timestamp: 20, parserVersion: 2 }),
+                req({ messageId: 'x2', file: agent, kind: 'task', timestamp: 50, parserVersion: 2 }),
+                req({ messageId: 'y1', file: elsewhere, kind: 'task', timestamp: 50, parserVersion: 2 }),
+                req({ messageId: 'z1', sessionId: 'session-b', file: MAIN, byteOffset: 450, timestamp: 42, parserVersion: 2 }),
+            ]);
+            // The first request after a change, a limit reached, is under it.
+            store.insertLimitHits('claude-code', [hit('h0', 5), hit('h1', 10), hit('h2', 45)]);
+            store.giveOwners('claude-code', MAIN, [change(100, A, 10), change(300, B, 40)]);
+        });
+        // A subagent's and a limit hit's have no place in the file: a report takes them by time.
+        assert.deepStrictEqual(Object.fromEntries([...store.requests()].map(r => [r.messageId, r.owner])), {
+            m0: null,
+            m1: A,
+            m2: B,
+            n1: A,
+            x1: null,
+            x2: null,
+            y1: null,
+            z1: null,
+        });
+        assert.deepStrictEqual(store.limitHits().map(h => [h.uuid, h.owner]), [['h0', null], ['h1', null], ['h2', null]]);
+    });
+
+    test('an account is numbered once, by first use among those numbered together, and keeps its number', () => {
+        const store = ready(open());
+        const sight = (sessionId: string, accountUuid: string, firstTs: number, organizationUuid: string | null = null) => {
+            store.upsertSession('claude-code', { sessionId, root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs, lastTs: firstTs });
+            store.putOwnerChanges(
+                'claude-code',
+                `/root/projects/p/${sessionId}.jsonl`,
+                'p',
+                [{ sessionId, offset: 0, owner: { accountUuid, organizationUuid }, sinceTs: firstTs }],
+                new Map(),
+                false,
+            );
+        };
+        store.transaction(() => {
+            sight('s1', 'b', 20);
+            sight('s2', 'a', 10);
+            sight('s3', 'a', 30, 'o');
+        });
+        assert.ok(store.hasUnnumberedAccounts('claude-code'));
+        assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 3);
+        assert.ok(!store.hasUnnumberedAccounts('claude-code'));
+        // An account's organizations share its number, each with its own after it.
+        const numbers = () => Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, `${n.ordinal}.${n.organization}`]));
+        assert.deepStrictEqual(numbers(), { 'a/': '1.1', 'b/': '2.1', 'a/o': '1.2' });
+        // A session from before the others, signed in to a new account: next, not first.
+        store.transaction(() => sight('s0', 'c', 1));
+        assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 1);
+        assert.deepStrictEqual(numbers(), { 'a/': '1.1', 'b/': '2.1', 'a/o': '1.2', 'c/': '3.1' });
+        // An account named before any request was made with it: numbered once one is, its name kept.
+        store.transaction(() => store.rememberAccounts('claude-code', [{ accountUuid: 'd', organizationUuid: null, email: 'd@example.com', organizationName: null }], 5));
+        assert.ok(!store.hasUnnumberedAccounts('claude-code'));
+        store.transaction(() => sight('s4', 'd', 40));
+        store.transaction(() => store.numberAccounts('claude-code'));
+        assert.deepStrictEqual([store.accountNumbers().get('d/')?.ordinal, store.accountNames().map(n => n.email)], [4, ['d@example.com']]);
+        assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 0);
+        // A session from before Claude Code recorded owners, resumed under one
+        // later: used from its first request, before an account first used in between.
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 's5', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: 41, lastTs: 90 });
+            store.putOwnerChanges('claude-code', '/root/projects/p/s5.jsonl', 'p', [change(500, { accountUuid: 'g', organizationUuid: null }, 90, 's5')], new Map(), false);
+            sight('s6', 'f', 45);
+        });
+        store.transaction(() => store.numberAccounts('claude-code'));
+        assert.deepStrictEqual([store.accountNumbers().get('g/')?.ordinal, store.accountNumbers().get('f/')?.ordinal], [5, 6]);
+        // A session's later owner, which no request has followed yet: not numbered until one has.
+        const later = { sessionId: 's4', offset: 100, owner: { accountUuid: 'e', organizationUuid: null }, sinceTs: null };
+        store.transaction(() => store.putOwnerChanges('claude-code', '/root/projects/p/s4.jsonl', 'p', [later], new Map(), false));
+        assert.ok(!store.hasUnnumberedAccounts('claude-code'));
+        store.transaction(() => store.putOwnerChanges('claude-code', '/root/projects/p/s4.jsonl', 'p', [], new Map([['s4', 50]]), false));
+        assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 1);
+        assert.strictEqual(store.accountNumbers().get('e/')?.ordinal, 7);
+    });
+
+    /** A main transcript's checkpoint, as a build that read it with `parserVersion` left it. */
+    const checkpoint = (filePath: string, sessionId: string, parserVersion: number): FileCheckpoint => ({
+        provider: 'claude-code',
+        path: filePath,
+        root: '/root',
+        kind: 'main',
+        sessionId,
+        runId: null,
+        agentId: null,
+        projectDir: 'p',
+        dev: '1',
+        ino: '2',
+        size: 100,
+        mtimeMs: 1,
+        offset: 100,
+        tailHash: null,
+        parserVersion,
+        oversizeLines: 0,
+        malformedLines: 0,
+        newestVersion: null,
+    });
+
+    /** The columns of the index on owner changes, in its order. */
+    const indexColumns = (store: UsageStore) => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(store.file, { readOnly: true });
+        try {
+            return (raw.prepare("SELECT name FROM pragma_index_info('owner_changes_session') ORDER BY seqno").all() as { name: string }[]).map(c => c.name);
+        } finally {
+            raw.close();
+        }
+    };
+
+    /** Each account's tokens in the whole history, by key, as a report gives them. */
+    const tokensByAccount = (store: UsageStore) =>
+        Object.fromEntries(
+            queryReport(store, { range: 'coverage', zone: 'UTC', workspaceFolders: null, now: Date.UTC(2026, 10, 13), platform: 'linux', realpath: p => p }).accounts.map(
+                a => [a.key, a.totals.input],
+            ),
+        );
+
+    test('a history at version 4 that a build before 2.4.0 made, with changes no file could retire, keeps what that build read from its transcripts', () => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(70) });
+            // A main transcript's requests under the owner recorded before each;
+            // a subagent's under the one that build took by time, and wrongly.
+            store.upsertRequests([
+                req({ messageId: 'm1', file: MAIN, parserVersion: 3, byteOffset: 50, timestamp: at(10), input: 1, owner: A }),
+                req({ messageId: 'm2', file: MAIN, parserVersion: 3, byteOffset: 150, timestamp: at(60), input: 10, owner: B }),
+                req({ messageId: 'x1', file: SUB, kind: 'task', parserVersion: 3, timestamp: at(70), input: 100, owner: A }),
+            ]);
+            store.insertLimitHits('claude-code', [{ uuid: 'h1', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: A }]);
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10)), change(100, B, at(60))], new Map(), false);
+            store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: 'o', email: 'a@example.com', organizationName: 'Org' }], 5);
+            store.numberAccounts('claude-code');
+            store.putFile(checkpoint(MAIN, 'session-a', 3));
+            store.putFile({ ...checkpoint(SUB, 'session-a', 3), kind: 'task', agentId: 'x' });
+        });
+        assert.strictEqual(store.accountNumbers().size, 2);
+        store.close();
+        opened.length = 0;
+        // As 99f34af..7d4fae7 left it: changes keyed without `retired`, no
+        // organization numbers, and parser 3 the newest to hold the lease.
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec(`
+            BEGIN;
+            DROP TRIGGER clear_accounts;
+            CREATE TABLE old_changes (provider TEXT NOT NULL DEFAULT 'claude-code', file INTEGER NOT NULL, offset INTEGER NOT NULL,
+                session_id TEXT NOT NULL, project_dir TEXT NOT NULL, owner INTEGER NOT NULL, since_ts INTEGER,
+                PRIMARY KEY (provider, file, offset)) STRICT;
+            INSERT INTO old_changes SELECT provider, file, offset, session_id, project_dir, owner, since_ts FROM owner_changes;
+            DROP TABLE owner_changes;
+            ALTER TABLE old_changes RENAME TO owner_changes;
+            CREATE INDEX owner_changes_session ON owner_changes (session_id);
+            ALTER TABLE accounts DROP COLUMN organization_ordinal;
+            CREATE TRIGGER clear_accounts AFTER UPDATE OF value ON meta WHEN new.key = 'store_generation' AND NOT EXISTS (SELECT 1 FROM requests)
+            BEGIN DELETE FROM accounts; DELETE FROM owner_changes; END;
+            INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '3');
+            COMMIT;`);
+        raw.close();
+
+        const again = ready(open());
+        // A main transcript's own owners, and its changes, are kept; a
+        // subagent's owner and a limit's go, for a report to take by time.
+        assert.deepStrictEqual([...again.requests()].map(r => [r.messageId, r.owner]), [['m1', A], ['m2', B], ['x1', null]]);
+        assert.deepStrictEqual(again.limitHits().map(h => h.owner), [null]);
+        assert.deepStrictEqual(again.sessions()[0].owners, [{ owner: A, sinceTs: at(10) }, { owner: B, sinceTs: at(60) }]);
+        assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 1, 'b/': 110 });
+        // The names are kept; the numbers are given again, by the next pass.
+        assert.deepStrictEqual(again.accountNames().map(n => n.email), ['a@example.com']);
+        assert.strictEqual(again.accountNumbers().size, 0);
+        assert.ok(again.hasUnnumberedAccounts('claude-code'));
+        // The main transcript is searched again; a subagent's holds what this parser would, and is its from now. A window still running that build stops.
+        assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
+        assert.ok(again.outdated(3) && !again.outdated(PARSER_VERSION));
+        assert.ok(!again.acquireLease('import', 'a window of that build', 3));
+        // The search finds the changes again where they were: what it says replaces what was kept.
+        again.transaction(() => {
+            again.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10)), change(100, B, at(61))], new Map(), false);
+            again.giveOwners('claude-code', MAIN, [change(0, A, at(10)), change(100, B, at(61))]);
+            again.numberAccounts('claude-code');
+        });
+        assert.deepStrictEqual(again.sessions()[0].owners, [{ owner: A, sinceTs: at(10) }, { owner: B, sinceTs: at(61) }]);
+        assert.deepStrictEqual(Object.fromEntries([...again.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { 'a/o': 1, 'b/': 2 });
+        // Clear works, and the history is not brought again: its shape is this one now.
+        assert.strictEqual(again.clear().settled, true);
+        again.transaction(() => again.upsertRequests([req({ messageId: 'n', file: MAIN, parserVersion: 3, owner: B })]));
+        again.close();
+        opened.length = 0;
+        assert.deepStrictEqual([...ready(open()).requests()].map(r => r.owner), [B]);
+    });
+
+    test('a history at version 4 that a build before 2.4.0 made, with one owner per session, keeps the names, and the owner of a session whose transcripts are gone', () => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const HERE = path.join(dir, 'projects', 'p', 'session-b.jsonl');
+        fs.mkdirSync(path.dirname(HERE), { recursive: true });
+        fs.writeFileSync(HERE, '');
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        // The two shapes: d2a828e's, names with when they were seen; f3f4e38's, names with when they were given, and numbers.
+        const shapes = {
+            seen: `CREATE TABLE accounts (provider TEXT NOT NULL DEFAULT 'claude-code', account_uuid TEXT NOT NULL, organization_uuid TEXT NOT NULL,
+                       email TEXT, organization_name TEXT, seen_ts INTEGER NOT NULL, PRIMARY KEY (provider, account_uuid, organization_uuid)) STRICT;
+                   INSERT INTO accounts VALUES ('claude-code', 'a', 'o', 'a@example.com', 'Org', 5);`,
+            named: `ALTER TABLE sessions ADD COLUMN owner_named INTEGER; ALTER TABLE sessions ADD COLUMN owner_mtime INTEGER;
+                    CREATE TABLE accounts (provider TEXT NOT NULL DEFAULT 'claude-code', account_uuid TEXT NOT NULL, organization_uuid TEXT NOT NULL,
+                        ordinal INTEGER, email TEXT, organization_name TEXT, named_ts INTEGER, PRIMARY KEY (provider, account_uuid, organization_uuid)) STRICT;
+                    INSERT INTO accounts VALUES ('claude-code', 'a', 'o', 1, 'a@example.com', 'Org', 5), ('claude-code', 'b', '', 2, NULL, NULL, NULL);
+                    CREATE TRIGGER clear_accounts AFTER UPDATE OF value ON meta WHEN new.key = 'store_generation' AND NOT EXISTS (SELECT 1 FROM requests)
+                    BEGIN DELETE FROM accounts; END;`,
+        };
+        for (const [name, shape] of Object.entries(shapes)) {
+            for (const store of opened.splice(0)) {
+                store.close();
+            }
+            fs.rmSync(path.dirname(file), { recursive: true, force: true });
+            const store = ready(open());
+            store.transaction(() => {
+                // session-a's transcripts are gone; session-b's is still there.
+                store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(15) });
+                store.upsertSession('claude-code', { sessionId: 'session-b', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(30), lastTs: at(30) });
+                store.upsertRequests([
+                    req({ messageId: 'a1', sessionId: 'session-a', file: MAIN, parserVersion: 3, timestamp: at(10), input: 1 }),
+                    req({ messageId: 'a2', sessionId: 'session-a', file: '/root/projects/p/session-a/subagents/agent-x.jsonl', kind: 'task', parserVersion: 3, timestamp: at(15), input: 10 }),
+                    req({ messageId: 'b1', sessionId: 'session-b', file: HERE, parserVersion: 3, timestamp: at(30), input: 100 }),
+                ]);
+                store.putFile(checkpoint(MAIN, 'session-a', 3));
+                store.putFile(checkpoint(HERE, 'session-b', 3));
+            });
+            store.close();
+            opened.length = 0;
+            const raw = new sqlite.DatabaseSync(file);
+            raw.exec(`
+                BEGIN;
+                DROP TRIGGER clear_accounts; DROP TABLE owner_changes; DROP TABLE accounts;
+                ALTER TABLE requests DROP COLUMN owner; ALTER TABLE limit_hits DROP COLUMN owner;
+                ALTER TABLE sessions ADD COLUMN account_uuid TEXT; ALTER TABLE sessions ADD COLUMN organization_uuid TEXT;
+                ${shape}
+                UPDATE sessions SET account_uuid = 'a', organization_uuid = 'o' WHERE session_id = 'session-a';
+                UPDATE sessions SET account_uuid = 'b', organization_uuid = NULL WHERE session_id = 'session-b';
+                INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '3');
+                COMMIT;`);
+            raw.close();
+
+            const again = ready(open());
+            assert.deepStrictEqual(again.accountNames().map(n => n.email), ['a@example.com'], name);
+            // session-a keeps its owner, where nothing else will say it; session-b's transcript is searched again instead.
+            const owners = () => Object.fromEntries(again.sessions().map(s => [s.sessionId, s.owners]));
+            assert.deepStrictEqual(owners(), { 'session-a': [{ owner: A, sinceTs: null }], 'session-b': [] }, name);
+            assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 11, none: 100 }, name);
+            assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', HERE)?.parserVersion], [OWNERS_SINCE - 1, OWNERS_SINCE - 1], name);
+            assert.ok(again.outdated(3), name);
+            again.transaction(() => {
+                again.putOwnerChanges('claude-code', HERE, 'p', [change(0, B, at(30), 'session-b')], new Map(), false);
+                again.numberAccounts('claude-code');
+            });
+            assert.deepStrictEqual(owners()['session-b'], [{ owner: B, sinceTs: at(30) }], name);
+            assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 11, 'b/': 100 }, name);
+            assert.deepStrictEqual(Object.fromEntries([...again.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { 'a/o': 1, 'b/': 2 }, name);
+            // The kept owner is no change a file says now: no request settles it, and no read from the start retires it again.
+            again.transaction(() => {
+                again.putOwnerChanges('claude-code', MAIN, 'p', [], new Map([['session-a', at(10)]]), false);
+                again.putOwnerChanges('claude-code', MAIN, 'p', [], new Map([['session-a', at(10)]]), true);
+            });
+            assert.deepStrictEqual(owners()['session-a'], [{ owner: A, sinceTs: null }], name);
+        }
+    });
+
+    test('a history in this shape that a build before 2.4.0 wrote to has the owners it took by time undone, its changes searched again, and its numbers given anew', () => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        const GONE = '/root/projects/p/session-g.jsonl';
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(70) });
+            store.upsertSession('claude-code', { sessionId: 'session-g', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(60), lastTs: at(60) });
+            // As a window of that build left it: a subagent's request and a
+            // limit under an owner taken by time, and, in a transcript since
+            // gone, a change never in force given the next one's time.
+            store.upsertRequests([
+                req({ messageId: 'm1', file: MAIN, parserVersion: 3, byteOffset: 50, timestamp: at(10), input: 1, owner: A }),
+                req({ messageId: 'x1', file: SUB, kind: 'task', parserVersion: 3, timestamp: at(70), input: 100, owner: B }),
+            ]);
+            store.insertLimitHits('claude-code', [{ uuid: 'h1', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: B }]);
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10))], new Map(), false);
+            store.putOwnerChanges('claude-code', GONE, 'p', [change(0, B, at(60), 'session-g'), change(100, A, at(60), 'session-g')], new Map(), false);
+            store.numberAccounts('claude-code');
+            store.putFile(checkpoint(MAIN, 'session-a', 3));
+            store.putFile({ ...checkpoint(SUB, 'session-a', 3), kind: 'task', agentId: 'x' });
+        });
+        assert.strictEqual(store.accountNumbers().size, 2);
+        store.close();
+        opened.length = 0;
+        // Its parser the newest to hold the lease, and the index without times.
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '3');
+                  DROP INDEX owner_changes_session; CREATE INDEX owner_changes_session ON owner_changes (session_id);`);
+        raw.close();
+
+        const again = ready(open());
+        assert.deepStrictEqual([...again.requests()].map(r => [r.messageId, r.owner]), [['m1', A], ['x1', null]]);
+        assert.deepStrictEqual(again.limitHits().map(h => h.owner), [null]);
+        assert.deepStrictEqual(
+            [again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion],
+            [OWNERS_SINCE - 1, PARSER_VERSION],
+            "the main transcript is searched again; a subagent's is this parser's",
+        );
+        // Of two changes given one time, only the last had it.
+        const owners = Object.fromEntries(again.sessions().map(s => [s.sessionId, s.owners]));
+        assert.deepStrictEqual(owners['session-g'], [{ owner: A, sinceTs: at(60) }, { owner: B, sinceTs: null }]);
+        assert.strictEqual(again.accountNumbers().size, 0);
+        assert.ok(again.outdated(3) && !again.outdated(PARSER_VERSION));
+        assert.deepStrictEqual(indexColumns(again), ['session_id', 'since_ts']);
+        // Done once: what this build gives from now on stays.
+        again.transaction(() => {
+            again.upsertRequests([req({ messageId: 'm2', file: MAIN, parserVersion: PARSER_VERSION, byteOffset: 60, timestamp: at(80), owner: B })]);
+            again.numberAccounts('claude-code');
+        });
+        const numbers = [...again.accountNumbers()];
+        assert.ok(numbers.length > 0);
+        again.close();
+        opened.length = 0;
+        const third = ready(open());
+        assert.deepStrictEqual([...third.requests()].map(r => r.owner), [A, B, null]);
+        assert.deepStrictEqual([...third.accountNumbers()], numbers);
+    });
+
+    test('a history the last builds before 2.4.0 wrote, at parser 4, is undone as well, once', () => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(70) });
+            store.upsertRequests([req({ messageId: 'm1', file: MAIN, parserVersion: 4, byteOffset: 50, timestamp: at(10), owner: A })]);
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10))], new Map(), false);
+            store.numberAccounts('claude-code');
+            store.putFile(checkpoint(MAIN, 'session-a', 4));
+            store.putFile({ ...checkpoint(SUB, 'session-a', 4), kind: 'task', agentId: 'x' });
+        });
+        store.close();
+        opened.length = 0;
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '4');
+                  DROP INDEX owner_changes_session; CREATE INDEX owner_changes_session ON owner_changes (session_id);`);
+        raw.close();
+        const again = ready(open());
+        assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
+        assert.deepStrictEqual(indexColumns(again), ['session_id', 'since_ts']);
+        assert.strictEqual(again.accountNumbers().size, 0);
+        assert.ok(again.outdated(4) && !again.outdated(PARSER_VERSION));
+        assert.strictEqual(again.transaction(() => again.undoPrereleasePasses()), false, 'nothing of that build left to undo');
+    });
+
+    test("what a pass of a build before 2.4.0 already under way writes after the history is brought is undone by the next pass", () => {
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        const OTHER = '/root/projects/p/session-b.jsonl';
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(70) });
+            store.upsertSession('claude-code', { sessionId: 'session-b', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(70) });
+            store.putFile(checkpoint(MAIN, 'session-a', PARSER_VERSION));
+            store.putFile(checkpoint(OTHER, 'session-b', PARSER_VERSION));
+            store.insertLimitHits('claude-code', [{ uuid: 'hb', sessionId: 'session-b', timestamp: at(30), limitType: 'five_hour', resetsAt: null, owner: A }]);
+        });
+        assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), false, 'nothing of that build: nothing done');
+        // That pass reads session-a's transcripts its way, after this build brought the history.
+        store.transaction(() => {
+            store.upsertRequests([req({ messageId: 'x1', file: SUB, kind: 'task', parserVersion: 3, timestamp: at(70), owner: B })]);
+            store.insertLimitHits('claude-code', [{ uuid: 'ha', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: B }]);
+            store.putFile(checkpoint(MAIN, 'session-a', 3));
+            store.putFile({ ...checkpoint(SUB, 'session-a', 3), kind: 'task', agentId: 'x' });
+        });
+        assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), true);
+        assert.deepStrictEqual([...store.requests()].map(r => r.owner), [null]);
+        // Its session's limits go to the report's time; another session's, this build's, stay.
+        assert.deepStrictEqual(store.limitHits().map(h => [h.uuid, h.owner]), [['hb', A], ['ha', null]]);
+        assert.deepStrictEqual([store.getFile('claude-code', MAIN)?.parserVersion, store.getFile('claude-code', OTHER)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
+        // The subagent's file, gone or not, is this parser's now: the next pass finds nothing to undo, and leaves this build's limits be.
+        assert.strictEqual(store.getFile('claude-code', SUB)?.parserVersion, PARSER_VERSION);
+        store.transaction(() => store.insertLimitHits('claude-code', [{ uuid: 'ha2', sessionId: 'session-a', timestamp: at(66), limitType: 'five_hour', resetsAt: null, owner: A }]));
+        assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), false);
+        assert.deepStrictEqual(store.limitHits().map(h => [h.uuid, h.owner]), [['hb', A], ['ha', null], ['ha2', A]]);
+    });
+
+    test('a history at version 4 that a build before 2.4.0 made, with one owner per session, keeps it for a session with no request, one whose file another shares, and one set aside', () => {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const at = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const COPY = path.join(dir, 'projects', 'p', 'session-c.jsonl.superseded-1791000000');
+        fs.mkdirSync(path.dirname(COPY), { recursive: true });
+        fs.writeFileSync(COPY, '');
+        // session-m's transcript is still there, in the folder it moved to.
+        const MOVED = path.join(dir, 'projects', 'q', 'session-m.jsonl');
+        fs.mkdirSync(path.dirname(MOVED), { recursive: true });
+        fs.writeFileSync(MOVED, '');
+        const store = ready(open());
+        store.transaction(() => {
+            for (const id of ['session-l', 'session-s', 'session-t', 'session-c', 'session-m']) {
+                store.upsertSession('claude-code', { sessionId: id, root: id === 'session-c' ? dir : '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(20) });
+            }
+            // session-l only reached a limit; session-s's request was read from session-t's transcript.
+            store.insertLimitHits('claude-code', [{ uuid: 'hl', sessionId: 'session-l', timestamp: at(15), limitType: 'five_hour', resetsAt: null, owner: null }]);
+            store.upsertRequests([
+                req({ messageId: 's1', sessionId: 'session-s', file: '/root/projects/p/session-t.jsonl', parserVersion: 3, timestamp: at(10), input: 1 }),
+                req({ messageId: 't1', sessionId: 'session-t', file: '/root/projects/p/session-t.jsonl', parserVersion: 3, byteOffset: 10, timestamp: at(11), input: 10 }),
+                req({ messageId: 'c1', sessionId: 'session-c', file: path.join(dir, 'projects', 'p', 'session-c.jsonl'), parserVersion: 3, timestamp: at(12), input: 100 }),
+            ]);
+            store.putFile({ ...checkpoint(COPY, 'session-c', 3), root: dir });
+            store.putFile({ ...checkpoint(MOVED, 'session-m', 3), root: dir, projectDir: 'q' });
+        });
+        store.close();
+        opened.length = 0;
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec(`
+            BEGIN;
+            DROP TRIGGER clear_accounts; DROP TABLE owner_changes; DROP TABLE accounts;
+            ALTER TABLE requests DROP COLUMN owner; ALTER TABLE limit_hits DROP COLUMN owner;
+            ALTER TABLE sessions ADD COLUMN account_uuid TEXT; ALTER TABLE sessions ADD COLUMN organization_uuid TEXT;
+            CREATE TABLE accounts (provider TEXT NOT NULL DEFAULT 'claude-code', account_uuid TEXT NOT NULL, organization_uuid TEXT NOT NULL,
+                email TEXT, organization_name TEXT, seen_ts INTEGER NOT NULL, PRIMARY KEY (provider, account_uuid, organization_uuid)) STRICT;
+            UPDATE sessions SET account_uuid = 'a', organization_uuid = 'o' WHERE session_id IN ('session-l', 'session-s', 'session-c', 'session-m');
+            UPDATE sessions SET account_uuid = 'b' WHERE session_id = 'session-t';
+            INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '3');
+            COMMIT;`);
+        raw.close();
+
+        const again = ready(open());
+        const owners = Object.fromEntries(again.sessions().map(s => [s.sessionId, s.owners.map(o => o.owner)]));
+        assert.deepStrictEqual(owners, { 'session-c': [A], 'session-l': [A], 'session-m': [], 'session-s': [A], 'session-t': [B] });
+        assert.deepStrictEqual(again.limitHits().map(h => h.owner), [null]);
+        assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 101, 'b/': 10 });
+    });
+
+    test('a session used with two accounts has its requests that record none summed apart by the change in force, not one by one', () => {
+        const store = ready(open());
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        // One quarter hour: A from 10:05, B from 10:10.
+        const t = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: t(1), lastTs: t(13) });
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, t(5)), change(500, B, t(10))], new Map(), false);
+            store.upsertRequests(
+                [1, 2, 6, 7, 10, 11, 12, 13].map(minute => req({ messageId: `x${minute}`, file: SUB, kind: 'task', timestamp: t(minute), input: minute })),
+            );
+        });
+        const rows = store.bucketSums(0).map(r => [r.requests, r.input, r.firstTs, r.lastTs]);
+        // Before any change, under A, under B from the moment it began: three rows, one per change in force, whatever the requests.
+        assert.deepStrictEqual(rows.sort((x, y) => x[2] - y[2]), [
+            [2, 3, t(1), t(2)],
+            [2, 13, t(6), t(7)],
+            [4, 46, t(10), t(13)],
+        ]);
+        // Each row goes to one owner, as each of its requests would.
+        const owners = store.sessions()[0].owners;
+        assert.deepStrictEqual(
+            store.bucketSums(0).map(r => [r.input, ownerAt(owners, r.firstTs), ownerAt(owners, r.lastTs)]).sort((x, y) => (x[0] as number) - (y[0] as number)),
+            [
+                [3, A, A],
+                [13, A, A],
+                [46, B, B],
+            ],
+        );
+        // Found by the index on each session's changes in time order.
+        assert.deepStrictEqual(indexColumns(store), ['session_id', 'since_ts']);
+        // A session that never changed account is summed as before, by the quarter hour.
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-b', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: t(1), lastTs: t(2) });
+            store.putOwnerChanges('claude-code', '/root/projects/p/session-b.jsonl', 'p', [change(0, A, t(1), 'session-b')], new Map(), false);
+            store.upsertRequests([1, 2].map(minute => req({ messageId: `y${minute}`, sessionId: 'session-b', file: '/root/projects/p/session-b/subagents/agent-y.jsonl', kind: 'task', timestamp: t(minute), input: 100 })));
+        });
+        assert.deepStrictEqual(store.bucketSums(0).filter(r => r.sessionId === 'session-b').map(r => r.requests), [2]);
+    });
+
+    test('an account first used in a session with no request, only a limit reached, is numbered by when it was', () => {
+        const store = ready(open());
+        store.transaction(() => {
+            // s5 reached Z's limit at 1 and made no request; s6 made Y's first at 3.
+            store.upsertSession('claude-code', { sessionId: 's5', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: null, lastTs: null });
+            store.upsertSession('claude-code', { sessionId: 's6', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: 3, lastTs: 3 });
+            store.putOwnerChanges('claude-code', '/root/projects/p/s5.jsonl', 'p', [change(0, { accountUuid: 'z', organizationUuid: null }, 1, 's5')], new Map(), false);
+            store.putOwnerChanges('claude-code', '/root/projects/p/s6.jsonl', 'p', [change(0, { accountUuid: 'y', organizationUuid: null }, 3, 's6')], new Map(), false);
+            // s7 was quit before it asked anything: its owner was never used.
+            store.upsertSession('claude-code', { sessionId: 's7', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: null, lastTs: null });
+            store.putOwnerChanges('claude-code', '/root/projects/p/s7.jsonl', 'p', [change(0, { accountUuid: 'h', organizationUuid: null }, null, 's7')], new Map(), false);
+            store.numberAccounts('claude-code');
+        });
+        assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { 'z/': 1, 'y/': 2 });
+    });
+
+    test('a Clear in a build before this schema, which knows nothing of accounts, leaves no account named on disk', () => {
+        // As 2.3.0 runs it, in a window not reloaded since the update.
+        const store = ready(open());
+        store.transaction(() => {
+            store.upsertRequests([req({ owner: { accountUuid: 'a', organizationUuid: null } })]);
+            store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: null, email: 'Secret-Person-0xFACE@example.com', organizationName: 'Secret-Org-0xFEED' }], 1);
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, 10, 'Secret-Session-0xBEEF')], new Map(), false);
+        });
+        assert.ok(holding('Secret-Person-0xFACE').length > 0);
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const old = new sqlite.DatabaseSync(file);
+        try {
+            old.exec('PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; BEGIN IMMEDIATE');
+            for (const table of ['files', 'read_guards', 'requests', 'paths', 'sessions', 'compactions', 'limit_hits']) {
+                old.exec(`DELETE FROM ${table}`);
+            }
+            old.exec("DELETE FROM lease; UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
+            old.exec('COMMIT');
+            old.exec('VACUUM');
+            old.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+        } finally {
+            old.close();
+        }
+        assert.deepStrictEqual(store.accountNames(), []);
+        assert.deepStrictEqual(
+            [holding('Secret-Person-0xFACE'), holding('Secret-Org-0xFEED'), holding('Secret-Session-0xBEEF')],
+            [[], [], []],
+            "an account's name, or a session's change of owner, is still on disk",
+        );
+        // Another update of the generation, with the history not empty, empties nothing.
+        store.transaction(() => {
+            store.upsertRequests([req()]);
+            store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: null, email: 'a@example.com', organizationName: null }], 2);
+        });
+        const raw = new sqlite.DatabaseSync(file);
+        raw.exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
+        raw.close();
+        assert.strictEqual(store.accountNames().length, 1);
+    });
+
+    test('account names are kept as Claude Code last gave them, and kept once it no longer does', () => {
+        const store = ready(open());
+        store.transaction(() =>
+            store.rememberAccounts(
+                'claude-code',
+                [
+                    { accountUuid: 'a', organizationUuid: 'o', email: 'one@example.com', organizationName: 'Org' },
+                    { accountUuid: 'b', organizationUuid: null, email: 'two@example.com', organizationName: null },
+                ],
+                1,
+            ),
+        );
+        // Signed in to a again later, its organization renamed, its email not given this time.
+        store.transaction(() => store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: 'o', email: null, organizationName: 'Org 2' }], 2));
+        assert.deepStrictEqual(store.accountNames(), [
+            { accountUuid: 'a', organizationUuid: 'o', email: 'one@example.com', organizationName: 'Org 2' },
+            { accountUuid: 'b', organizationUuid: null, email: 'two@example.com', organizationName: null },
+        ]);
+        store.clear();
+        assert.deepStrictEqual(store.accountNames(), [], 'Clear forgets them with the rest');
     });
 
     test('a build before this schema that had the history open as it was migrated stops writing, and says to reload', () => {

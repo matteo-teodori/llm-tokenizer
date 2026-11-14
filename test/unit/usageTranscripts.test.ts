@@ -15,7 +15,9 @@ import {
     MAX_COUNTER,
     MAX_LINE_BYTES,
     MAX_PARSED_LINE_BYTES,
+    OWNERS_SINCE,
     PARSER_VERSION,
+    ROWS_SINCE,
     newerVersion,
     readTranscript,
     walkProjects,
@@ -66,6 +68,15 @@ suite('usage transcripts', () => {
     function freshStore(options: OpenOptions = {}): UsageStore {
         assert.ok(sqlite, 'this runtime has no node:sqlite');
         const result = UsageStore.open(sqlite, path.join(tmp, 'store', 'usage.sqlite'), options);
+        assert.strictEqual(result.status, 'ready');
+        stores.push(result.store);
+        return result.store;
+    }
+
+    /** Another store under `tmp`, by name: a history read anew. */
+    function freshStoreAt(name: string): UsageStore {
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const result = UsageStore.open(sqlite, path.join(tmp, 'store', `${name}.sqlite`));
         assert.strictEqual(result.status, 'ready');
         stores.push(result.store);
         return result.store;
@@ -592,8 +603,8 @@ suite('usage transcripts', () => {
         assert.ok(checkpoint);
         const [kept] = [...store.requests()];
         store.transaction(() => {
-            store.putFile({ ...checkpoint, parserVersion: PARSER_VERSION - 1 });
-            store.upsertRequests([{ ...kept, messageId: 'gone', parserVersion: PARSER_VERSION - 1 }]);
+            store.putFile({ ...checkpoint, parserVersion: ROWS_SINCE - 1 });
+            store.upsertRequests([{ ...kept, messageId: 'gone', parserVersion: ROWS_SINCE - 1 }]);
         });
 
         const summary = await importRoots(store, [tmp]);
@@ -605,7 +616,7 @@ suite('usage transcripts', () => {
         const file = path.join(tmp, 's1.jsonl');
         const a = line(assistant('m1', 5));
         fs.writeFileSync(file, a + line(assistant('m2', 7)));
-        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: PARSER_VERSION - 1 };
+        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: ROWS_SINCE - 1 };
         fs.appendFileSync(file, line(assistant('m3', 9)));
         assert.strictEqual(readTranscript(mainFile(file), older).restarted, 'parser');
         fs.writeFileSync(file, a);
@@ -637,10 +648,10 @@ suite('usage transcripts', () => {
                 assert.ok(checkpoint);
                 const rows = [...store.requests()].filter(r => r.file === file);
                 store.deleteRequestsFromFile('claude-code', file);
-                store.upsertRequests(rows.map(r => ({ ...r, parserVersion: PARSER_VERSION - 1 })));
-                store.putFile({ ...checkpoint, parserVersion: PARSER_VERSION - 1 });
+                store.upsertRequests(rows.map(r => ({ ...r, parserVersion: ROWS_SINCE - 1 })));
+                store.putFile({ ...checkpoint, parserVersion: ROWS_SINCE - 1 });
                 if (file.endsWith('whole.jsonl')) {
-                    store.upsertRequests([{ ...rows[0], messageId: 'gone', parserVersion: PARSER_VERSION - 1 }]);
+                    store.upsertRequests([{ ...rows[0], messageId: 'gone', parserVersion: ROWS_SINCE - 1 }]);
                 }
             }
         });
@@ -654,7 +665,7 @@ suite('usage transcripts', () => {
 
         const summary = await importRoots(store, [tmp]);
         assert.strictEqual(summary.restarted, 4);
-        const older = PARSER_VERSION - 1;
+        const older = ROWS_SINCE - 1;
         assert.deepStrictEqual(
             [...store.requests()].map(r => [r.messageId, r.parserVersion]),
             [
@@ -663,6 +674,507 @@ suite('usage transcripts', () => {
                 ['rewritten0', PARSER_VERSION], ['rewritten1', older], ['rewritten2', older], ['rewritten8', PARSER_VERSION], ['rewritten9', PARSER_VERSION],
                 ['whole0', PARSER_VERSION], ['whole1', PARSER_VERSION], ['whole2', PARSER_VERSION],
             ],
+        );
+    });
+
+    /** A session-owner record as Claude Code writes it: its type first, then the owner's ids, then the session. */
+    function owner(accountUuid: unknown, organizationUuid?: unknown, sessionId = 's1'): object {
+        return { type: 'session-owner', accountUuid, ...(organizationUuid === undefined ? {} : { organizationUuid }), sessionId };
+    }
+    const ACCOUNT_A = '0f1e2d3c-4b5a-4968-8776-655443322110';
+    const ORG_A = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+    const ACCOUNT_B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+
+    const A = { accountUuid: ACCOUNT_A, organizationUuid: ORG_A };
+    const B = { accountUuid: ACCOUNT_B, organizationUuid: null };
+    const at = (minute: number) => `2026-10-09T12:${String(minute).padStart(2, '0')}:00.000Z`;
+    const time = (minute: number) => Date.parse(at(minute));
+    /** A refused request's placeholder, as Claude Code writes one when a limit is reached. */
+    const refused = (id: string, minute: number, extra: Record<string, unknown> = {}) => ({
+        ...assistant(id, 0, { timestamp: at(minute), ...extra }),
+        message: { model: '<synthetic>', id, type: 'message', role: 'assistant', content: [], usage: { input_tokens: 0, output_tokens: 0 } },
+        quotaLimits: { rateLimitType: 'five_hour', resetsAt: 1_791_000_000 },
+        uuid: `limit-${id}`,
+    });
+
+    test('each request is under the owner its main transcript records before it, the ids lower-cased, one written again changing nothing', () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(
+            file,
+            line(owner(ACCOUNT_A, ORG_A)) +
+                line(assistant('m1', 5, { timestamp: at(1) })) +
+                line(refused('r1', 2)) +
+                // Claude Code writes the ids as the account's profile has them.
+                line(owner(ACCOUNT_B.toUpperCase())) +
+                line(owner(ACCOUNT_A, ORG_A, 'another-session')) +
+                line(assistant('m2', 7, { timestamp: at(3) })) +
+                // Written again with the session's metadata: no change.
+                line(owner(ACCOUNT_B)) +
+                line(assistant('m3', 9, { timestamp: at(4) })),
+        );
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual(
+            read.requests.map(r => [r.messageId, r.owner]),
+            [['m1', A], ['m2', B], ['m3', B]],
+        );
+        assert.deepStrictEqual(read.limitHits.map(h => [h.uuid, h.owner]), [['limit-r1', A]]);
+        let next = 0;
+        const offsets = fs.readFileSync(file, 'utf8').split('\n').map(l => {
+            const at = next;
+            next += Buffer.byteLength(l) + 1;
+            return at;
+        });
+        assert.deepStrictEqual(read.ownerChanges, [
+            { sessionId: 's1', offset: 0, owner: A, sinceTs: time(1) },
+            { sessionId: 's1', offset: offsets[3], owner: B, sinceTs: time(3) },
+            // Another session's, which no request of it has followed.
+            { sessionId: 'another-session', offset: offsets[4], owner: A, sinceTs: null },
+        ]);
+        // A change came first in this read: no change of an earlier read waits on its requests.
+        assert.deepStrictEqual(Object.fromEntries(read.firstRequestTs), {});
+        assert.deepStrictEqual(Object.fromEntries(read.malformed), {});
+    });
+
+    test('of owner changes with no request between them, only the last is ever in force, and takes the time of the request after it', () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(owner(ACCOUNT_B)) + line(assistant('m1', 5, { timestamp: at(1) })));
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual(
+            [read.ownerChanges.map(c => [c.owner, c.sinceTs]), read.requests.map(r => r.owner)],
+            [[[A, null], [B, time(1)]], [B]],
+        );
+    });
+
+    test("an error's placeholder is no use of an account: a change waits for a request kept or a limit reached, read now or searched for later", () => {
+        const apiError = (id: string, minute: number) => ({
+            ...assistant(id, 0, { timestamp: at(minute) }),
+            message: { model: '<synthetic>', id, type: 'message', role: 'assistant', content: [{ type: 'text', text: 'API Error: 401' }], usage: { input_tokens: 0, output_tokens: 0 } },
+            isApiErrorMessage: true,
+        });
+        const file = path.join(tmp, 's1.jsonl');
+        // Resumed under B, refused for a bad key, and quit: B was never used.
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)) + line(apiError('e1', 2)));
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual(read.ownerChanges.map(c => [c.owner, c.sinceTs]), [[A, time(1)], [B, null]]);
+        // A limit reached is a use, as a request kept is.
+        fs.appendFileSync(file, line(refused('r1', 3)));
+        assert.deepStrictEqual(readTranscript(mainFile(file), undefined).ownerChanges.map(c => c.sinceTs), [time(1), time(3)]);
+        // The same in the bytes an older parser read, searched for owners.
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(apiError('e2', 4)) + line(assistant('m2', 7, { timestamp: at(5) })));
+        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 };
+        const searched = readTranscript(mainFile(file), older);
+        assert.deepStrictEqual(searched.ownerChanges.map(c => [c.owner, c.sinceTs]), [[A, time(5)]]);
+        // And there too a limit reached begins it.
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(refused('r2', 6)) + line(assistant('m3', 7, { timestamp: at(7) })));
+        const limited = readTranscript(mainFile(file), { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 });
+        assert.deepStrictEqual(limited.ownerChanges.map(c => [c.owner, c.sinceTs]), [[A, time(6)]]);
+        // Read whole, a session that only erred is no request of anyone's: no first request to give an earlier change.
+        fs.writeFileSync(file, line(apiError('e3', 6)));
+        assert.strictEqual(readTranscript(mainFile(file), undefined).firstRequestTs.size, 0);
+    });
+
+    test('the requests before a session\'s first owner record are under none, as a session from before Claude Code recorded them, resumed since', () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(file, line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m2', 7, { timestamp: at(2) })));
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual(read.requests.map(r => [r.messageId, r.owner]), [['m1', null], ['m2', A]]);
+        assert.deepStrictEqual(read.ownerChanges.map(c => c.sinceTs), [time(2)]);
+    });
+
+    test("an owner record that is not one is counted as a bad field, and a subagent's is never looked at", () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(
+            file,
+            line(owner('not-an-id', ORG_A)) +
+                line(owner(ACCOUNT_A, 42)) +
+                line(owner(ACCOUNT_A, `${ORG_A}x`)) +
+                line(owner(`${ACCOUNT_A} `)) +
+                line(owner(ACCOUNT_A, '')) +
+                line(assistant('m1', 5)),
+        );
+        const read = readTranscript(mainFile(file), undefined);
+        // An empty organization is one not named.
+        assert.deepStrictEqual(read.ownerChanges.map(c => c.owner), [{ accountUuid: ACCOUNT_A, organizationUuid: null }]);
+        assert.deepStrictEqual(Object.fromEntries(read.malformed), { 'bad-field:session-owner': 4 });
+
+        const agent = path.join(tmp, 'agent-a1.jsonl');
+        fs.writeFileSync(agent, line(owner(ACCOUNT_A, ORG_A)) + line(owner('not-an-id')) + line(assistant('m9', 1, { isSidechain: true })));
+        const task = readTranscript({ ...mainFile(agent), kind: 'task', agentId: 'a1' }, undefined);
+        assert.deepStrictEqual([task.ownerChanges.length, Object.fromEntries(task.malformed), task.requests.map(r => r.owner)], [0, {}, [null]]);
+    });
+
+    test('a read on from the checkpoint goes on under the owners in force there, and gives the next request\'s time to a change left at the end', () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)));
+        const first = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual(first.ownerChanges.map(c => [c.owner, c.sinceTs]), [[A, time(1)], [B, null]]);
+        fs.appendFileSync(file, line(assistant('m2', 7, { timestamp: at(5) })) + line(owner(ACCOUNT_B)));
+        const on = readTranscript(mainFile(file), first.checkpoint, undefined, new Map([['s1', B]]));
+        assert.deepStrictEqual(
+            [on.requests.map(r => [r.messageId, r.owner]), on.ownerChanges, Object.fromEntries(on.firstRequestTs)],
+            [[['m2', B]], [], { s1: time(5) }],
+        );
+        // Read from its start, a file goes by its own records alone.
+        const whole = readTranscript(mainFile(file), undefined, undefined, new Map([['s1', A]]));
+        assert.deepStrictEqual(
+            [whole.requests.map(r => [r.messageId, r.owner]), whole.ownerChanges.map(c => c.owner)],
+            [[['m1', A], ['m2', B]], [A, B]],
+        );
+    });
+
+    test('another organization of the same account is a change of owner', () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(file, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_A)) + line(assistant('m2', 7, { timestamp: at(2) })));
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual(read.requests.map(r => r.owner), [A, { accountUuid: ACCOUNT_A, organizationUuid: null }]);
+    });
+
+    test('a main transcript an older parser read is searched for its owners before the checkpoint, each with the time of the request after it, and read on under the last', () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(file, line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m2', 7, { timestamp: at(2) })));
+        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 };
+        assert.ok(OWNERS_SINCE - 1 >= ROWS_SINCE, "the older parser's rows are kept");
+
+        // Nothing new: the owner is all there is to read.
+        const again = readTranscript(mainFile(file), older, undefined, new Map([['s1', A]]));
+        assert.deepStrictEqual(
+            [again.unchanged, again.restarted, again.requests.length, again.ownerChanges.map(c => [c.owner, c.sinceTs]), again.checkpoint.offset, again.checkpoint.parserVersion],
+            [false, null, 0, [[A, time(2)]], older.offset, PARSER_VERSION],
+            'the owners in force are found again, never taken from what was given',
+        );
+        // Something new: only it gives rows, under the owner found before it.
+        fs.appendFileSync(file, line(assistant('m3', 9, { timestamp: at(3) })) + line(owner(ACCOUNT_B)));
+        const on = readTranscript(mainFile(file), older);
+        assert.deepStrictEqual(
+            [on.restarted, on.requests.map(r => [r.messageId, r.owner]), on.ownerChanges.map(c => [c.owner, c.sinceTs])],
+            [null, [['m3', A]], [[A, time(2)], [B, null]]],
+        );
+        // Read by this parser, the bytes before the checkpoint are not searched again.
+        fs.appendFileSync(file, line(assistant('m4', 1, { timestamp: at(4) })));
+        const next = readTranscript(mainFile(file), on.checkpoint);
+        assert.deepStrictEqual([next.requests.map(r => r.messageId), next.ownerChanges.length], [['m4'], 0]);
+    });
+
+    test('a change the search finds with no request after it before the checkpoint takes the time of the first one read on', () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(file, line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_A, ORG_A)));
+        const older = { ...readTranscript(mainFile(file), undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 };
+        fs.appendFileSync(file, line(assistant('m2', 7, { timestamp: at(6) })));
+        const on = readTranscript(mainFile(file), older);
+        assert.deepStrictEqual([on.ownerChanges.map(c => c.sinceTs), on.requests.map(r => r.owner)], [[time(6)], [A]]);
+    });
+
+    test("bytes searched for an owner say nothing again of what was counted when they were read", () => {
+        const file = path.join(tmp, 's1.jsonl');
+        fs.writeFileSync(
+            file,
+            '{"type":"assistant"' + ' '.repeat(MAX_LINE_BYTES) + '\n' + '{"type":"assistant", oops}\n' + line(owner(ACCOUNT_A)) + '{"type":"assistant", oops}\n' + line(assistant('m1', 5)),
+        );
+        const first = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual([first.oversize, first.malformed.get('json-syntax')], [1, 2]);
+        const scanned = readTranscript(mainFile(file), { ...first.checkpoint, parserVersion: OWNERS_SINCE - 1 });
+        assert.deepStrictEqual(
+            [scanned.oversize, Object.fromEntries(scanned.malformed), scanned.requests.length, scanned.ownerChanges.map(c => c.sinceTs)],
+            [0, {}, 0, [time(0)]],
+        );
+    });
+
+    test('an owner record too long to parse is never parsed, read or searched for', () => {
+        // The worker's heap is 128 MB: see MAX_PARSED_LINE_BYTES.
+        const file = path.join(tmp, 's1.jsonl');
+        const long = JSON.stringify({ type: 'session-owner', accountUuid: ACCOUNT_A, sessionId: 's1', pad: ' '.repeat(MAX_PARSED_LINE_BYTES) }) + '\n';
+        fs.writeFileSync(file, long + line(assistant('m1', 5)));
+        const read = readTranscript(mainFile(file), undefined);
+        assert.deepStrictEqual([read.ownerChanges.length, read.oversize], [0, 1]);
+        const scanned = readTranscript(mainFile(file), { ...read.checkpoint, parserVersion: OWNERS_SINCE - 1 });
+        assert.deepStrictEqual([scanned.ownerChanges.length, scanned.oversize], [0, 0]);
+    });
+
+    test("a subagent's transcript an older parser read is read on from its checkpoint, never searched", () => {
+        const agent = path.join(tmp, 'agent-a1.jsonl');
+        fs.writeFileSync(agent, line(owner(ACCOUNT_A)) + line(assistant('m1', 5, { isSidechain: true })));
+        const task = { ...mainFile(agent), kind: 'task' as const, agentId: 'a1' };
+        const older = { ...readTranscript(task, undefined).checkpoint, parserVersion: OWNERS_SINCE - 1 };
+        const again = readTranscript(task, older);
+        assert.deepStrictEqual([again.restarted, again.requests.length, again.ownerChanges.length, again.checkpoint.parserVersion], [null, 0, 0, PARSER_VERSION]);
+    });
+
+    /** Each stored request's owner, by message id. */
+    const owners = (store: UsageStore) => Object.fromEntries([...store.requests()].map(r => [r.messageId, r.owner]));
+    const KEY_A = `${ACCOUNT_A}/${ORG_A}`;
+    const KEY_B = `${ACCOUNT_B}/`;
+    /** Each account's output tokens, and each limit reached's account, as a report gives them. */
+    const split = (store: UsageStore) => {
+        const report = queryReport(store, {
+            range: 'coverage',
+            zone: 'UTC',
+            workspaceFolders: null,
+            now: Date.parse('2026-10-10T00:00:00Z'),
+            platform: process.platform,
+            realpath: p => p,
+        });
+        return { output: Object.fromEntries(report.accounts.map(a => [a.key, a.totals.output])), limits: report.limitWindows.map(w => [w.account, w.hits]) };
+    };
+    /** The history as a build before OWNERS_SINCE left it: every row and checkpoint its own, and no owner. */
+    const asOlderParser = () => {
+        const older = OWNERS_SINCE - 1;
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+        raw.exec(`UPDATE requests SET owner = NULL, parser_version = ${older}; UPDATE limit_hits SET owner = NULL; DELETE FROM owner_changes; UPDATE files SET parser_version = ${older}`);
+        raw.close();
+    };
+
+    test("a session resumed under another account: each request and limit under the account it was made with, its subagents' by their time, read in whatever passes", async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        const agent = path.join(dir, 's1', 'subagents', 'agent-a1.jsonl');
+        const store = freshStore();
+        fs.writeFileSync(main, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })));
+        await importRoots(store, [tmp]);
+        // A's limit reached, then signed in to B and resumed: each read apart.
+        fs.appendFileSync(main, line(refused('r1', 2)));
+        await importRoots(store, [tmp]);
+        fs.appendFileSync(main, line(owner(ACCOUNT_B)));
+        await importRoots(store, [tmp]);
+        fs.appendFileSync(main, line(assistant('m2', 7, { timestamp: at(10) })));
+        // Its subagent's two requests in one quarter hour, one either side of the change.
+        fs.writeFileSync(
+            agent,
+            line(assistant('a1', 3, { isSidechain: true, agentId: 'a1', timestamp: at(1) })) + line(assistant('a2', 4, { isSidechain: true, agentId: 'a1', timestamp: at(11) })),
+        );
+        await importRoots(store, [tmp]);
+        // Its own transcript says of its own requests; of its subagent's, a report goes by their time.
+        assert.deepStrictEqual(owners(store), { a1: null, a2: null, m1: A, m2: B });
+        assert.deepStrictEqual(store.limitHits().map(h => [h.uuid, h.owner]), [['limit-r1', A]]);
+        assert.deepStrictEqual(store.sessions().map(s => s.owners), [[{ owner: A, sinceTs: time(1) }, { owner: B, sinceTs: time(10) }]]);
+        assert.deepStrictEqual(split(store), { output: { [KEY_A]: 5 + 3, [KEY_B]: 7 + 4 }, limits: [[KEY_A, 1]] });
+        // Read whole again, from scratch: the same.
+        const again = freshStoreAt('again');
+        await importRoots(again, [tmp]);
+        assert.deepStrictEqual(split(again), split(store));
+    });
+
+    test("a subagent's requests read before its session's change has a time count under the account at their time all the same", async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        const agent = path.join(dir, 's1', 'subagents', 'agent-a1.jsonl');
+        const store = freshStore();
+        fs.writeFileSync(main, line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)));
+        await importRoots(store, [tmp]);
+        fs.appendFileSync(main, line(assistant('m2', 7, { timestamp: at(10) })));
+        fs.writeFileSync(agent, line(assistant('a2', 4, { isSidechain: true, agentId: 'a1', timestamp: at(11) })));
+        // Only the subagent's file, as a watcher's hint that missed the main one's change.
+        await importPaths(store, [tmp], [agent]);
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(split(store).output, { [KEY_A]: 5, [KEY_B]: 7 + 4 });
+    });
+
+    test('a transcript rewritten from its start has its changes of owner read anew, and is read on under its own', async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(dir, { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        fs.writeFileSync(main, line(assistant('m0', 1, { timestamp: at(0) })) + line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        // Rewritten, as long as before or not: read from its start.
+        fs.writeFileSync(main, line(owner(ACCOUNT_B)) + line(assistant('m1', 5, { timestamp: at(1) })));
+        const rewritten = await importRoots(store, [tmp]);
+        assert.strictEqual(rewritten.restarted, 1);
+        fs.appendFileSync(main, line(assistant('m2', 7, { timestamp: at(2) })));
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(owners(store).m2, B);
+        // What it records now comes after what it recorded before, which m0's row, kept, is still under.
+        assert.deepStrictEqual(store.sessions().map(s => s.owners.map(o => o.owner)), [[A, B]]);
+        assert.deepStrictEqual(split(store).output, { [KEY_A]: 1, [KEY_B]: 5 + 7 });
+    });
+
+    test('a transcript a session went on in with no owner record before its requests, and a copy without its owner, go by the time', async () => {
+        const first = path.join(tmp, 'projects', 'a-first');
+        const second = path.join(tmp, 'projects', 'b-second');
+        fs.mkdirSync(path.join(second, 's1', 'subagents'), { recursive: true });
+        fs.mkdirSync(first, { recursive: true });
+        fs.writeFileSync(
+            path.join(first, 's1.jsonl'),
+            line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)) + line(assistant('m2', 7, { timestamp: at(10) })),
+        );
+        fs.writeFileSync(path.join(second, 's1.jsonl'), line(assistant('m3', 9, { timestamp: at(20) })) + line(refused('r3', 21)));
+        fs.writeFileSync(path.join(second, 's1', 'subagents', 'agent-x.jsonl'), line(assistant('x1', 3, { isSidechain: true, agentId: 'x', timestamp: at(22) })));
+        // A copy, sorting first, that holds m2 without the owner record before it.
+        fs.writeFileSync(path.join(first, '0-s9.orphaned-1791000000-x.jsonl'), line(assistant('m2', 7, { timestamp: at(10) })));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(split(store), { output: { [KEY_A]: 5, [KEY_B]: 7 + 9 + 3 }, limits: [[KEY_B, 1]] });
+    });
+
+    test("after an older parser's import, a pass gives each row its owner by where it is, and the report gives what a full read gives, reading no row again", async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        const agent = path.join(dir, 's1', 'subagents', 'agent-a1.jsonl');
+        fs.writeFileSync(
+            main,
+            line(assistant('m1', 5, { timestamp: at(1) })) +
+                line(owner(ACCOUNT_A, ORG_A)) +
+                line(assistant('m2', 7, { timestamp: at(2) })) +
+                line(refused('r1', 3)) +
+                line(owner(ACCOUNT_B)) +
+                line(assistant('m3', 9, { timestamp: at(5) })) +
+                line(refused('r2', 6)),
+        );
+        fs.writeFileSync(
+            agent,
+            line(assistant('a1', 3, { isSidechain: true, agentId: 'a1', timestamp: at(2) })) + line(assistant('a2', 4, { isSidechain: true, agentId: 'a1', timestamp: at(5) })),
+        );
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        const read = owners(store);
+        assert.deepStrictEqual(read, { a1: null, a2: null, m1: null, m2: A, m3: B });
+        const full = split(store);
+        // m1, before any owner record, under the session's first; a1 and a2, and each limit, by their time.
+        assert.deepStrictEqual(full, { output: { [KEY_A]: 5 + 7 + 3, [KEY_B]: 9 + 4 }, limits: [[KEY_A, 1], [KEY_B, 1]] });
+
+        asOlderParser();
+        assert.deepStrictEqual(Object.values(owners(store)), [null, null, null, null, null]);
+        const summary = await importRoots(store, [tmp]);
+        assert.deepStrictEqual([summary.read, summary.restarted, summary.records], [2, 0, 0]);
+        assert.deepStrictEqual(owners(store), read);
+        // A limit hit keeps no place in its file: a report takes it by time.
+        assert.deepStrictEqual(store.limitHits().map(h => [h.uuid, h.owner]), [['limit-r1', null], ['limit-r2', null]]);
+        assert.deepStrictEqual(split(store), full);
+        assert.deepStrictEqual([...store.requests()].map(r => r.parserVersion), [OWNERS_SINCE - 1, OWNERS_SINCE - 1, OWNERS_SINCE - 1, OWNERS_SINCE - 1, OWNERS_SINCE - 1]);
+        assert.deepStrictEqual(
+            [main, agent].map(f => store.getFile('claude-code', fs.realpathSync(f))?.parserVersion),
+            [PARSER_VERSION, PARSER_VERSION],
+        );
+        // And then it is a file like any other: unchanged, not even read.
+        assert.strictEqual((await importRoots(store, [tmp])).unchanged, 2);
+    });
+
+    test('a pass under the lease first undoes what a window of a build before 2.4.0 wrote meanwhile', async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 's1.jsonl'), line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })));
+        fs.writeFileSync(path.join(dir, 's1', 'subagents', 'agent-a1.jsonl'), line(assistant('a1', 3, { isSidechain: true, agentId: 'a1', timestamp: at(2) })));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(owners(store), { a1: null, m1: A });
+        // That window's pass: the subagent's request under an owner it took by time, its file at its parser.
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+        raw.exec("UPDATE requests SET owner = (SELECT min(id) FROM accounts) WHERE kind != 'main'; UPDATE files SET parser_version = 3 WHERE kind != 'main'");
+        raw.close();
+        assert.deepStrictEqual(owners(store), { a1: A, m1: A });
+        assert.ok(await importUnderLease(store, [tmp], 'window-a'));
+        assert.deepStrictEqual(owners(store), { a1: null, m1: A });
+    });
+
+    test('a history a build of 2.4.0 made before its release read, parser 3 or 4, has its main transcripts searched again: what a full read gives, no row read again', async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(path.join(dir, 's1', 'subagents'), { recursive: true });
+        const main = path.join(dir, 's1.jsonl');
+        const agent = path.join(dir, 's1', 'subagents', 'agent-a1.jsonl');
+        // Resumed under B, refused there for a bad key, then B's own request: B begins with it, not with the error.
+        const apiError = { ...(assistant('e1', 0, { timestamp: at(4) }) as Record<string, unknown>), message: { model: '<synthetic>', id: 'e1', type: 'message', role: 'assistant', content: [], usage: { input_tokens: 0, output_tokens: 0 } } };
+        fs.writeFileSync(
+            main,
+            line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(owner(ACCOUNT_B)) + line(apiError) + line(assistant('m2', 9, { timestamp: at(6) })),
+        );
+        // The subagent's request between the error and B's first: still A's.
+        fs.writeFileSync(agent, line(assistant('a1', 3, { isSidechain: true, agentId: 'a1', timestamp: at(5) })));
+        for (const prerelease of [3, 4]) {
+            for (const store of stores.splice(0)) {
+                store.close();
+            }
+            fs.rmSync(path.join(tmp, 'store'), { recursive: true, force: true });
+            const store = freshStore();
+            assert.ok(await importUnderLease(store, [tmp], 'window-a'));
+            const full = split(store);
+            assert.deepStrictEqual(full, { output: { [KEY_A]: 5 + 3, [KEY_B]: 9 }, limits: [] }, `parser ${prerelease}`);
+            // As that build left it: its checkpoints, the time it gave B (the error's), and itself the newest to hold the lease.
+            assert.ok(sqlite, 'this runtime has no node:sqlite');
+            const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+            raw.exec(`UPDATE requests SET parser_version = ${prerelease}; UPDATE files SET parser_version = ${prerelease};
+                      UPDATE owner_changes SET since_ts = ${Date.parse(at(4))} WHERE since_ts = ${Date.parse(at(6))};
+                      INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '${prerelease}');`);
+            raw.close();
+            assert.notDeepStrictEqual(split(store), full, `parser ${prerelease}: the error's time gave B the subagent's request`);
+            const summary = await importUnderLease(store, [tmp], 'window-a');
+            assert.ok(summary);
+            assert.deepStrictEqual([summary.restarted, summary.records], [0, 0], `parser ${prerelease}: no row read again`);
+            assert.deepStrictEqual(split(store), full, `parser ${prerelease}`);
+            assert.deepStrictEqual(
+                [main, agent].map(f => store.getFile('claude-code', fs.realpathSync(f))?.parserVersion),
+                [PARSER_VERSION, PARSER_VERSION],
+            );
+            // And done with: the next pass finds nothing of that build.
+            assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), false);
+        }
+    });
+
+    test("after an older parser's import, a session in two project folders gives every limit what a full read gives, whichever folder comes first", async () => {
+        const worktree = path.join(tmp, 'projects', 'a-work-app--claude-worktrees-x');
+        const app = path.join(tmp, 'projects', 'b-work-app');
+        fs.mkdirSync(worktree, { recursive: true });
+        fs.mkdirSync(app, { recursive: true });
+        fs.writeFileSync(path.join(worktree, 's3.jsonl'), line(owner(ACCOUNT_A, ORG_A, 's3')) + line(assistant('m1', 5, { sessionId: 's3', timestamp: at(1) })));
+        fs.writeFileSync(
+            path.join(app, 's3.jsonl'),
+            line(owner(ACCOUNT_A, ORG_A, 's3')) +
+                line(assistant('m2', 7, { sessionId: 's3', timestamp: at(2) })) +
+                line(refused('rk2', 3, { sessionId: 's3' })) +
+                line(owner(ACCOUNT_B, undefined, 's3')) +
+                line(assistant('m3', 9, { sessionId: 's3', timestamp: at(5) })) +
+                line(refused('rk3', 6, { sessionId: 's3' })),
+        );
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        const full = split(store);
+        assert.deepStrictEqual(full, { output: { [KEY_A]: 5 + 7, [KEY_B]: 9 }, limits: [[KEY_A, 1], [KEY_B, 1]] });
+        asOlderParser();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(split(store), full);
+    });
+
+    test("a session's transcripts in two project folders, and a copy set aside, each give their own records their owners, in whatever order they are read", async () => {
+        const first = path.join(tmp, 'projects', 'a-moved-to');
+        const second = path.join(tmp, 'projects', 'z-moved-from');
+        fs.mkdirSync(first, { recursive: true });
+        fs.mkdirSync(second, { recursive: true });
+        fs.writeFileSync(path.join(second, 's1.jsonl'), line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m1', 5, { timestamp: at(1) })) + line(assistant('m3', 5, { timestamp: at(9) })));
+        fs.writeFileSync(path.join(first, 's1.jsonl'), line(owner(ACCOUNT_B)) + line(assistant('m2', 7, { timestamp: at(5) })));
+        // A copy set aside holds the owner the session had then.
+        fs.writeFileSync(path.join(first, 's1.jsonl.superseded-1791000000'), line(owner(ACCOUNT_A, ORG_A)) + line(assistant('m4', 7, { timestamp: at(7) })));
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(owners(store), { m1: A, m2: B, m3: A, m4: A });
+        assert.deepStrictEqual(store.sessions().map(s => s.owners), [[{ owner: A, sinceTs: time(1) }, { owner: B, sinceTs: time(5) }, { owner: A, sinceTs: time(7) }]]);
+    });
+
+    test("a copy set aside that an older parser read gives every session in it its owner, not only the first", async () => {
+        const dir = path.join(tmp, 'projects', 'p');
+        fs.mkdirSync(dir, { recursive: true });
+        const orphan = path.join(dir, 's-new.orphaned-1791000000-abc.jsonl');
+        fs.writeFileSync(
+            orphan,
+            line(owner(ACCOUNT_A, ORG_A, 's-old')) +
+                line(assistant('m1', 5, { sessionId: 's-old', timestamp: at(1) })) +
+                line(owner(ACCOUNT_B, undefined, 's-new')) +
+                line(assistant('m2', 7, { sessionId: 's-new', timestamp: at(2) })),
+        );
+        const store = freshStore();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(owners(store), { m1: A, m2: B });
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(path.join(tmp, 'store', 'usage.sqlite'));
+        raw.exec(`UPDATE requests SET owner = NULL, parser_version = ${OWNERS_SINCE - 1}; DELETE FROM owner_changes; UPDATE files SET parser_version = ${OWNERS_SINCE - 1}`);
+        raw.close();
+        await importRoots(store, [tmp]);
+        assert.deepStrictEqual(owners(store), { m1: A, m2: B });
+        assert.deepStrictEqual(
+            store.sessions().map(s => [s.sessionId, s.owners.map(o => o.owner)]),
+            [['s-new', [B]], ['s-old', [A]]],
         );
     });
 

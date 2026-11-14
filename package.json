@@ -3,7 +3,7 @@
   "displayName": "LLM Tokenizer",
   "description": "Count tokens for 97 AI models directly in your editor — exact wherever a model's tokenizer is published (GPT-5.6 and earlier, Llama, Gemini, DeepSeek, Qwen, Mistral and more), clearly labelled estimates where it is not (Claude, Grok, GPT-6 and a few others).",
   "license": "MIT",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "publisher": "matteoteodori",
   "author": {
     "name": "Matteo Teodori",
@@ -48,7 +48,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
-      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records outside the workspace are read too."
+      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records, the accounts its configuration file names and its settings files, of which three entries are kept, are read too, outside the workspace."
     },
     "virtualWorkspaces": {
       "supported": "limited",
@@ -467,7 +467,7 @@
           "type": "boolean",
           "default": false,
           "scope": "machine",
-          "description": "Show how many tokens Claude Code processed, read from its own session records on this machine (the projects folder in ~/.claude, or in CLAUDE_CONFIG_DIR). Kept, in a database in this extension's own storage: each request's token counts, model, effort, speed, where it ran, time, ids and Claude Code version; the folder each session started in; each transcript's path, size, file id and how far it was read; compactions' sizes and the usage limits reached; and the window's process id and this machine's name, which each import writes. Prompts, responses, thinking and tool contents are never kept, and nothing is sent anywhere. The history is kept after Claude Code deletes its own records; Clear Claude Code Usage History removes it."
+          "description": "Show how many tokens Claude Code processed, read from its own session records on this machine (the projects folder in ~/.claude, or in CLAUDE_CONFIG_DIR), and from Claude Code's configuration file (~/.claude.json, or .claude.json in CLAUDE_CONFIG_DIR or ~/.claude, or .config.json in either, the name older versions gave it) only the Claude accounts it names; from its settings files (settings.json in ~/.claude and in each data folder, and the organization's managed settings) it keeps three env entries alone: CLAUDE_CONFIG_DIR, CLAUDE_CODE_SKIP_PROMPT_HISTORY and CLAUDE_CODE_DISABLE_1M_CONTEXT. Kept, in a database in this extension's own storage: each request's token counts, model, effort, speed, where it ran, time, ids and Claude Code version; the folder each session started in; the Claude account and organization each request was made with, by id, and where each session's changed in its transcript; each account's number in the history, and the email and organization name Claude Code last gave it, with when; each transcript's path, size, file id and how far it was read; compactions' sizes, and the usage limits reached with the account that reached each; and the window's process id and this machine's name, which each import writes. Prompts, responses, thinking and tool contents are never kept, and nothing is sent anywhere. The history is kept after Claude Code deletes its own records; Clear Claude Code Usage History removes it."
         },
         "llm-tokenizer.claudeCodeDataDirectory": {
           "type": "string",
@@ -480,6 +480,17 @@
           "default": false,
           "scope": "machine",
           "description": "Show the context size of the Claude Code session running in this workspace. This also reads Claude Code's running-session files (sessions/*.json) for their session id, folder, status, update time and process id. Needs Enable Claude Code Usage."
+        },
+        "llm-tokenizer.claudeCodeAccountNames": {
+          "type": "object",
+          "default": {},
+          "scope": "application",
+          "ignoreSync": true,
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "markdownDescription": "Names for Claude accounts in the Claude Code Usage panel, by account id, shown in place of the email Claude Code gives an account, or of `Account 2` where it gave none. Set them with the panel's **Name…** buttons; an account's id is on hover there. They are kept in the Default profile's settings, whichever profile is in use, and Settings Sync leaves them out only while LLM Tokenizer is installed in Default: with it in another profile alone, or in a remote window, add `llm-tokenizer.claudeCodeAccountNames` to `settingsSync.ignoredSettings` to keep them on this machine."
         }
       }
     }

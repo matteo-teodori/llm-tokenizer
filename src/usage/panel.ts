@@ -15,15 +15,29 @@ import * as vscode from 'vscode';
 import { contentSecurityPolicy, createNonce } from '../html';
 import { logoIcon } from '../logo';
 import { modelById } from '../tokenizer/registry';
+import { ALL_ACCOUNTS, MAX_GIVEN_NAME, accountLabels, givenNames, isAccountFilter, isAccountId, nameReplaces, showable } from './accounts';
 import { isTimeZone, localMinute } from './aggregate';
 import { renderFragments, renderUsagePage, type PanelFragments, type PanelView } from './render';
-import { RANGE_KEYS, type RangeKey } from './report';
+import { RANGE_KEYS, type RangeKey, type UsageReport } from './report';
 import { sourceLabel, tildePath } from './roots';
 import { CONFIG_SECTION } from './settings';
 import type { UsageService } from './usageService';
 
-/** Remembered between sessions: the zone the page reported, the range and the scope. */
+/** Remembered between sessions: the zone the page reported, the range, the scope and the account. */
 const STATE_KEY = 'llm-tokenizer.claudeCodeUsage.panel';
+
+/** The names you give accounts, by account id: an application setting, so no repository can rename one. */
+export const GIVEN_NAMES_SETTING = 'claudeCodeAccountNames';
+
+/** The names you gave accounts, as the setting holds them now: none where it cannot be read. */
+function readGivenNames(): Record<string, string> {
+    try {
+        return givenNames(vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown>(GIVEN_NAMES_SETTING));
+    } catch {
+        // Only names: the page shows Claude Code's own instead.
+        return {};
+    }
+}
 
 /**
  * The zone the panel's page last reported: the reader's own, even in a
@@ -73,6 +87,9 @@ export type PanelMessage =
     | { type: 'refresh' }
     | { type: 'setRange'; range: RangeKey }
     | { type: 'setScope'; scope: 'all' | 'workspace' }
+    /** `choice`: the page's number for it, which the updates after it carry back. */
+    | { type: 'setAccount'; account: string; choice: number }
+    | { type: 'nameAccount'; account: string }
     | { type: 'copy'; text: string }
     | { type: 'export'; text: string }
     | { type: 'turnOn' }
@@ -95,6 +112,12 @@ export function parsePanelMessage(raw: unknown): PanelMessage | undefined {
             return RANGE_KEYS.includes(m.range as RangeKey) ? { type: 'setRange', range: m.range as RangeKey } : undefined;
         case 'setScope':
             return m.scope === 'all' || m.scope === 'workspace' ? { type: 'setScope', scope: m.scope } : undefined;
+        case 'setAccount':
+            return isAccountFilter(m.account)
+                ? { type: 'setAccount', account: m.account, choice: Number.isSafeInteger(m.choice) && (m.choice as number) >= 0 ? (m.choice as number) : 0 }
+                : undefined;
+        case 'nameAccount':
+            return isAccountId(m.account) ? { type: 'nameAccount', account: m.account } : undefined;
         case 'copy':
         case 'export':
             return typeof m.text === 'string' && m.text.length <= MAX_EXPORT_CHARS ? { type: m.type, text: m.text } : undefined;
@@ -115,6 +138,8 @@ interface PanelState {
     zone: string;
     range: RangeKey;
     scope: 'all' | 'workspace';
+    /** ALL_ACCOUNTS, or one account's key. */
+    account: string;
 }
 
 export class UsagePanel implements vscode.Disposable {
@@ -125,6 +150,10 @@ export class UsagePanel implements vscode.Disposable {
     private state: PanelState;
     private lastPosted = '';
     private lastFragments: PanelFragments | undefined;
+    /** The report last shown: what Name… says an account is called now. */
+    private lastReport: UsageReport | undefined;
+    /** The page's number for the last account it chose, which each update carries back (see the page's `updateSelect`). */
+    private choice = 0;
     private refreshedAt: number | undefined;
     private updating = Promise.resolve();
 
@@ -163,6 +192,7 @@ export class UsagePanel implements vscode.Disposable {
             zone: saved?.zone && isTimeZone(saved.zone) ? saved.zone : Intl.DateTimeFormat().resolvedOptions().timeZone,
             range: saved?.range && RANGE_KEYS.includes(saved.range) ? saved.range : '7d',
             scope: saved?.scope === 'workspace' ? 'workspace' : 'all',
+            account: isAccountFilter(saved?.account) ? saved.account : ALL_ACCOUNTS,
         };
         this.hold = service.hold();
         this.disposables.push(
@@ -182,6 +212,11 @@ export class UsagePanel implements vscode.Disposable {
             }),
             panel.webview.onDidReceiveMessage((raw: unknown) => void this.receive(raw)),
             service.onDidChange(() => void this.update(false)),
+            vscode.workspace.onDidChangeConfiguration(event => {
+                if (event.affectsConfiguration(`${CONFIG_SECTION}.${GIVEN_NAMES_SETTING}`)) {
+                    void this.update(false);
+                }
+            }),
         );
         this.setPage(this.fragmentsWithoutData());
         // Opening the panel is one of the times a full pass runs.
@@ -220,6 +255,8 @@ export class UsagePanel implements vscode.Disposable {
         switch (message.type) {
             case 'ready':
                 this.state.zone = message.zone;
+                // A page counts its choices from its start.
+                this.choice = 0;
                 await this.saveState();
                 // A page brought back from hidden starts empty: always answer.
                 await this.update(true);
@@ -240,6 +277,15 @@ export class UsagePanel implements vscode.Disposable {
                 this.state.scope = message.scope;
                 await this.saveState();
                 await this.update(false);
+                return;
+            case 'setAccount':
+                this.state.account = message.account;
+                this.choice = message.choice;
+                await this.saveState();
+                await this.update(false);
+                return;
+            case 'nameAccount':
+                await this.nameAccount(message.account);
                 return;
             case 'copy':
             case 'export':
@@ -266,6 +312,50 @@ export class UsagePanel implements vscode.Disposable {
             case 'reloadWindow':
                 await vscode.commands.executeCommand('workbench.action.reloadWindow');
                 return;
+        }
+    }
+
+    /**
+     * Ask for a name for an account, in place of its email, as Claude Code
+     * gives it, or of its number: kept in the setting, by the account's id,
+     * where an empty one takes it out again. The prompt names what the name
+     * replaces, never one organization's whole label: the name stands for
+     * the account, beside each of its organizations.
+     */
+    private async nameAccount(account: string): Promise<void> {
+        const given = readGivenNames();
+        const report = this.lastReport;
+        const replaces = report ? nameReplaces(account, report.accountsSeen, report.accountNames) : 'its number';
+        const plain = report ? accountLabels(report.accountsSeen, report.accountNames, {}) : undefined;
+        const organized = report?.accountsSeen.some(a => a.owner?.accountUuid === account && (plain?.get(a.key)?.organization ?? null) !== null) ?? false;
+        const typed = await vscode.window.showInputBox({
+            title: 'Name a Claude account',
+            prompt: `Shown in Claude Code Usage in place of ${replaces}${organized ? ', beside its organization' : ''}. Leave it empty to show ${
+                replaces === 'its number' ? 'that' : replaces
+            } again.`,
+            value: given[account] ?? '',
+            validateInput: value => ([...value.trim()].length > MAX_GIVEN_NAME ? `At most ${MAX_GIVEN_NAME} characters.` : undefined),
+        });
+        if (typed === undefined) {
+            return;
+        }
+        const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        // Kept as the setting holds them, what this version cannot read included.
+        const raw = config.inspect<unknown>(GIVEN_NAMES_SETTING)?.globalValue;
+        const names: Record<string, unknown> = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : {};
+        for (const id of Object.keys(names)) {
+            if (id.toLowerCase() === account) {
+                delete names[id];
+            }
+        }
+        const name = showable(typed, MAX_GIVEN_NAME);
+        if (name) {
+            names[account] = name;
+        }
+        try {
+            await config.update(GIVEN_NAMES_SETTING, Object.keys(names).length > 0 ? names : undefined, vscode.ConfigurationTarget.Global);
+        } catch {
+            void vscode.window.showErrorMessage('LLM Tokenizer: the name could not be saved in your settings.');
         }
     }
 
@@ -296,13 +386,16 @@ export class UsagePanel implements vscode.Disposable {
     private update(force: boolean): Promise<void> {
         this.updating = this.updating
             .then(async () => {
+                // The page's last choice the view is made from: taken with
+                // the state, before the report is waited for.
+                const choice = this.choice;
                 const fragments = renderFragments(await this.view());
                 this.lastFragments = fragments;
-                const serialised = JSON.stringify(fragments);
+                const serialised = JSON.stringify([fragments, choice]);
                 if (force || serialised !== this.lastPosted) {
                     this.lastPosted = serialised;
                     if (this.panel.visible) {
-                        await this.panel.webview.postMessage({ type: 'data', fragments });
+                        await this.panel.webview.postMessage({ type: 'data', fragments, choice });
                     } else {
                         // A hidden page drops what is posted to it, and comes
                         // back from its HTML: that is what is brought up to date.
@@ -330,7 +423,22 @@ export class UsagePanel implements vscode.Disposable {
             state.scope === 'workspace'
                 ? (vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file').map(f => f.uri.fsPath)
                 : null;
-        const report = await this.service.report(state.range, state.zone, folders);
+        let report = await this.service.report(state.range, state.zone, folders, state.account);
+        // An account the history no longer holds, after a Clear, is no filter
+        // left to show: every account is shown again. Not while the history
+        // is being read, which may not have reached that account's sessions.
+        if (
+            report &&
+            state.account !== ALL_ACCOUNTS &&
+            !this.service.reading &&
+            !report.accountsSeen.some(a => a.key === state.account) &&
+            this.state.account === state.account
+        ) {
+            this.state.account = state.account = ALL_ACCOUNTS;
+            await this.saveState();
+            report = await this.service.report(state.range, state.zone, folders, state.account);
+        }
+        this.lastReport = report ?? this.lastReport;
         return this.viewOf(report, state);
     }
 
@@ -345,6 +453,8 @@ export class UsagePanel implements vscode.Disposable {
             reading: this.service.reading,
             range: state.range,
             scope: state.scope,
+            account: state.account,
+            givenNames: readGivenNames(),
             zone,
             where: remote ? `on ${os.hostname()} (${remote})` : '',
             remote: remote !== undefined,
@@ -356,6 +466,7 @@ export class UsagePanel implements vscode.Disposable {
                 exists: c.exists,
                 ...(c.notAbsolute ? { notAbsolute: true as const } : {}),
             })),
+            accountFiles: (resolved?.accountFiles ?? []).map(f => tildePath(f)),
             historyDisabled: resolved?.historyDisabled ?? false,
             lastImport: summary && {
                 files: summary.files,

@@ -10,7 +10,9 @@
  * write somewhere else again, so every distinct root that exists is read; the
  * global key makes any overlap harmless. Only `<root>/projects` is ever read
  * under a root, and from a root's `settings.json` only its `env` entries for
- * the three variables below: `~/.claude/ide` holds auth lock files.
+ * the three variables below: `~/.claude/ide` holds auth lock files. Beside
+ * each root, Claude Code's own configuration file names the account it is
+ * signed in to, and the worker reads two keys of it (see `accountFiles`).
  */
 
 import * as fs from 'fs';
@@ -68,6 +70,14 @@ export interface ResolvedRoots {
     largeContextDisabled: boolean;
     /** The roots whose own settings.json sets it: their sessions are held to 200K too. */
     largeContextDisabledRoots: string[];
+    /**
+     * Claude Code's configuration files of each root, where there are any:
+     * what name the Claude accounts it has been signed in to (see
+     * claudeAccounts.ts); and of those, each root's written last, which names
+     * the one it is signed in to now.
+     */
+    accountFiles: string[];
+    signedInFiles: string[];
 }
 
 /**
@@ -159,24 +169,24 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
     const roots: RootCandidate[] = [];
     const refused: RootCandidate[] = [];
     const seen = new Set<string>();
+    // Under test, what is read under a root must stay inside too: its
+    // projects or sessions folder, or its settings.json, can be a link that
+    // leads out. One that does not exist reads nothing; a link that leads
+    // nowhere now could lead out later, so it counts as outside.
+    const confined = (p: string, mustExist: boolean) => {
+        if (!inputs.confineTo) {
+            return true;
+        }
+        if (!exists(p)) {
+            return !mustExist;
+        }
+        const real = resolved(p);
+        return real !== undefined && inputs.confineTo.some(allowed => isInside(real, realPath(allowed)));
+    };
     for (const candidate of candidates) {
         if (!candidate.exists) {
             continue;
         }
-        // Under test, what is read under the root must stay inside too: its
-        // projects or sessions folder, or its settings.json, can be a link
-        // that leads out. One that does not exist reads nothing; a link that
-        // leads nowhere now could lead out later, so it counts as outside.
-        const confined = (p: string, mustExist: boolean) => {
-            if (!inputs.confineTo) {
-                return true;
-            }
-            if (!exists(p)) {
-                return !mustExist;
-            }
-            const real = resolved(p);
-            return real !== undefined && inputs.confineTo.some(allowed => isInside(real, realPath(allowed)));
-        };
         const read = ['projects', 'sessions', 'settings.json'].map(name => path.join(candidate.path, name));
         if (!confined(candidate.path, true) || !read.every(p => confined(p, false))) {
             refused.push(candidate);
@@ -206,7 +216,63 @@ export function resolveRoots(inputs: RootInputs): ResolvedRoots {
         historyDisabled: everywhere('CLAUDE_CODE_SKIP_PROMPT_HISTORY') || rootSettings.some(r => inRoot('CLAUDE_CODE_SKIP_PROMPT_HISTORY', r.env)),
         largeContextDisabled: everywhere('CLAUDE_CODE_DISABLE_1M_CONTEXT'),
         largeContextDisabledRoots: rootSettings.filter(r => inRoot('CLAUDE_CODE_DISABLE_1M_CONTEXT', r.env)).map(r => r.root),
+        ...configurationFiles(roots, inputs.home, file => confined(file, true)),
     };
+}
+
+/**
+ * Claude Code's configuration file for each root, as Claude Code 2.1.322
+ * finds its own: `<root>/.config.json`, an older name, while it is a file
+ * with something in it; else `.claude.json` in the folder CLAUDE_CONFIG_DIR
+ * names, or in the home folder when it names none. `~/.claude` can be
+ * either, named by CLAUDE_CONFIG_DIR or not, and both can be in use, by
+ * Claude Code started with it and without: both are read for the accounts
+ * they name, and the one Claude Code wrote last, at its last start, says
+ * which it is signed in to now; the other may be one it has left. Only
+ * files, each under its real path, which the worker reads; under test, only
+ * those in the fixtures.
+ */
+function configurationFiles(roots: RootCandidate[], home: string, allowed: (file: string) => boolean): { accountFiles: string[]; signedInFiles: string[] } {
+    const homeRoot = realPath(path.join(home, '.claude'));
+    const accountFiles: string[] = [];
+    const signedInFiles: string[] = [];
+    for (const root of roots) {
+        const legacy = path.join(root.path, '.config.json');
+        const candidates = fileSize(legacy) > 0 ? [legacy] : [path.join(root.path, '.claude.json'), ...(root.path === homeRoot ? [path.join(home, '.claude.json')] : [])];
+        const found = candidates
+            .map(file => ({ file: realPath(file), modified: fileModified(file) }))
+            .filter((c): c is { file: string; modified: number } => c.modified !== undefined && allowed(c.file))
+            .sort((a, b) => b.modified - a.modified);
+        found.forEach(({ file }, i) => {
+            if (!accountFiles.includes(file)) {
+                accountFiles.push(file);
+            }
+            if (i === 0 && !signedInFiles.includes(file)) {
+                signedInFiles.push(file);
+            }
+        });
+    }
+    return { accountFiles, signedInFiles };
+}
+
+/** When the regular file at `p` was modified, or undefined where there is none. */
+function fileModified(p: string): number | undefined {
+    try {
+        const stat = fs.statSync(p);
+        return stat.isFile() ? stat.mtimeMs : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/** The size of the regular file at `p`, or -1 where there is none. */
+function fileSize(p: string): number {
+    try {
+        const stat = fs.statSync(p);
+        return stat.isFile() ? stat.size : -1;
+    } catch {
+        return -1;
+    }
 }
 
 /** What chose a root, in words, for the diagnostics. */

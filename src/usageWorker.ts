@@ -26,7 +26,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parentPort, workerData } from 'worker_threads';
 
+import { isAccountFilter } from './usage/accounts';
 import { isTimeZone } from './usage/aggregate';
+import { readClaudeAccounts } from './usage/claudeAccounts';
 import { importUnderLease } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS, rangeUntil } from './usage/report';
@@ -35,6 +37,7 @@ import { HistoryFileError, claimFound, createHistory, publishHistory, removeHist
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import {
     SESSION_ID,
+    isAccountFiles,
     type ImportProgress,
     type SqliteResult,
     type UsageFailure,
@@ -348,7 +351,13 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
 
     switch (request.type) {
         case 'query': {
-            if (!RANGE_KEYS.includes(request.range) || !isTimeZone(request.zone)) {
+            if (
+                !RANGE_KEYS.includes(request.range) ||
+                !isTimeZone(request.zone) ||
+                (request.account !== undefined && !isAccountFilter(request.account)) ||
+                (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles)) ||
+                (request.signedInFiles !== undefined && !isAccountFiles(request.signedInFiles))
+            ) {
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
             }
@@ -358,6 +367,8 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 workspaceFolders: request.workspaceFolders,
                 now: Date.now(),
                 platform: process.platform,
+                account: request.account,
+                configured: readClaudeAccounts(request.accountFiles ?? [], request.signedInFiles),
             });
             reply({
                 type: 'report',
@@ -371,7 +382,11 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
         }
         case 'import': {
             const paths = request.paths;
-            if (paths !== undefined && !(Array.isArray(paths) && paths.length <= MAX_PATHS && paths.every(p => typeof p === 'string' && p.length <= 4096))) {
+            if (
+                (paths !== undefined && !(Array.isArray(paths) && paths.length <= MAX_PATHS && paths.every(p => typeof p === 'string' && p.length <= 4096))) ||
+                (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles)) ||
+                (request.signedInFiles !== undefined && !isAccountFiles(request.signedInFiles))
+            ) {
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
             }
@@ -403,6 +418,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             } finally {
                 pass = undefined;
             }
+            settleAccounts(store, request.accountFiles ?? [], !summary || summary.cancelled ? 'none' : paths === undefined ? 'whole' : 'some');
             reply(
                 summary
                     ? { type: 'imported', id: request.id, summary, leaseHeldElsewhere: false, ...takeRecovered() }
@@ -441,6 +457,49 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             reply({ type: 'cleared', id: request.id, generation: store.generation(), settled, copiesLeft });
             return;
         }
+    }
+}
+
+/** What the configuration said when its names were last kept, in which history and generation of it. */
+let remembered: string | undefined;
+
+/** The history and generation of it this window last read whole, in a pass that ran to its end. */
+let readThrough: string | undefined;
+
+/**
+ * After each pass, whichever window held the lease: keep the names Claude
+ * Code's configuration gives its accounts now, so that an account keeps its
+ * name in the history once signed out of, and, once this window has read
+ * the history whole, number the accounts its requests were made with that
+ * have no number yet (see `numberAccounts`). Numbers go by first use, and
+ * are kept: a pass another window held (`read` none), or one that stopped
+ * part way, has seen some accounts' first uses and not others'. The configuration is read again only once it has changed,
+ * and kept again only once it says something else, or the history was
+ * cleared; nothing is written when there is nothing new. Never in a history
+ * a newer version writes. A failure here is only a number or a name not
+ * kept yet: the pass's answer goes out all the same.
+ */
+function settleAccounts(store: UsageStore, files: string[], read: 'whole' | 'some' | 'none'): void {
+    try {
+        if (store.readOnly || store.outdated(PARSER_VERSION)) {
+            return;
+        }
+        const history = JSON.stringify([store.file, store.storeId(), store.generation()]);
+        if (read === 'whole') {
+            readThrough = history;
+        }
+        if (read !== 'none' && readThrough === history && store.hasUnnumberedAccounts('claude-code')) {
+            store.transaction(() => store.numberAccounts('claude-code'));
+        }
+        const { names } = readClaudeAccounts(files);
+        const said = JSON.stringify([store.file, store.storeId(), store.generation(), names]);
+        if (names.length === 0 || said === remembered) {
+            return;
+        }
+        store.transaction(() => store.rememberAccounts('claude-code', names, Date.now()));
+        remembered = said;
+    } catch {
+        // Busy, say: settled after the next pass.
     }
 }
 

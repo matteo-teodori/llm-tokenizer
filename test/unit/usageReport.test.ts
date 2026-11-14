@@ -8,9 +8,10 @@ import { importRoots } from '../../src/usage/importer';
 import { comparablePath, isWithin, projectLabel, sessionRoot } from '../../src/usage/projects';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import { inFolders, queryReport, reportSessions, type ReportQuery } from '../../src/usage/queries';
-import { buildReport, rangeSince, rangeUntil, type RangeKey } from '../../src/usage/report';
+import { buildReport, ownerAt, rangeSince, rangeUntil, type RangeKey } from '../../src/usage/report';
 import { createHistory, currentHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
+import { PARSER_VERSION } from '../../src/usage/transcripts';
 import type { UsageRequest } from '../../src/usage/types';
 import { WorkerHost } from '../../src/workerHost';
 
@@ -235,9 +236,9 @@ suite('usage report', () => {
         );
         assert.deepStrictEqual(session.compactions.map(c => [c.trigger, c.preTokens, c.postTokens]), [['auto', 160_000, 12_000]]);
         assert.deepStrictEqual(report.limitWindows, [
-            { limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
+            { account: 'none', limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
         ]);
-        assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0 });
+        assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0, accounts: 0, accountsSeen: 0 });
         assert.deepStrictEqual([report.coverage.requests, report.coverage.files], [4, 4]);
     });
 
@@ -709,6 +710,665 @@ suite('usage report', () => {
         assert.strictEqual(report.limitWindows.length, 1);
     });
 
+    describeAccounts();
+
+    /** The account tests: sessions of two accounts, one with two organizations, and one that records none. */
+    function describeAccounts(): void {
+        const A = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const ORG_A = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+        const ORG_A2 = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
+        const B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+        const owner = (sessionId: string, accountUuid: string, organizationUuid?: string) => ({ type: 'session-owner', accountUuid, organizationUuid, sessionId });
+        const limitHit = (sessionId: string, uuid: string, timestamp: string) => ({
+            type: 'assistant',
+            uuid,
+            timestamp,
+            sessionId,
+            quotaLimits: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: 1791561600 },
+            message: { id: `msg-${uuid}`, model: '<synthetic>', role: 'assistant', content: [], usage: { input_tokens: 0, output_tokens: 0 } },
+        });
+        const keyA = `${A}/${ORG_A}`;
+        const keyA2 = `${A}/${ORG_A2}`;
+        const keyB = `${B}/`;
+
+        async function history(): Promise<UsageStore> {
+            transcript('-repo-one', 'a1.jsonl', [
+                userRecord('a1', '/repo/one', '2026-10-08T10:00:00Z'),
+                assistantRecord('a1', 'm-a1', '2026-10-08T10:00:01Z', 100),
+                owner('a1', A, ORG_A),
+                limitHit('a1', 'hit-a', '2026-10-08T10:05:00Z'),
+            ]);
+            // Its subagent's tokens are its account's, though only the main transcript names it.
+            transcript('-repo-one', path.join('a1', 'subagents', 'agent-x.jsonl'), [
+                { ...assistantRecord('a1', 'm-a1-agent', '2026-10-08T10:02:00Z', 50), isSidechain: true, agentId: 'x' },
+            ]);
+            transcript('-repo-two', 'a2.jsonl', [
+                owner('a2', A, ORG_A2),
+                userRecord('a2', '/repo/two', '2026-10-09T09:00:00Z'),
+                assistantRecord('a2', 'm-a2', '2026-10-09T09:00:01Z', 30),
+            ]);
+            transcript('-repo-two', 'b1.jsonl', [
+                userRecord('b1', '/repo/two', '2026-10-07T08:00:00Z'),
+                assistantRecord('b1', 'm-b1', '2026-10-09T08:00:01Z', 300),
+                owner('b1', B),
+                limitHit('b1', 'hit-b', '2026-10-09T08:05:00Z'),
+            ]);
+            // B's second session, in another project, with fewer tokens: its projects, the most processed first.
+            transcript('-repo-one', 'b2.jsonl', [
+                userRecord('b2', '/repo/one', '2026-10-09T13:00:00Z'),
+                assistantRecord('b2', 'm-b2', '2026-10-09T13:00:01Z', 5),
+                owner('b2', B),
+            ]);
+            transcript('-repo-one', 'n1.jsonl', [
+                userRecord('n1', '/repo/one', '2026-10-09T07:00:00Z'),
+                assistantRecord('n1', 'm-n1', '2026-10-09T07:00:01Z', 7),
+                limitHit('n1', 'hit-n', '2026-10-09T07:05:00Z'),
+            ]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            return store;
+        }
+
+        test('a limit reached in a session with no request is offered and numbered as the account it is shown under, or as the sessions that record none', async () => {
+            // Refused at once, from before Claude Code recorded owners, then
+            // resumed under C and quit before it asked anything: its limit is C's.
+            const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
+            transcript('-repo-one', 'c1.jsonl', [limitHit('c1', 'hit-c', '2026-10-09T06:00:00Z'), limitHit('c1', 'hit-c2', '2026-10-09T06:20:00Z'), owner('c1', C)]);
+            // One that records no owner at all: the sessions that record none.
+            transcript('-repo-one', 'n2.jsonl', [limitHit('n2', 'hit-n2', '2026-10-09T06:30:00Z')]);
+            // And one whose owner changed again before anything followed: neither is used, nothing to offer.
+            transcript('-repo-one', 'd1.jsonl', [owner('d1', A, ORG_A), owner('d1', B)]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const report = queryReport(store, query());
+            assert.deepStrictEqual(report.limitWindows.map(w => [w.account, w.hits]), [[`${C}/`, 2], ['none', 1]]);
+            // Used from its first limit to its last.
+            assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions, a.firstTs, a.lastTs]), [
+                [`${C}/`, 1, Date.parse('2026-10-09T06:00:00Z'), Date.parse('2026-10-09T06:20:00Z')],
+                ['none', 1, Date.parse('2026-10-09T06:30:00Z'), Date.parse('2026-10-09T06:30:00Z')],
+            ]);
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
+            // Chosen, C shows its limit.
+            assert.deepStrictEqual(queryReport(store, query({ account: `${C}/` })).limitWindows.map(w => w.account), [`${C}/`]);
+        });
+
+        test('an account is used from its first request or limit to its last, whichever records its owner, and the history starts at its first record', async () => {
+            const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
+            const D = '4d5e6f7a-8b9c-4dae-8f0a-2b3c4d5e6f7a';
+            const E = '5e6f7a8b-9cad-4ebf-8a0b-3c4d5e6f7a8b';
+            // C's request on the 9th, its refusal on the 10th, and a request after it, its last use;
+            // then a session under C, its owner first, only refused, on the 10th, twice.
+            transcript('-repo-one', 'c1.jsonl', [
+                owner('c1', C),
+                userRecord('c1', '/repo/one', '2026-10-09T09:00:00Z'),
+                assistantRecord('c1', 'm-c1', '2026-10-09T09:00:01Z', 3),
+                limitHit('c1', 'hit-c1', '2026-10-10T09:00:00Z'),
+                assistantRecord('c1', 'm-c1-after', '2026-10-10T09:30:00Z', 3),
+            ]);
+            // One more, dated ahead of the report's clock, as only a wrong clock writes: not counted yet.
+            transcript('-repo-one', 'c2.jsonl', [
+                owner('c2', C),
+                limitHit('c2', 'hit-c2a', '2026-10-10T08:00:00Z'),
+                limitHit('c2', 'hit-c2b', '2026-10-10T08:30:00Z'),
+                limitHit('c2', 'hit-c2c', '2026-11-30T08:00:00Z'),
+            ]);
+            // A session opened under D, refused at once on the 7th, before any request of the history, then resumed under C, whose request came later.
+            transcript('-repo-one', 'd1.jsonl', [
+                owner('d1', D),
+                limitHit('d1', 'hit-d1', '2026-10-07T07:00:00Z'),
+                owner('d1', C),
+                userRecord('d1', '/repo/one', '2026-10-09T12:00:00Z'),
+                assistantRecord('d1', 'm-d1', '2026-10-09T12:00:01Z', 5),
+            ]);
+            // E's request, and its refusal after it, its last use.
+            transcript('-repo-one', 'e1.jsonl', [owner('e1', E), assistantRecord('e1', 'm-e1', '2026-10-10T10:00:00Z', 2), limitHit('e1', 'hit-e1', '2026-10-10T10:30:00Z')]);
+            // Its subagent's requests, which record no owner: one under D, one the very moment C's began, C's.
+            transcript('-repo-one', path.join('d1', 'subagents', 'agent-z.jsonl'), [
+                { ...assistantRecord('d1', 'm-d1-agent-d', '2026-10-07T08:00:00Z', 1), isSidechain: true, agentId: 'z' },
+                { ...assistantRecord('d1', 'm-d1-agent-c', '2026-10-09T12:00:01Z', 1), isSidechain: true, agentId: 'z' },
+            ]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const report = queryReport(store, query());
+            assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.firstTs, a.lastTs]), [
+                // D until its own last use in that session, its subagent's request, not C's after it.
+                [`${D}/`, Date.parse('2026-10-07T07:00:00Z'), Date.parse('2026-10-07T08:00:00Z')],
+                [`${C}/`, Date.parse('2026-10-09T09:00:01Z'), Date.parse('2026-10-10T09:30:00Z')],
+                [`${E}/`, Date.parse('2026-10-10T10:00:00Z'), Date.parse('2026-10-10T10:30:00Z')],
+            ]);
+            // D was used first: it is 1, by its limit, not by C's request after it.
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
+            // Everything held starts at that limit, and lists it; it ends at its newest record, the last limit before the clock.
+            assert.strictEqual(report.coverage.start, Date.parse('2026-10-07T07:00:00Z'));
+            assert.strictEqual(report.coverage.newest, Date.parse('2026-10-10T10:30:00Z'));
+            assert.ok(report.limitWindows.some(w => w.account === `${D}/`));
+        });
+
+        test("a session's last account is never dated to a limit another reached, an account used only by a limit dated ahead is offered as it is numbered, and a session with only such a limit is no Not recorded", async () => {
+            const F = '6f7a8b9c-adbe-4fc0-8b1c-4d5e6f7a8b9c';
+            const [G, H, I] = ['7a8b9cad-bec0-4d1e-8f2a-5b6c7d8e9f0a', '8b9cadbe-c0d1-4e2f-9a3b-6c7d8e9f0a1b', '9cadbec0-d1e2-4f3a-8b4c-7d8e9f0a1b2c'];
+            // One session, its transcripts in two folders: under A in one, a request and later A's own refusal; under B in the other, a request between.
+            // Each with one more, dated ahead of the clock: not counted yet.
+            transcript('-repo-one', 's1.jsonl', [
+                owner('s1', A, ORG_A),
+                assistantRecord('s1', 'm-a', '2026-10-09T10:10:00Z', 3),
+                assistantRecord('s1', 'm-a-later', '2026-10-09T10:40:00Z', 0),
+                limitHit('s1', 'hit-a', '2026-10-09T10:50:00Z'),
+                limitHit('s1', 'hit-a-ahead', '2026-10-12T11:00:00Z'),
+            ]);
+            transcript('-repo-two', 's1.jsonl', [
+                owner('s1', B),
+                userRecord('s1', '/repo/two', '2026-10-09T10:20:00Z'),
+                assistantRecord('s1', 'm-b', '2026-10-09T10:20:01Z', 5),
+                assistantRecord('s1', 'm-b-ahead', '2026-10-12T11:30:00Z', 100),
+            ]);
+            // Its subagent's requests and refusal, which record no owner: each the owner's at its time, A's before B's request, B's after.
+            transcript('-repo-one', path.join('s1', 'subagents', 'agent-y.jsonl'), [
+                { ...assistantRecord('s1', 'm-s1-agent-a', '2026-10-09T10:15:00Z', 1), isSidechain: true, agentId: 'y' },
+                { ...assistantRecord('s1', 'm-s1-agent-b', '2026-10-09T10:30:00Z', 1), isSidechain: true, agentId: 'y' },
+                { ...limitHit('s1', 'hit-agent-b', '2026-10-09T10:35:00Z'), isSidechain: true, agentId: 'y' },
+            ]);
+            // One more under G, then resumed under H and I, both only past the clock (a wrong one): neither takes an end from it.
+            transcript('-repo-one', 's4.jsonl', [
+                owner('s4', G),
+                assistantRecord('s4', 'm-s4-g', '2026-10-09T09:30:00Z', 1),
+                owner('s4', H),
+                assistantRecord('s4', 'm-s4-h', '2026-10-12T11:00:00Z', 1),
+                owner('s4', I),
+                assistantRecord('s4', 'm-s4-i', '2026-10-12T12:00:00Z', 1),
+            ]);
+            // A session signed in to F, nothing asked, whose only use is a refusal in its subagent's transcript, dated two days ahead of the clock (a wrong one).
+            transcript('-repo-one', 's2.jsonl', [owner('s2', F), userRecord('s2', '/repo/one', '2026-10-09T09:00:00Z')]);
+            transcript('-repo-one', path.join('s2', 'subagents', 'agent-x.jsonl'), [{ ...limitHit('s2', 'hit-f', '2026-10-12T12:00:00Z'), isSidechain: true, agentId: 'x' }]);
+            transcript('-repo-one', 's3.jsonl', [limitHit('s3', 'hit-n', '2026-10-12T13:00:00Z')]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const report = queryReport(store, query());
+            const seen = Object.fromEntries(report.accountsSeen.map(a => [a.key, [a.firstTs, a.lastTs]]));
+            // Each until its own last use, though their transcripts took turns: A its refusal, after its own request and B's;
+            // B its subagent's refusal, which records no owner, not A's request after it.
+            assert.deepStrictEqual(seen[keyA], [Date.parse('2026-10-09T10:10:00Z'), Date.parse('2026-10-09T10:50:00Z')]);
+            assert.deepStrictEqual(seen[keyB], [Date.parse('2026-10-09T10:20:01Z'), Date.parse('2026-10-09T10:35:00Z')]);
+            // G until its request; H and I from their changes, as the numbering takes them, and with no end.
+            assert.deepStrictEqual(
+                [seen[`${G}/`], seen[`${H}/`], seen[`${I}/`]],
+                [
+                    [Date.parse('2026-10-09T09:30:00Z'), Date.parse('2026-10-09T09:30:00Z')],
+                    [Date.parse('2026-10-12T11:00:00Z'), null],
+                    [Date.parse('2026-10-12T12:00:00Z'), null],
+                ],
+            );
+            // As the report counts their tokens: the subagent's first request A's, its second B's.
+            const tokens = Object.fromEntries(report.accounts.map(a => [a.key, a.totals.output]));
+            assert.deepStrictEqual([tokens[keyA], tokens[keyB]], [4, 6]);
+            // F is used by that refusal: offered as the numbering takes it.
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.ok(`${F}/` in seen, JSON.stringify(Object.keys(seen)));
+            assert.ok(store.accountNumbers().has(`${F}/`));
+            // A session that records no account, its only record a refusal dated ahead: nothing to show, nothing offered.
+            assert.ok(!('none' in seen), JSON.stringify(Object.keys(seen)));
+        });
+
+        test("an account's dates never run backwards where a transcript's clock went back, a refusal that records no owner is the one account's, and records past the clock offer no Not recorded", async () => {
+            const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
+            // Resumed under B, whose first request is dated past the clock (a wrong one), its next before it.
+            transcript('-repo-one', 'w1.jsonl', [
+                owner('w1', A, ORG_A),
+                assistantRecord('w1', 'm-w1-a', '2026-10-09T09:00:00Z', 1),
+                owner('w1', B),
+                assistantRecord('w1', 'm-w1-b-ahead', '2026-10-20T09:00:00Z', 1),
+                assistantRecord('w1', 'm-w1-b', '2026-10-09T10:00:00Z', 1),
+            ]);
+            // C's only account: a request past the clock, one before it, then its subagent's request and refusal, which record no owner.
+            transcript('-repo-one', 'w2.jsonl', [
+                owner('w2', C),
+                userRecord('w2', '/repo/one', '2026-10-09T08:59:00Z'),
+                assistantRecord('w2', 'm-w2-ahead', '2026-10-20T09:00:00Z', 1),
+                assistantRecord('w2', 'm-w2', '2026-10-09T09:00:00Z', 1),
+            ]);
+            transcript('-repo-one', path.join('w2', 'subagents', 'agent-z.jsonl'), [
+                { ...assistantRecord('w2', 'm-w2-agent', '2026-10-09T09:30:00Z', 1), isSidechain: true, agentId: 'z' },
+                { ...limitHit('w2', 'hit-w2-agent', '2026-10-09T10:00:00Z'), isSidechain: true, agentId: 'z' },
+            ]);
+            // A session that records no account, its only request past the clock: nothing to offer.
+            transcript('-repo-one', 'w3.jsonl', [userRecord('w3', '/repo/one', '2026-10-20T08:59:00Z'), assistantRecord('w3', 'm-w3-ahead', '2026-10-20T09:00:00Z', 1)]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const seen = Object.fromEntries(queryReport(store, query()).accountsSeen.map(a => [a.key, [a.firstTs, a.lastTs]]));
+            assert.deepStrictEqual(seen, {
+                [keyA]: [Date.parse('2026-10-09T09:00:00Z'), Date.parse('2026-10-09T09:00:00Z')],
+                // From no later than its own last use there, though the change began with a request dated the 20th.
+                [keyB]: [Date.parse('2026-10-09T10:00:00Z'), Date.parse('2026-10-09T10:00:00Z')],
+                // Until its subagent's refusal, after its last request, though its change began past the clock.
+                [`${C}/`]: [Date.parse('2026-10-09T09:00:00Z'), Date.parse('2026-10-09T10:00:00Z')],
+            });
+        });
+
+        test('a session a transcript names only by a copied change of owner and limit has its row: its limit is offered as the account it is shown under', async () => {
+            // s9 holds records copied from s10, whose own transcript was gone
+            // before the history first read it: its owner, then a refusal.
+            const C = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
+            transcript('-repo-one', 's9.jsonl', [
+                userRecord('s9', '/repo/one', '2026-10-09T05:00:00Z'),
+                assistantRecord('s9', 'm-s9', '2026-10-09T05:00:01Z', 3),
+                owner('s10', C),
+                limitHit('s10', 'hit-s10', '2026-10-09T05:10:00Z'),
+            ]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const report = queryReport(store, query());
+            assert.deepStrictEqual(report.limitWindows.map(w => w.account), [`${C}/`]);
+            assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions]), [[`${C}/`, 1], ['none', 1]]);
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
+        });
+
+        test('tokens are split by account and organization, subagents included, the sessions that record none in a row of their own', async () => {
+            const report = queryReport(await history(), query());
+            assert.strictEqual(report.account, 'all');
+            assert.deepStrictEqual(
+                report.accounts.map(a => [a.key, a.sessions, a.totals.output, a.projects]),
+                [
+                    [keyB, 2, 305, ['two', 'one']],
+                    [keyA, 1, 150, ['one']],
+                    [keyA2, 1, 30, ['two']],
+                    ['none', 1, 7, ['one']],
+                ],
+            );
+            assert.deepStrictEqual(
+                report.sessions.map(s => [s.sessionId, s.accounts]).sort(),
+                [['a1', [keyA]], ['a2', [keyA2]], ['b1', [keyB]], ['b2', [keyB]], ['n1', ['none']]],
+            );
+            // Every account of the history, not numbered yet, by first use, the ones with none last.
+            assert.deepStrictEqual(
+                report.accountsSeen.map(a => [a.key, a.sessions, a.firstTs]),
+                [
+                    [keyA, 1, Date.parse('2026-10-08T10:00:01Z')],
+                    [keyB, 2, Date.parse('2026-10-09T08:00:01Z')],
+                    [keyA2, 1, Date.parse('2026-10-09T09:00:01Z')],
+                    ['none', 1, Date.parse('2026-10-09T07:00:01Z')],
+                ],
+            );
+            // A limit is an account's: two accounts' hits of one window are two windows.
+            assert.deepStrictEqual(report.limitWindows.map(w => [w.account, w.hits]), [[keyA, 1], ['none', 1], [keyB, 1]]);
+        });
+
+        test('one account chosen narrows everything to its sessions, its limits included; the accounts seen stay whole', async () => {
+            const store = await history();
+            const a = queryReport(store, query({ account: keyA }));
+            assert.deepStrictEqual(
+                [a.account, a.totals.output, a.sessions.map(s => s.sessionId), a.projects.map(p => p.label), a.accounts.map(r => r.key)],
+                [keyA, 150, ['a1'], ['one'], [keyA]],
+            );
+            assert.deepStrictEqual(a.limitWindows.map(w => [w.account, w.hits]), [[keyA, 1]]);
+            assert.strictEqual(a.accountsSeen.length, 4);
+            const none = queryReport(store, query({ account: 'none' }));
+            assert.deepStrictEqual([none.totals.output, none.sessions.map(s => s.sessionId), none.limitWindows.length], [7, ['n1'], 1]);
+            // An account the history no longer holds, after a Clear say: nothing, rather than everything.
+            const gone = queryReport(store, query({ account: `${B}/${ORG_A}` }));
+            assert.deepStrictEqual([gone.totals.coverage.requests, gone.sessions.length, gone.limitWindows.length, gone.accountsSeen.length], [0, 0, 0, 4]);
+            // With a workspace too: both apply.
+            const both = queryReport(store, query({ account: keyB, workspaceFolders: ['/repo/one'] }));
+            assert.deepStrictEqual([both.totals.output, both.sessions.map(s => s.sessionId)], [5, ['b2']]);
+        });
+
+        test('accounts keep the numbers the history gave them, an account\'s organizations its number and their own, and the worker gives them after each pass', async () => {
+            const store = await history();
+            const numbers = () => queryReport(store, query()).accountsSeen.map(a => [a.key, a.ordinal, a.organizationOrdinal, a.organizations]);
+            // Before the pass that found them numbers them: none, by first use.
+            assert.deepStrictEqual(numbers(), [
+                [keyA, null, null, 2], [keyB, null, null, 1], [keyA2, null, null, 2], ['none', null, null, 0],
+            ]);
+            assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), {});
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.strictEqual(store.accountNumbers().size, 3);
+            assert.deepStrictEqual(numbers(), [
+                [keyA, 1, 1, 2], [keyA2, 1, 2, 2], [keyB, 2, 1, 1], ['none', null, null, 0],
+            ]);
+            // A session from before them all, of a new account: after them, by its number.
+            const C = '11111111-2222-4333-8444-555555555555';
+            transcript('-repo-one', 'c1.jsonl', [
+                userRecord('c1', '/repo/one', '2026-10-01T10:00:00Z'),
+                assistantRecord('c1', 'm-c1', '2026-10-01T10:00:01Z', 1),
+                owner('c1', C),
+            ]);
+            await importRoots(store, [path.join(tmp, 'root')]);
+            store.transaction(() => store.numberAccounts('claude-code'));
+            assert.deepStrictEqual(numbers(), [
+                [keyA, 1, 1, 2], [keyA2, 1, 2, 2], [keyB, 2, 1, 1], [`${C}/`, 3, 1, 1], ['none', null, null, 0],
+            ]);
+        });
+
+        test('a session resumed under another account after a limit: its tokens and the limit split where the account changed, its subagents\' by their time, within one quarter hour', async () => {
+            transcript('-repo-one', 'r1.jsonl', [
+                // From before Claude Code recorded owners: under the first it records.
+                userRecord('r1', '/repo/one', '2026-10-09T09:50:00Z'),
+                assistantRecord('r1', 'm-r0', '2026-10-09T09:50:01Z', 1000),
+                owner('r1', A, ORG_A),
+                userRecord('r1', '/repo/one', '2026-10-09T10:00:00Z'),
+                assistantRecord('r1', 'm-r1', '2026-10-09T10:00:01Z', 100),
+                limitHit('r1', 'hit-r1', '2026-10-09T10:05:00Z'),
+                // Signed in to B, and resumed.
+                owner('r1', B),
+                userRecord('r1', '/repo/one', '2026-10-09T10:06:00Z'),
+                assistantRecord('r1', 'm-r2', '2026-10-09T10:07:00Z', 40),
+                limitHit('r1', 'hit-r2', '2026-10-09T10:09:00Z'),
+            ]);
+            // Signed in to another account at the end, with no request since: not one of its accounts yet.
+            transcript('-repo-one', 'r2.jsonl', [
+                owner('r2', B),
+                userRecord('r2', '/repo/one', '2026-10-09T11:00:00Z'),
+                assistantRecord('r2', 'm-r3', '2026-10-09T11:00:01Z', 1),
+                owner('r2', A, ORG_A2),
+            ]);
+            transcript('-repo-one', path.join('r1', 'subagents', 'agent-y.jsonl'), [
+                { ...assistantRecord('r1', 'm-r1-early', '2026-10-09T10:02:00Z', 3), isSidechain: true, agentId: 'y' },
+                { ...assistantRecord('r1', 'm-r2-agent', '2026-10-09T10:08:00Z', 20), isSidechain: true, agentId: 'y' },
+            ]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const all = queryReport(store, query());
+            assert.deepStrictEqual(all.accounts.map(a => [a.key, a.sessions, a.totals.output]), [[keyA, 1, 1103], [keyB, 2, 61]]);
+            assert.deepStrictEqual(
+                all.sessions.map(s => [s.sessionId, s.accounts, s.totals.output]),
+                [['r1', [keyA, keyB], 1163], ['r2', [keyB], 1]],
+            );
+            assert.deepStrictEqual(all.limitWindows.map(w => [w.account, w.hits]), [[keyA, 1], [keyB, 1]]);
+            // Each account from its first request in a session to its own last use there: A to its limit, before B's request.
+            assert.deepStrictEqual(all.accountsSeen.map(a => [a.key, a.sessions, a.firstTs, a.lastTs]), [
+                [keyA, 1, Date.parse('2026-10-09T09:50:01Z'), Date.parse('2026-10-09T10:05:00Z')],
+                [keyB, 2, Date.parse('2026-10-09T10:07:00Z'), Date.parse('2026-10-09T11:00:01Z')],
+            ]);
+            const ofA = queryReport(store, query({ account: keyA }));
+            const ofB = queryReport(store, query({ account: keyB }));
+            assert.deepStrictEqual(
+                [ofA.totals.output, ofA.limitWindows.map(w => w.account), ofA.sessions.map(s => s.accounts), ofB.totals.output, ofB.limitWindows.map(w => w.account)],
+                [1103, [keyA], [[keyA]], 61, [keyB]],
+            );
+        });
+
+        test("an account no request was made under is not the history's: one changed again before any request, and a session quit before it asked anything", async () => {
+            const C = '11111111-2222-4333-8444-555555555555';
+            const D = '22222222-3333-4444-8555-666666666666';
+            transcript('-repo-one', 'u1.jsonl', [
+                owner('u1', A, ORG_A),
+                userRecord('u1', '/repo/one', '2026-10-09T10:00:00Z'),
+                assistantRecord('u1', 'm-u1', '2026-10-09T10:00:01Z', 10),
+                // Resumed under B, then under C, before it asked anything.
+                owner('u1', B),
+                owner('u1', C),
+                userRecord('u1', '/repo/one', '2026-10-09T11:00:00Z'),
+                assistantRecord('u1', 'm-u2', '2026-10-09T11:00:01Z', 20),
+            ]);
+            // Started under D, and quit before a request.
+            transcript('-repo-one', 'u2.jsonl', [owner('u2', D), userRecord('u2', '/repo/one', '2026-10-09T12:00:00Z')]);
+            // Under E, refused at once: a limit reached, and no request.
+            const E = '33333333-4444-4555-8666-777777777777';
+            transcript('-repo-one', 'u3.jsonl', [owner('u3', E), userRecord('u3', '/repo/one', '2026-10-09T13:00:00Z'), limitHit('u3', 'hit-e', '2026-10-09T13:00:01Z')]);
+            const store = freshStore();
+            await importRoots(store, [path.join(tmp, 'root')]);
+            const before = queryReport(store, query());
+            assert.deepStrictEqual(
+                before.accountsSeen.map(a => [a.key, a.sessions, a.firstTs]),
+                [
+                    [keyA, 1, Date.parse('2026-10-09T10:00:01Z')],
+                    [`${C}/`, 1, Date.parse('2026-10-09T11:00:01Z')],
+                    [`${E}/`, 1, Date.parse('2026-10-09T13:00:01Z')],
+                ],
+            );
+            store.transaction(() => store.numberAccounts('claude-code'));
+            const report = queryReport(store, query());
+            assert.deepStrictEqual(report.accounts.map(a => [a.key, a.totals.output]), [[`${C}/`, 20], [keyA, 10]]);
+            assert.deepStrictEqual(report.limitWindows.map(w => w.account), [`${E}/`]);
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [keyA]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
+        });
+
+        test('one account chosen narrows a range too, and a request whose session the history has no row for counts under the owner it records, or none', async () => {
+            const store = await history();
+            // The last 7 days from the 10th: every one of these.
+            const week = queryReport(store, query({ range: '7d', account: keyB }));
+            assert.deepStrictEqual([week.totals.output, week.sessions.map(s => s.sessionId).sort()], [305, ['b1', 'b2']]);
+            const today = queryReport(store, query({ range: 'today', account: keyB }));
+            assert.strictEqual(today.totals.coverage.requests, 0);
+            // A request whose session has no row, as only a hand-made history
+            // holds: a2's alone was made after its session's owner record.
+            const bare = (account: string) =>
+                buildReport(
+                    { sums: store.bucketSums(0), sessions: [], compactions: [], limitHits: [], coverage: store.coverage() },
+                    { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', account },
+                ).totals.coverage.requests;
+            assert.deepStrictEqual([bare('none'), bare(keyA2)], [store.coverage().requests - 1, 1]);
+        });
+
+        test("the names Claude Code gives now stand over those the history kept, which are kept for the rest", async () => {
+            const store = await history();
+            store.transaction(() =>
+                store.rememberAccounts(
+                    'claude-code',
+                    [
+                        { accountUuid: A, organizationUuid: ORG_A, email: 'old@example.com', organizationName: 'Old Org' },
+                        { accountUuid: B, organizationUuid: null, email: 'b@example.com', organizationName: null },
+                    ],
+                    1,
+                ),
+            );
+            const report = queryReport(
+                store,
+                query({
+                    configured: {
+                        names: [{ accountUuid: A, organizationUuid: ORG_A, email: 'a@example.com', organizationName: null }],
+                        current: [{ accountUuid: A, organizationUuid: ORG_A }],
+                    },
+                }),
+            );
+            assert.deepStrictEqual(
+                report.accountNames.map(n => [n.accountUuid, n.email, n.organizationName]).sort(),
+                [[A, 'a@example.com', 'Old Org'], [B, 'b@example.com', null]],
+            );
+            assert.deepStrictEqual(report.currentAccounts, [keyA]);
+        });
+    }
+
+    test('accounts are capped as the other lists are: those with most tokens listed, those with most sessions offered', () => {
+        const owner = (i: number) => ({ accountUuid: `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`, organizationUuid: null });
+        const sessions = Array.from({ length: 260 }, (_, i) => ({
+            sessionId: `s${i}`,
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: false,
+            firstTs: Date.UTC(2026, 9, 9) + i,
+            lastTs: Date.UTC(2026, 9, 9) + i,
+            owners: [{ owner: owner(i), sinceTs: null }],
+            unownedHitTs: null, limitSpans: [], uses: [],
+        }));
+        // One more session for each of the last ten accounts: the ten with most sessions.
+        const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
+        const sums = [...sessions, ...extra].map((s, i) => ({
+            bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
+            sessionId: s.sessionId,
+            model: 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: Date.UTC(2026, 9, 9, 12),
+            lastTs: Date.UTC(2026, 9, 9, 12),
+            input: i,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        }));
+        const input = { sums, sessions: [...sessions, ...extra], compactions: [], limitHits: [], coverage: { start: 0, newest: 0, requests: 270, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 } };
+        const report = buildReport(input, { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', maxSessions: 5 });
+        // 200 with most sessions, 0 to 189 and the ten with two, and those listed, 210 to 259: all but 190 to 209.
+        assert.deepStrictEqual([report.accounts.length, report.omitted.accounts, report.accountsSeen.length, report.omitted.accountsSeen], [50, 210, 240, 20]);
+        // The ones with most tokens listed; the ones with most sessions offered, in the order they were first used.
+        assert.strictEqual(report.accounts[0].key, `${owner(259).accountUuid}/`);
+        assert.deepStrictEqual(report.accountsSeen.slice(0, 2).map(a => a.sessions), [1, 1]);
+        assert.ok(report.accountsSeen.some(a => a.key === `${owner(250).accountUuid}/` && a.sessions === 2));
+        assert.ok(report.accountsSeen.every((a, i, all) => i === 0 || (all[i - 1].firstTs ?? 0) <= (a.firstTs ?? 0)));
+        // Every account a list names has its row, and its label with it.
+        const seen = new Set(report.accountsSeen.map(a => a.key));
+        assert.ok([...report.accounts.map(a => a.key), ...report.sessions.flatMap(s => s.accounts)].every(key => seen.has(key)));
+        // The totals keep every account.
+        assert.strictEqual(report.totals.coverage.requests, 270);
+        // One chosen past the cap is still offered, and not counted among those left out.
+        const chosen = buildReport(input, { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', maxSessions: 5, account: `${owner(200).accountUuid}/` });
+        assert.deepStrictEqual(
+            [chosen.accountsSeen.some(a => a.key === `${owner(200).accountUuid}/`), chosen.accountsSeen.length, chosen.omitted.accountsSeen],
+            [true, 201, 59],
+        );
+        // In a range where it made no request too.
+        const today = buildReport(input, { range: 'today', zone: 'UTC', now: FIXTURE_NOW, scope: 'all', maxSessions: 5, account: `${owner(200).accountUuid}/` });
+        assert.deepStrictEqual([today.totals.coverage.requests, today.accountsSeen.some(a => a.key === `${owner(200).accountUuid}/`)], [0, true]);
+    });
+
+    test('accounts are offered by the numbers kept, whatever first use says now, and one a session or a limit names is kept past the cap', () => {
+        const id = (i: number) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
+        const session = (sessionId: string, accountUuid: string, firstTs: number) => ({
+            sessionId,
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: false,
+            firstTs,
+            lastTs: firstTs,
+            owners: [{ owner: { accountUuid, organizationUuid: null }, sinceTs: null }],
+            unownedHitTs: null, limitSpans: [], uses: [],
+        });
+        const sum = (sessionId: string, input: number) => ({
+            bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
+            sessionId,
+            model: 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: Date.UTC(2026, 9, 9, 12),
+            lastTs: Date.UTC(2026, 9, 9, 12),
+            input,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        });
+        const coverage = { start: 0, newest: 0, requests: 1, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 };
+        const options = { range: 'coverage' as const, zone: 'UTC', now: FIXTURE_NOW, scope: 'all' as const };
+        // Numbered 1 and 2 when first seen; a session of the second found since, from before them both.
+        const kept = buildReport(
+            {
+                sums: [],
+                sessions: [session('s1', id(1), 20), session('s2', id(2), 10)],
+                compactions: [],
+                limitHits: [],
+                coverage,
+                accountNumbers: new Map([
+                    [`${id(1)}/`, { ordinal: 1, organization: 1 }],
+                    [`${id(2)}/`, { ordinal: 2, organization: 1 }],
+                ]),
+            },
+            options,
+        );
+        assert.deepStrictEqual(kept.accountsSeen.map(a => [a.key, a.ordinal]), [[`${id(1)}/`, 1], [`${id(2)}/`, 2]]);
+        // An account's organizations by their own numbers likewise.
+        const org = (n: number) => `${String(n).padStart(8, '0')}-1111-4000-8000-000000000000`;
+        const inOrganization = (sessionId: string, organizationUuid: string, firstTs: number) => ({
+            ...session(sessionId, id(1), firstTs),
+            owners: [{ owner: { accountUuid: id(1), organizationUuid }, sinceTs: null }],
+        });
+        const organizations = buildReport(
+            {
+                sums: [],
+                sessions: [inOrganization('x', org(1), 10), inOrganization('y', org(2), 20)],
+                compactions: [],
+                limitHits: [],
+                coverage,
+                accountNumbers: new Map([
+                    [`${id(1)}/${org(1)}`, { ordinal: 1, organization: 2 }],
+                    [`${id(1)}/${org(2)}`, { ordinal: 1, organization: 1 }],
+                ]),
+            },
+            options,
+        );
+        assert.deepStrictEqual(organizations.accountsSeen.map(a => [a.key, a.organizationOrdinal]), [[`${id(1)}/${org(2)}`, 1], [`${id(1)}/${org(1)}`, 2]]);
+        // 201 accounts of two sessions each, and Z of one, its tokens the fewest: past every cap but for what names it.
+        const crowd = Array.from({ length: 201 }, (_, i) => [session(`a${i}`, id(i), i), session(`b${i}`, id(i), i)]).flat();
+        const z = session('z', id(999), 1_000);
+        const sums = [...crowd.map(s => sum(s.sessionId, 2)), sum('z', 1)];
+        const hit = { uuid: 'h', sessionId: 'z', timestamp: Date.UTC(2026, 9, 9, 12), limitType: 'five_hour', resetsAt: null };
+        const base = { sums, sessions: [...crowd, z], compactions: [], coverage };
+        const zKey = `${id(999)}/`;
+        const listed = buildReport({ ...base, limitHits: [] }, { ...options, maxSessions: 1_000 });
+        assert.deepStrictEqual([listed.accountsSeen.some(a => a.key === zKey), listed.omitted.accountsSeen], [true, 0]);
+        const limited = buildReport({ ...base, limitHits: [hit] }, { ...options, maxSessions: 1 });
+        assert.deepStrictEqual([limited.accountsSeen.some(a => a.key === zKey), limited.omitted.accountsSeen], [true, 0]);
+        const neither = buildReport({ ...base, limitHits: [] }, { ...options, maxSessions: 1 });
+        assert.deepStrictEqual([neither.accountsSeen.some(a => a.key === zKey), neither.omitted.accountsSeen], [false, 1]);
+    });
+
+    test("a session's accounts are named three at most, the rest counted, so that one session cannot fill the page with them", () => {
+        const id = (i: number) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
+        const at = (i: number) => Date.UTC(2026, 9, 9, 12) + i * 1_000;
+        const owners = Array.from({ length: 300 }, (_, i) => ({ owner: { accountUuid: id(i), organizationUuid: null }, sinceTs: at(i) }));
+        const sums = owners.map((o, i) => ({
+            bucket: Math.floor(at(i) / BUCKET_MS),
+            sessionId: 's',
+            model: 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: o.owner,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: at(i),
+            lastTs: at(i),
+            input: 1,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        }));
+        const report = buildReport(
+            {
+                sums,
+                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null, limitSpans: [], uses: [] }],
+                compactions: [],
+                limitHits: [],
+                coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },
+            },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual([report.sessions[0].accounts, report.sessions[0].moreAccounts], [[`${id(0)}/`, `${id(1)}/`, `${id(2)}/`], 297]);
+        assert.deepStrictEqual([report.accountsSeen.length, report.omitted.accountsSeen], [200, 100]);
+    });
+
     test('a missing counter makes the report a lower bound', () => {
         const store = freshStore();
         store.transaction(() => store.upsertRequests([request({ messageId: 'a', input: null }), request({ messageId: 'b' })]));
@@ -720,6 +1380,39 @@ suite('usage report', () => {
             [report.totals.provenance, report.totals.coverage.incompleteRequests, report.totals.input],
             ['partial', 1, 1],
         );
+    });
+});
+
+suite('the owner at a time', () => {
+    test('is the last owner begun by then, else the first, found by halving as by looking at every one', () => {
+        const owners = ['a', 'b', 'c'].map(accountUuid => ({ accountUuid, organizationUuid: null }));
+        // As UsageStore.sessions gives them: those with a time in its order, ties included, then those with none.
+        const linear = (spans: { owner: (typeof owners)[number]; sinceTs: number | null }[], ts: number) => {
+            let owner = spans[0]?.owner ?? null;
+            for (const span of spans) {
+                if (span.sinceTs !== null && span.sinceTs <= ts) {
+                    owner = span.owner;
+                }
+            }
+            return owner;
+        };
+        let seed = 7;
+        const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % n);
+        for (let round = 0; round < 2_000; round++) {
+            const timed = Array.from({ length: random(6) }, () => random(20)).sort((x, y) => x - y);
+            const spans = [...timed.map(sinceTs => ({ owner: owners[random(3)], sinceTs })), ...Array.from({ length: random(3) }, () => ({ owner: owners[random(3)], sinceTs: null }))];
+            for (let ts = -1; ts <= 21; ts++) {
+                assert.strictEqual(ownerAt(spans, ts), linear(spans, ts), JSON.stringify({ spans, ts }));
+            }
+        }
+        assert.strictEqual(ownerAt([], 5), null);
+        // Thousands of changes, a lookup each: a few steps, not a walk of them all.
+        const many = Array.from({ length: 100_000 }, (_, i) => ({ owner: owners[i % 3], sinceTs: i }));
+        const started = performance.now();
+        for (let i = 0; i < 100_000; i++) {
+            ownerAt(many, i);
+        }
+        assert.ok(performance.now() - started < 1_000, `${performance.now() - started} ms`);
     });
 });
 
@@ -791,6 +1484,111 @@ suite('usage worker queries', () => {
         assert.ok(again.type === 'report' && again.report.totals.processed === 1_278, JSON.stringify(again).slice(0, 200));
         const refused = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
         assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'store-read-only');
+    });
+
+    test("through the worker: each account's tokens, its name kept once Claude Code has signed out of it, and one account chosen", async () => {
+        const A = '0f1e2d3c-4b5a-4968-8776-655443322110';
+        const B = '9e8d7c6b-5a49-4837-a625-140f0e0d0c0b';
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const root = path.join(tmp, 'root');
+        const projects = path.join(root, 'projects', 'p');
+        fs.mkdirSync(projects, { recursive: true });
+        const owner = (sessionId: string, accountUuid: string) => ({ type: 'session-owner', accountUuid, organizationUuid: '', sessionId });
+        fs.writeFileSync(path.join(projects, 'a.jsonl'), line(owner('a', A)) + line(assistantRecord('a', 'm-a', '2026-10-09T10:00:00Z', 10)));
+        fs.writeFileSync(path.join(projects, 'b.jsonl'), line(assistantRecord('b', 'm-b', '2026-10-09T11:00:00Z', 20)) + line(owner('b', B)));
+        fs.writeFileSync(path.join(projects, 'n.jsonl'), line(assistantRecord('n', 'm-n', '2026-10-09T12:00:00Z', 30)));
+        const config = path.join(root, '.claude.json');
+        const signedIn = (accountUuid: string, emailAddress: string) =>
+            fs.writeFileSync(config, JSON.stringify({ projects: { '/p': {} }, oauthAccount: { accountUuid, emailAddress, organizationName: `${emailAddress}'s Organization` } }));
+        signedIn(A, 'a@example.com');
+
+        const worker = host();
+        const imported = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], accountFiles: [config] });
+        assert.strictEqual(imported.type, 'imported');
+        // Signed in to B now: A keeps the name it had.
+        signedIn(B, 'b@example.com');
+        fs.utimesSync(config, new Date(), new Date(Date.now() + 5_000));
+        const report = await worker.send(ask(storeFile, { accountFiles: [config] }));
+        assert.ok(report.type === 'report');
+        assert.deepStrictEqual(
+            report.report.accounts.map(a => [a.key, a.totals.output]),
+            [['none', 30], [`${B}/`, 20], [`${A}/`, 10]],
+        );
+        assert.deepStrictEqual(
+            report.report.accountNames.map(n => [n.accountUuid, n.email]).sort(),
+            [[A, 'a@example.com'], [B, 'b@example.com']],
+        );
+        assert.deepStrictEqual(report.report.currentAccounts, [`${B}/`]);
+        // Numbered by the pass, as they were first used.
+        assert.deepStrictEqual(report.report.accountsSeen.map(a => [a.key, a.ordinal]), [[`${A}/`, 1], [`${B}/`, 2], ['none', null]]);
+
+        // A second file, older, still signed in to A: its names count, not who it is signed in to.
+        const older = path.join(root, 'older.json');
+        fs.writeFileSync(older, JSON.stringify({ oauthAccount: { accountUuid: A, emailAddress: 'a@example.com' } }));
+        fs.utimesSync(older, new Date(1_700_000_000_000), new Date(1_700_000_000_000));
+        const two = await worker.send(ask(storeFile, { accountFiles: [older, config], signedInFiles: [config] }));
+        assert.ok(two.type === 'report');
+        assert.deepStrictEqual(two.report.currentAccounts, [`${B}/`]);
+
+        const one = await worker.send(ask(storeFile, { account: `${A}/` }));
+        assert.ok(one.type === 'report' && one.report.totals.output === 10 && one.report.account === `${A}/`, JSON.stringify(one).slice(0, 200));
+        for (const bad of [
+            { account: 'everyone' },
+            { accountFiles: 'not a list' as unknown as string[] },
+            { accountFiles: Array.from({ length: 17 }, () => config) },
+            { signedInFiles: 'not a list' as unknown as string[] },
+        ]) {
+            const refused = await worker.send(ask(storeFile, bad));
+            assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'bad-request', JSON.stringify(bad).slice(0, 80));
+        }
+        const badImport = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], signedInFiles: [''] });
+        assert.deepStrictEqual(badImport.type === 'failed' && badImport.failure, 'bad-request');
+    });
+
+    test('through the worker: accounts are numbered once this window has read the history whole, by first use, whatever it read first', async () => {
+        const X = '1a2b3c4d-0000-4000-8000-000000000001';
+        const Y = '5e6f7a8b-0000-4000-8000-000000000002';
+        const Z = '9c0d1e2f-0000-4000-8000-000000000003';
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const root = path.join(tmp, 'root');
+        const projects = path.join(root, 'projects', 'p');
+        fs.mkdirSync(projects, { recursive: true });
+        const owner = (sessionId: string, accountUuid: string) => ({ type: 'session-owner', accountUuid, organizationUuid: '', sessionId });
+        const session = (name: string, accountUuid: string, at: string) => {
+            const file = path.join(projects, `${name}.jsonl`);
+            fs.writeFileSync(file, line(owner(name, accountUuid)) + line(assistantRecord(name, `m-${name}`, at, 10)));
+            return file;
+        };
+        // X is read first, but Y was used first.
+        const x = session('x', X, '2026-10-09T12:00:00Z');
+        session('y', Y, '2026-10-09T10:00:00Z');
+        const worker = host();
+        const numbers = async () => {
+            const answer = await worker.send(ask(storeFile));
+            assert.ok(answer.type === 'report');
+            return Object.fromEntries(answer.report.accountsSeen.map(a => [a.key, a.ordinal]));
+        };
+        // A pass over a few files: some accounts' first uses, not others'.
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [x] })).type, 'imported');
+        assert.deepStrictEqual(await numbers(), { [`${X}/`]: null });
+        // A whole pass, while another window holds the history: nothing read here, nothing numbered.
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const opened = UsageStore.open(sqlite, historyIn(storeFile));
+        assert.ok(opened.status === 'ready');
+        assert.ok(opened.store.acquireLease('import', 'another window', PARSER_VERSION));
+        const held = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        assert.ok(held.type === 'imported' && held.leaseHeldElsewhere, JSON.stringify(held).slice(0, 200));
+        assert.deepStrictEqual(await numbers(), { [`${X}/`]: null });
+        opened.store.releaseLease('import', 'another window');
+        opened.store.close();
+        // Read whole here: numbered as they were first used.
+        const whole = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        assert.ok(whole.type === 'imported' && whole.summary && !whole.summary.cancelled, JSON.stringify(whole).slice(0, 200));
+        assert.deepStrictEqual(await numbers(), { [`${Y}/`]: 1, [`${X}/`]: 2 });
+        // After that, a pass over a few files numbers a new account at once.
+        const z = session('z', Z, '2026-10-09T13:00:00Z');
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [z] })).type, 'imported');
+        assert.deepStrictEqual(await numbers(), { [`${Y}/`]: 1, [`${X}/`]: 2, [`${Z}/`]: 3 });
     });
 
     test('a history set aside is named once, by its file name, in the next answer', async () => {
