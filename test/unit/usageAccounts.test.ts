@@ -181,9 +181,11 @@ suite('usage accounts: keys and labels', () => {
             [...labels.values()].map(l => l.label),
             [`Work (organization 2) · ${A.slice(0, 8)}/${ORG_A2.slice(0, 8)}`, `Work (organization 2) · ${A.slice(0, 8)}/no organization`, `Home · ${C}`, `Home · ${D}`],
         );
-        // A name you gave that reads as another's label once told apart.
-        const told = [...accountLabels([seenAs(ownerOf(B), 1), seenAs(ownerOf(C), 2), seenAs(ownerOf(A), 3)], [], { [B]: 'Work', [C]: 'Work', [A]: `Work · ${B.slice(0, 8)}` }).values()].map(l => l.label);
-        assert.deepStrictEqual(told, [`Work · ${B}`, `Work · ${C}`, `Work · ${B.slice(0, 8)}`]);
+        // A name you gave that reads as another's label once told apart: the same, or with a Cyrillic o.
+        for (const name of [`Work · ${B.slice(0, 8)}`, `W${char(0x43e)}rk · ${B.slice(0, 8)}`]) {
+            const told = [...accountLabels([seenAs(ownerOf(B), 1), seenAs(ownerOf(C), 2), seenAs(ownerOf(A), 3)], [], { [B]: 'Work', [C]: 'Work', [A]: name }).values()].map(l => l.label);
+            assert.deepStrictEqual(told, [`Work · ${B}`, `Work · ${C}`, name], name);
+        }
     });
 
     test('an account the history has not numbered yet is told by the first digits of its id, an organization of it likewise', () => {
@@ -212,7 +214,7 @@ suite('usage accounts: keys and labels', () => {
         assert.deepStrictEqual([all.get(`${A}/`)?.label, all.get(`${B}/`)?.label], [`All accounts · ${A.slice(0, 8)}`, 'Account 2']);
     });
 
-    test('labels that show the same, in letters of another script or as Unicode lists them confusable, are told apart, and labels that show otherwise are not', () => {
+    test('labels that show the same, or would in one case, in letters of another script or as Unicode lists them confusable, are told apart; labels that show otherwise in every case are not', () => {
         const toldApart = (a: string, b: string) => {
             const labels = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2)], [], { [A]: a, [B]: b });
             return [labels.get(`${A}/`)?.label, labels.get(`${B}/`)?.label].every(label => label?.includes(' · ') === true);
@@ -231,6 +233,8 @@ suite('usage accounts: keys and labels', () => {
             ['MATTEO@EXAMPLE.COM', 'rnatteo@example.com'],
             ['Ian', 'lan'],
             ['lan', 'IAN'],
+            // A capital I shows as l, which is L in lower case: alike in one case, as Acme and ACME are.
+            ['ALI', 'ALL'],
             ['G00GLE', 'GOOGLE'],
             ['Account 1', 'Account l'],
             // Katakana ro and the ideograph for mouth.
@@ -239,6 +243,8 @@ suite('usage accounts: keys and labels', () => {
             // and that form as they read it, beside an m.
             [`x${char(0xb2)}`, 'x2'],
             [`m${char(0xb2)}`, 'rn2'],
+            // A squared capital A, which has no lower case: in its compatibility form, A, then in lower case.
+            [`${char(0x1f130)}cme`, 'acme'],
             // A Cyrillic capital em shows as M, which in lower case shows as rn.
             [`${char(0x41c)}atteo@example.com`, 'rnatteo@example.com'],
             // A superscript zero, whose compatibility form 0 shows as O.
@@ -263,9 +269,13 @@ suite('usage accounts: keys and labels', () => {
         // A name you gave of two capital I where the filter's own has l.
         const all = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2)], [], { [A]: 'AII accounts' });
         assert.deepStrictEqual([all.get(`${A}/`)?.label, all.get(`${B}/`)?.label], [`AII accounts · ${A.slice(0, 8)}`, 'Account 2']);
-        // ian reads as Ian in one case, which shows as lan: all three told apart, though ian does not show as lan.
-        const three = accountLabels([seenAs(ownerOf(A), 1), seenAs(ownerOf(B), 2), seenAs(ownerOf(C), 3)], [], { [A]: 'ian', [B]: 'Ian', [C]: 'lan' });
-        assert.deepStrictEqual([...three.values()].map(l => l.label), [`ian · ${A.slice(0, 8)}`, `Ian · ${B.slice(0, 8)}`, `lan · ${C.slice(0, 8)}`]);
+        // ian reads as Ian in one case, which shows as lan: all three told apart, though ian does not show as lan, in any order.
+        const names = ['ian', 'Ian', 'lan'];
+        const ids = [A, B, C];
+        for (const order of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
+            const three = accountLabels(ids.map((id, i) => seenAs(ownerOf(id), i + 1)), [], Object.fromEntries(order.map((n, i) => [ids[i], names[n]])));
+            assert.deepStrictEqual([...three.values()].map(l => l.label), order.map((n, i) => `${names[n]} · ${ids[i].slice(0, 8)}`), order.join());
+        }
     });
 
     test("a skeleton is a text as Unicode's confusables read it, from the table's first entry to its last", () => {
@@ -278,11 +288,12 @@ suite('usage accounts: keys and labels', () => {
         assert.strictEqual(skeleton(char(0xfdf2)), String.fromCodePoint(0x6c, 0x644, 0x644, 0xe48, 0x10d27, 0x6f));
         assert.deepStrictEqual([skeleton('a'), skeleton('l'), skeleton('O'), skeleton('rn')], ['a', 'l', 'O', 'rn']);
         // Decomposed, before and after, so that two marks whose prototypes take each other's order are in order;
-        // without what draws nothing; and the same for text that shows the same.
+        // without what draws nothing, a format character or a letter, a Hangul filler; and the same for text that shows the same.
         assert.strictEqual(skeleton('é'), `e${char(0x301)}`);
         assert.strictEqual(skeleton(char(0x451)), `e${char(0x308)}`);
         assert.strictEqual(skeleton(`a${char(0x5a4)}${char(0x5ad)}`), `a${char(0x596)}${char(0x59a)}`);
         assert.strictEqual(skeleton(`a${char(0xad)}b`), 'ab');
+        assert.strictEqual(skeleton(`a${char(0x3164)}b`), 'ab');
         assert.strictEqual(skeleton(`p${char(0x0430)}yp${char(0x0430)}l`), skeleton('paypal'));
         assert.strictEqual(skeleton(String.fromCodePoint(0x1d400)), 'A');
     });

@@ -250,9 +250,6 @@ function labelOf(base: string, organization: string | null): string {
 /** The filter's own options, whose labels no account's may take. */
 const TAKEN = ['All accounts'];
 
-/** What UTS #39 leaves out of a skeleton: every character Unicode says draws nothing. */
-const IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
-
 let prototypes: Map<string, string> | undefined;
 
 /** Each character Unicode lists as confusable, by the prototype it reads as: CONFUSABLES, read once. */
@@ -283,7 +280,9 @@ function prototypesOf(): Map<string, string> {
 export function skeleton(text: string): string {
     const table = prototypesOf();
     let read = '';
-    for (const c of text.normalize('NFD').replace(IGNORABLE, '')) {
+    // What UTS #39 leaves out: every character Unicode says draws nothing. Here, as at the top of
+    // the module esbuild makes it a RegExp call that bundles never calling this would still keep.
+    for (const c of text.normalize('NFD').replace(/\p{Default_Ignorable_Code_Point}/gu, '')) {
         read += table.get(c) ?? c;
     }
     return read.normalize('NFD');
@@ -310,7 +309,12 @@ function alikeSets(labels: ReadonlyMap<string, string>): string[][] {
     const byReading = new Map<string, string[]>();
     for (const [key, read] of readingsOf) {
         for (const reading of new Set(read)) {
-            byReading.set(reading, [...(byReading.get(reading) ?? []), key]);
+            const keys = byReading.get(reading);
+            if (keys) {
+                keys.push(key);
+            } else {
+                byReading.set(reading, [key]);
+            }
         }
     }
     const placed = new Set<string>();
