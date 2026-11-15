@@ -272,6 +272,12 @@ export class UsageService implements vscode.Disposable {
         return this.resolvedCodex;
     }
 
+    /** Which agents' reading is turned on, as the settings say now. */
+    get agentsOn(): Record<UsageProvider, boolean> {
+        const settings = this.deps.readSettings();
+        return { 'claude-code': settings.enabled, codex: settings.codex?.enabled === true };
+    }
+
     /** The runtime that has no `node:sqlite`, when that is why nothing shows. */
     get missingSqlite(): { node: string; electron: string | null } | undefined {
         return this.runtime;
@@ -370,15 +376,15 @@ export class UsageService implements vscode.Disposable {
         // Clear deleted the copy set aside along with the rest; one it could
         // not is named again by the next report.
         this.recovered = undefined;
-        this.deps.log.info(`Claude Code usage history cleared (generation ${response.generation})`);
+        this.deps.log.info(`Agent usage history cleared (generation ${response.generation})`);
         if (!response.settled) {
             this.deps.log.info(
-                'Claude Code usage: another window was reading the history, so what Clear deleted leaves the file once that read ends',
+                'Agent usage: another window was reading the history, so what Clear deleted leaves the file once that read ends',
             );
         }
         if (response.copiesLeft > 0) {
             this.deps.log.warn(
-                `Claude Code usage: ${response.copiesLeft} copies of the history could not be removed yet; one may be open in another window, and each is removed at a later request`,
+                `Agent usage: ${response.copiesLeft} copies of the history could not be removed yet; one may be open in another window, and each is removed at a later request`,
             );
         }
         this.changed.fire();
@@ -682,7 +688,7 @@ export class UsageService implements vscode.Disposable {
         const resolved = this.resolveNow();
         const { claude, codex } = resolved;
         for (const refused of [...(claude?.refused ?? []), ...(codex?.refused ?? [])]) {
-            this.deps.log.warn(`Claude Code usage: refused a root outside the test fixtures (${refused.source})`);
+            this.deps.log.warn(`Agent usage: refused a root outside the test fixtures (${refused.source})`);
         }
         if (this.held && watchKey(resolved) !== this.watching) {
             // A data folder found since the watchers were set, or one gone
@@ -693,15 +699,15 @@ export class UsageService implements vscode.Disposable {
         if (sources.length === 0) {
             if (this.currentStatus !== 'no-roots') {
                 const looked = [...(claude?.candidates ?? []), ...(codex?.candidates ?? [])];
-                this.deps.log.info(`Claude Code usage: no data folder found of an agent turned on, of ${looked.length} places looked at`);
-                this.deps.log.debug(`Claude Code usage: looked at ${looked.map(c => c.path).join(', ')}`);
+                this.deps.log.info(`Agent usage: no data folder found of an agent turned on, of ${looked.length} places looked at`);
+                this.deps.log.debug(`Agent usage: looked at ${looked.map(c => c.path).join(', ')}`);
             }
             this.stopReading();
             this.setStatus('no-roots');
             return undefined;
         }
         const roots = sources.flatMap(s => s.roots);
-        this.deps.log.debug(`Claude Code usage: importing ${paths ? `${paths.length} changed files in ` : ''}${roots.join(', ')}`);
+        this.deps.log.debug(`Agent usage: importing ${paths ? `${paths.length} changed files in ` : ''}${roots.join(', ')}`);
         // Begun now, or, for the retry of a pass whose reading was shown, when that one began.
         this.readingSince ??= this.clock.now();
         this.followReading();
@@ -765,7 +771,7 @@ export class UsageService implements vscode.Disposable {
         this.setStatus(this.failingNow ? 'failing' : 'ready');
         const skipped = Object.values(s.skipped).reduce((sum, n) => sum + (n ?? 0), 0);
         this.deps.log.info(
-            `Claude Code usage: read ${s.read} of ${s.files} files in ${s.roots} ${s.roots === 1 ? 'root' : 'roots'}, ` +
+            `Agent usage: read ${s.read} of ${s.files} files in ${s.roots} ${s.roots === 1 ? 'root' : 'roots'}, ` +
                 `${s.records} records, ${skipped} skipped, in ${s.elapsedMs} ms${s.cancelled ? ', cancelled' : ''}`,
         );
         if (s.read > 0 && !told) {
@@ -792,7 +798,7 @@ export class UsageService implements vscode.Disposable {
             if ('recovered' in response && response.recovered) {
                 this.recovered = response.recovered;
                 this.deps.log.warn(
-                    `Claude Code usage: the history could not be read, so it was set aside as ${response.recovered}, and a new one started`,
+                    `Agent usage: the history could not be read, so it was set aside as ${response.recovered}, and a new one started`,
                 );
                 this.changed.fire();
             } else if (response.type === 'report' && response.aside !== this.recovered) {
@@ -805,27 +811,27 @@ export class UsageService implements vscode.Disposable {
                 case 'unavailable':
                     this.runtime = { node: response.node, electron: response.electron };
                     this.deps.log.warn(
-                        `Claude Code usage needs node:sqlite, which this editor's runtime lacks (Node ${response.node})`,
+                        `Agent usage needs node:sqlite, which this editor's runtime lacks (Node ${response.node})`,
                     );
                     this.statusWhileOn('no-sqlite');
                     return { type: 'unanswered', transient: false };
                 case 'failed':
                     if (response.failure === 'store-read-only') {
                         this.deps.log.warn(
-                            'Claude Code usage: the history was written by a newer LLM Tokenizer, so it is read-only here; reload this window to run that version, or update LLM Tokenizer',
+                            'Agent usage: the history was written by a newer LLM Tokenizer, so it is read-only here; reload this window to run that version, or update LLM Tokenizer',
                         );
                         this.statusWhileOn('read-only');
                     } else if (response.failure === 'outdated') {
                         if (this.currentStatus !== 'read-only') {
                             this.deps.log.warn(
-                                'Claude Code usage: a newer LLM Tokenizer, in another window, updates this history; reload this window to update it here',
+                                'Agent usage: a newer LLM Tokenizer, in another window, updates this history; reload this window to update it here',
                             );
                         }
                         this.statusWhileOn('read-only');
                     } else if (response.failure === 'bad-request') {
                         // A request the worker would not take says nothing
                         // about the history: the status stays as it is.
-                        this.deps.log.warn(`Claude Code usage: a request was refused (${response.errorName})`);
+                        this.deps.log.warn(`Agent usage: a request was refused (${response.errorName})`);
                     } else {
                         // Busy, a file refused, an import that threw: none of them lasts.
                         return this.failedForNow(kind, generation, `${response.failure} (${failureDetail(response)})`);
@@ -859,13 +865,13 @@ export class UsageService implements vscode.Disposable {
      */
     private failedForNow(kind: 'pass' | 'look' | undefined, generation: number, why: string): Unanswered {
         if (!kind || !this.enabled || generation !== this.generation) {
-            this.deps.log.warn(`Claude Code usage: ${why}`);
+            this.deps.log.warn(`Agent usage: ${why}`);
             return { type: 'unanswered', transient: true };
         }
         const failures = ++this.failures[kind];
         const retry: number | undefined = RETRY_MS[failures - 1];
         this.deps.log.warn(
-            `Claude Code usage: ${why}${retry !== undefined ? `; tried again in ${duration(retry)}` : kind === 'pass' ? '; tried again by the hourly pass' : ''}`,
+            `Agent usage: ${why}${retry !== undefined ? `; tried again in ${duration(retry)}` : kind === 'pass' ? '; tried again by the hourly pass' : ''}`,
         );
         if (kind === 'look') {
             this.clock.clearTimeout(this.lookTimer);
@@ -1135,7 +1141,7 @@ export function startClaudeCodeUsage(
         rootInputs: () => machineRootInputs(underTest ? { fixtures } : undefined),
         createHost: onCrash =>
             new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(path.join(context.extensionPath, 'out', 'usageWorker.js'), {
-                name: 'Claude Code usage reader',
+                name: 'agent usage reader',
                 fallback: 'usage is not updated',
                 log,
                 onExit: onCrash,
@@ -1182,7 +1188,7 @@ export function startClaudeCodeUsage(
 
 async function refreshCommand(service: UsageService): Promise<void> {
     if (service.status === 'off') {
-        const open = await vscode.window.showInformationMessage('Claude Code usage is off.', 'Open Settings');
+        const open = await vscode.window.showInformationMessage('Agent usage is off: neither Claude Code nor Codex is read.', 'Open Settings');
         if (open) {
             await openUsageSettings();
         }
@@ -1202,32 +1208,32 @@ export function refreshMessage(
     state: { updatingElsewhere: boolean; status: UsageStatus; retrying: boolean },
 ): { kind: 'info' | 'warning'; text: string } | undefined {
     if (summary) {
-        return { kind: 'info', text: `LLM Tokenizer: read ${summary.read} changed of ${summary.files} Claude Code transcripts.` };
+        return { kind: 'info', text: `LLM Tokenizer: read ${summary.read} changed of ${summary.files} session records.` };
     }
     if (state.updatingElsewhere) {
-        return { kind: 'info', text: 'LLM Tokenizer: another window is updating the Claude Code usage history; this one shows it as it goes.' };
+        return { kind: 'info', text: 'LLM Tokenizer: another window is updating the agent usage history; this one shows it as it goes.' };
     }
     if (state.status === 'no-roots') {
         // The log says so once, when the folder goes; this says it every time.
-        return { kind: 'warning', text: 'LLM Tokenizer: no Claude Code data folder was found. Show Claude Code Usage lists the places looked at.' };
+        return { kind: 'warning', text: 'LLM Tokenizer: no data folder of an agent turned on was found. Show Agent Usage lists the places looked at.' };
     }
     if (state.retrying) {
         // A warning only once the retry has failed too.
-        return { kind: 'info', text: 'LLM Tokenizer: Claude Code usage could not be refreshed just now; it is tried again in a few seconds.' };
+        return { kind: 'info', text: 'LLM Tokenizer: agent usage could not be refreshed just now; it is tried again in a few seconds.' };
     }
     if (state.status !== 'ready') {
-        return { kind: 'warning', text: 'LLM Tokenizer: Claude Code usage could not be refreshed; see the log.' };
+        return { kind: 'warning', text: 'LLM Tokenizer: agent usage could not be refreshed; see the log.' };
     }
     return undefined;
 }
 
 async function clearCommand(service: UsageService): Promise<void> {
     const choice = await vscode.window.showWarningMessage(
-        'Clear the Claude Code usage history LLM Tokenizer keeps?',
+        'Clear the agent usage history LLM Tokenizer keeps?',
         {
             modal: true,
             detail:
-                "Claude Code's own records are not touched. Those still on disk are read again at the next refresh; anything older is gone for good.",
+                "The agents' own records are not touched. Those still on disk are read again at the next refresh; anything older is gone for good.",
         },
         'Clear History',
     );
@@ -1248,8 +1254,8 @@ async function clearCommand(service: UsageService): Promise<void> {
 export function clearedMessage(outcome: ClearOutcome): string {
     const n = outcome.copiesLeft;
     if (n === 0) {
-        return 'LLM Tokenizer: Claude Code usage history cleared.';
+        return 'LLM Tokenizer: agent usage history cleared.';
     }
     const copies = n === 1 ? 'one copy of it' : `${n.toLocaleString('en-US')} copies of it`;
-    return `LLM Tokenizer: Claude Code usage history cleared, but ${copies} could not be removed yet, perhaps because another window has ${n === 1 ? 'it' : 'them'} open. ${n === 1 ? 'It is' : 'They are'} removed as soon as ${n === 1 ? 'it' : 'they'} can be.`;
+    return `LLM Tokenizer: agent usage history cleared, but ${copies} could not be removed yet, perhaps because another window has ${n === 1 ? 'it' : 'them'} open. ${n === 1 ? 'It is' : 'They are'} removed as soon as ${n === 1 ? 'it' : 'they'} can be.`;
 }

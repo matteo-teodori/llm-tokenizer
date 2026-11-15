@@ -1,5 +1,5 @@
 /**
- * Claude Code usage at activation: its three commands, one settings
+ * Agent usage at activation: its three commands, one settings
  * listener, and the context key that shows the editor title's T, and
  * nothing more. The feature itself is a bundle of its own, out/usage.js,
  * loaded the first time it is needed: at activation if it is on, when it is
@@ -26,7 +26,7 @@ const AGENT_EXTENSIONS = ['anthropic.claude-code', 'openai.chatgpt'];
  * counts tokens for other models. Both are workspace extensions, as this one
  * is, so they run in one extension host, locally and in a remote window
  * alike, which is where the stable getExtension looks. An agent used only as
- * its CLI is not seen; Show Claude Code Usage opens the panel all the same.
+ * its CLI is not seen; Show Agent Usage opens the panel all the same.
  */
 export const AGENT_INSTALLED = 'llm-tokenizer.agentInstalled';
 
@@ -61,14 +61,14 @@ export function registerClaudeCodeUsage(
             try {
                 start = load();
             } catch (error) {
-                log.error(`Claude Code usage could not be loaded: ${error instanceof Error ? error.message : String(error)}`);
+                log.error(`Agent usage could not be loaded: ${error instanceof Error ? error.message : String(error)}`);
                 return undefined;
             }
             try {
                 feature = start(context, log, startupSettled);
             } catch (error) {
                 // The name only: what the feature had read could be in the message.
-                log.error(`Claude Code usage could not be started (${error instanceof Error ? error.name : 'Error'})`);
+                log.error(`Agent usage could not be started (${error instanceof Error ? error.name : 'Error'})`);
                 return undefined;
             }
         }
@@ -78,7 +78,7 @@ export function registerClaudeCodeUsage(
     const forCommand = (): UsageCommands | undefined => {
         const commands = started();
         if (!commands) {
-            void vscode.window.showErrorMessage('LLM Tokenizer: Claude Code usage could not be loaded; see the log.');
+            void vscode.window.showErrorMessage('LLM Tokenizer: agent usage could not be loaded; see the log.');
         }
         return commands;
     };

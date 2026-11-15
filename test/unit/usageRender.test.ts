@@ -77,6 +77,8 @@ function view(overrides: Partial<PanelView> = {}): PanelView {
         range: '7d',
         scope: 'all',
         account: 'all',
+        agent: 'all',
+        agentsOn: { 'claude-code': true, codex: false },
         givenNames: {},
         zone: 'Europe/Rome',
         where: '',
@@ -84,6 +86,7 @@ function view(overrides: Partial<PanelView> = {}): PanelView {
         report: report(),
         modelLabel: id => id,
         roots: [{ path: `~/${HOSTILE}`, source: 'default', exists: true }],
+        codexRoots: [],
         accountFiles: [`~/.claude${HOSTILE}.json`],
         historyDisabled: false,
         lastImport: undefined,
@@ -373,17 +376,62 @@ function fakeButton(dataset: Record<string, string>, pressed: boolean, textConte
 }
 
 /** The controls region, with what the page's script looks for in it, and how often it was rebuilt. */
+/** An agent filter's group, as the page puts it in, takes it out, or replaces it. */
+interface FakeGroup {
+    replaceWith(group: FakeGroup): void;
+    remove(): void;
+}
+
 function fakeControls(select: FakeSelect | null, buttons: ReturnType<typeof fakeButton>[]) {
+    const group = (): FakeGroup => {
+        const self: FakeGroup = {
+            replaceWith: next => {
+                region.agentGroup = region.agentGroup === self ? next : region.agentGroup;
+                region.agentsShown++;
+            },
+            remove: () => {
+                region.agentGroup = region.agentGroup === self ? null : region.agentGroup;
+                region.agentsShown++;
+            },
+        };
+        return self;
+    };
+    const range = {
+        after: (next: FakeGroup) => {
+            region.agentGroup = next;
+            region.agentsShown++;
+        },
+    };
     const region = {
         rebuilt: 0,
+        /** The agent filter's group shown, and how often it was put in, taken out or replaced alone. */
+        agentGroup: null as FakeGroup | null,
+        agentsShown: 0,
+        group,
         set innerHTML(_: string) {
             region.rebuilt++;
         },
         get innerHTML() {
             return '';
         },
-        querySelector: (selector: string) => (selector === 'select[data-account-filter]' ? select : null),
-        querySelectorAll: (selector: string) => buttons.filter(b => (selector === 'button[data-range]' ? 'range' in b.dataset : selector === 'button[data-scope]' ? 'scope' in b.dataset : false)),
+        querySelector: (selector: string) =>
+            selector === 'select[data-account-filter]'
+                ? select
+                : selector === '.segmented[aria-label="Agent"]'
+                  ? region.agentGroup
+                  : selector === '.segmented[aria-label="Range"]'
+                    ? range
+                    : null,
+        querySelectorAll: (selector: string) =>
+            buttons.filter(b =>
+                selector === 'button[data-range]'
+                    ? 'range' in b.dataset
+                    : selector === 'button[data-scope]'
+                      ? 'scope' in b.dataset
+                      : selector === 'button[data-agent-filter]'
+                        ? 'agentFilter' in b.dataset
+                        : false,
+            ),
     };
     return region;
 }
@@ -421,7 +469,21 @@ function runPage(
         activeElement: null as unknown,
         windowFocused: true,
         hasFocus: () => document.windowFocused,
-        createElement: () => ({ value: '', textContent: '', disabled: false }),
+        createElement: (tag: string) =>
+            tag === 'template'
+                ? (() => {
+                      let markup = '';
+                      return {
+                          set innerHTML(html: string) {
+                              markup = html;
+                          },
+                          content: {
+                              querySelector: (selector: string) =>
+                                  selector === '.segmented[aria-label="Agent"]' && markup.includes('aria-label="Agent"') && dom.choices ? dom.choices.group() : null,
+                          },
+                      };
+                  })()
+                : { value: '', textContent: '', disabled: false },
     };
     vm.runInNewContext(script, {
         acquireVsCodeApi: () => ({ postMessage: (m: { type: string }) => posted.push(m) }),
@@ -470,20 +532,20 @@ function runPage(
 suite('usage page', () => {
     test('every empty state says why, and what would change it', () => {
         const off = text(renderFragments(view({ status: 'off', report: undefined })));
-        assert.ok(off.includes('Claude Code usage is off'));
+        assert.ok(off.includes('Agent usage is off'));
         assert.ok(off.includes('Nothing is sent anywhere'));
         assert.ok(off.includes('Never kept: prompts, responses, thinking, tool inputs or results'));
         // Every file of Claude Code's it reads, and what of each.
         assert.ok(off.includes('it reads only the Claude accounts it names'));
         assert.ok(off.includes('it keeps three <code>env</code> entries alone: where its records are, and two switches'));
-        assert.ok(off.includes('data-action="turnOn"') && off.includes('data-action="openSettings"'));
+        assert.ok(off.includes('data-action="turnOn" data-agent="claude-code"') && off.includes('data-action="turnOn" data-agent="codex"') && off.includes('data-action="openSettings"'));
         assert.ok(!off.includes('Remote settings'));
         const remote = text(renderFragments(view({ status: 'off', report: undefined, remote: true, where: 'on box (ssh-remote)' })));
         // Turn On writes a machine setting at the user level: in a remote window, VS Code writes it to the host's.
-        assert.ok(remote.includes('The setting is in Remote settings, for this host, and Turn On sets it there.'));
+        assert.ok(remote.includes('The settings are in Remote settings, for this host, and Turn On sets them there.'));
         // The host named once, not inside "this machine".
-        assert.ok(remote.includes('session records on box (ssh-remote),') && !remote.includes('records on this machine'), remote);
-        assert.ok(off.includes('session records on this machine,'));
+        assert.ok(remote.includes('session records on box (ssh-remote).') && !remote.includes('records on this machine'), remote);
+        assert.ok(off.includes('session records on this machine.'));
 
         const noRoots = text(
             renderFragments(view({ status: 'no-roots', report: undefined, roots: [{ path: '~/.claude', source: 'the default', exists: false }] })),
@@ -504,7 +566,7 @@ suite('usage page', () => {
         assert.ok(text(renderFragments(view({ historyDisabled: true }))).includes('CLAUDE_CODE_SKIP_PROMPT_HISTORY'));
 
         const nothing = report({ totals: emptyTotals(), days: [], models: [], kinds: [], efforts: [], projects: [], sessions: [] });
-        assert.ok(text(renderFragments(view({ report: { ...nothing, coverage: { ...nothing.coverage, requests: 0 } } }))).includes('No Claude Code requests have been read yet'));
+        assert.ok(text(renderFragments(view({ report: { ...nothing, coverage: { ...nothing.coverage, requests: 0 } } }))).includes('No requests have been read yet'));
         assert.ok(text(renderFragments(view({ scope: 'workspace', report: nothing }))).includes('started in a folder of this workspace'));
     });
 
@@ -548,7 +610,7 @@ suite('usage page', () => {
         const reading = renderFragments(view({ reading: { by: 'this window', files: 1_200, of: 3_875 } }));
         const all = text(reading);
         assert.ok(
-            reading.body.includes('<p class="banner reading">Still reading Claude Code&#39;s records: 1,200 of 3,875 files. These totals grow until it is done.</p>'),
+            reading.body.includes('<p class="banner reading">Still reading the agents&#39; records: 1,200 of 3,875 files. These totals grow until it is done.</p>'),
             reading.body.slice(0, 400),
         );
         // The hero, the days, the projects and the sessions: each only what was read so far.
@@ -561,7 +623,7 @@ suite('usage page', () => {
 
         // A count of files not known yet, or none at all.
         assert.ok(renderFragments(view({ reading: { by: 'this window', files: 40 } })).body.includes('records: 40 files so far.'));
-        assert.ok(renderFragments(view({ reading: { by: 'this window' } })).body.includes('Still reading Claude Code&#39;s records. These totals'));
+        assert.ok(renderFragments(view({ reading: { by: 'this window' } })).body.includes('Still reading the agents&#39; records. These totals'));
 
         const done = renderFragments(view());
         assert.ok(!text(done).includes('≥') && !done.body.includes('Still reading') && done.status.includes('>Refresh</button>'));
@@ -569,7 +631,7 @@ suite('usage page', () => {
 
     test("another window's reading is said too, with no count, and its totals are lower bounds", () => {
         const elsewhere = renderFragments(view({ reading: { by: 'another window' } }));
-        assert.ok(elsewhere.body.includes('Another window is reading Claude Code&#39;s records; these totals grow as it goes.'));
+        assert.ok(elsewhere.body.includes('Another window is reading the agents&#39; records; these totals grow as it goes.'));
         assert.ok(elsewhere.body.includes('class="hero-value">≥1.3K<'));
     });
 
@@ -709,10 +771,10 @@ suite('usage page', () => {
     test('with its data folder gone, a kept history is still shown, under a banner that says so', () => {
         const gone = { roots: [{ path: '~/.claude', source: 'the default', exists: false }] };
         const kept = text(renderFragments(view({ status: 'no-roots', ...gone })));
-        assert.ok(kept.includes('No Claude Code data folder is found now, so this is the history kept so far.'));
+        assert.ok(kept.includes('No data folder of an agent turned on is found now, so this is the history kept so far.'));
         assert.ok(kept.includes('data-action="chooseFolder"') && kept.includes('By model'), 'the history was not shown');
         const none = text(renderFragments(view({ status: 'no-roots', ...gone, report: report({ coverage: { ...report().coverage, requests: 0 } }) })));
-        assert.ok(none.includes('No Claude Code data folder found') && !none.includes('By model'));
+        assert.ok(none.includes('No data folder found') && !none.includes('By model'));
     });
 
     test('a history set aside is named, on the page and in the diagnostics', () => {
@@ -763,11 +825,11 @@ suite('usage page', () => {
         const csv = page.click('export');
         const lines = csv.split('\n');
         assert.ok(lines[0].startsWith('# extension: LLM Tokenizer 2.2.0'));
-        assert.ok(lines.includes('"date","model","variant","speed","inference_geo","prompt_size","requests","input_tokens","cache_creation_input_tokens","cache_creation_5m","cache_creation_1h","cache_read_input_tokens","output_tokens","thinking_tokens","web_search_requests","web_fetch_requests","complete"'));
+        assert.ok(lines.includes('"agent","date","model","variant","speed","inference_geo","prompt_size","requests","input_tokens","cache_creation_input_tokens","cache_creation_5m","cache_creation_1h","cache_read_input_tokens","output_tokens","thinking_tokens","web_search_requests","web_fetch_requests","complete"'));
         assert.ok(csv.includes(`"'=cmd|""/c calc""!A1"`), 'a model id was left able to run as a formula');
 
         const copied = page.click('copy');
-        assert.ok(copied.split('\n').some(l => l.split('\t').length === 7 && l.includes(HOSTILE)), 'a session row lost its columns');
+        assert.ok(copied.split('\n').some(l => l.split('\t').length === 8 && l.includes(HOSTILE)), 'a session row lost its columns');
     });
 
     test('Copy guards formulas as the CSV does: pasted, a cell is read the same way', () => {
@@ -775,7 +837,8 @@ suite('usage page', () => {
         const session = { ...report().sessions[0], label: formula, sessionId: '+1' };
         const copied = runPage(renderFragments(view({ report: report({ sessions: [session] }) }))).click('copy');
         const row = copied.split('\n').find(l => l.includes('HYPERLINK'))?.split('\t');
-        assert.deepStrictEqual(row?.slice(1, 3), [`'${formula}`, "'+1"]);
+        // After the agent and the time it started.
+        assert.deepStrictEqual(row?.slice(2, 4), [`'${formula}`, "'+1"]);
     });
 
     test("the page takes data only from the editor, whose messages come from the page's own origin", () => {
@@ -1365,6 +1428,35 @@ suite('usage page', () => {
         assert.strictEqual(select.replaced, replaced, 'what waited for the old filter went into one no longer shown');
     });
 
+    test("an account chosen just before an agent whose sessions have no accounts is not sent; the agent filter that comes or goes is put in or taken out alone, the account filter in use left as it is", () => {
+        const two = { agentsSeen: ['claude-code', 'codex'] as UsageReport['agentsSeen'] };
+        const first = renderFragments(view({ report: accountsReport(two) }));
+        const select = fakeSelect(first.choices?.account?.options ?? [], 'all');
+        const region = fakeControls(select, []);
+        const page = runPage(first, { choices: region });
+        // Chosen, then Codex before the choice has settled: no account filter is left, and no choice sent.
+        page.choose(KEY_A, select);
+        page.message(ORIGIN, renderFragments(view({ agent: 'codex', report: accountsReport({ ...two, agent: 'codex' }) })), 0);
+        page.elapse();
+        assert.deepStrictEqual(page.posted.filter(m => m.type === 'setAccount'), []);
+        // One agent's history, the account filter in use: the second agent's first session brings the agent
+        // filter, put in alone after the range. The select under the pointer is never rebuilt, nor the button
+        // a click that leaves it may be on, whose click a rebuild then would swallow.
+        const one = renderFragments(view({ report: accountsReport() }));
+        const inUse = fakeSelect(one.choices?.account?.options ?? [], 'all');
+        const controls = fakeControls(inUse, []);
+        const later = runPage(one, { choices: controls });
+        later.focus(inUse);
+        later.message(ORIGIN, renderFragments(view({ report: accountsReport(two) })), 0);
+        assert.deepStrictEqual([controls.rebuilt, controls.agentGroup !== null, controls.agentsShown], [0, true, 1]);
+        later.focus(null);
+        later.elapse();
+        assert.deepStrictEqual([controls.rebuilt, controls.agentsShown], [0, 1]);
+        // Back to one agent, after a Clear: taken out alone.
+        later.message(ORIGIN, renderFragments(view({ report: accountsReport() })), 0);
+        assert.deepStrictEqual([controls.rebuilt, controls.agentGroup, controls.agentsShown], [0, null, 2]);
+    });
+
     test("a session's account is on hover and in Copy; a limit says whose it is once there are two; one account's export says which", () => {
         const both = accountsReport({
             limitWindows: [
@@ -1503,7 +1595,7 @@ suite('usage panel messages', () => {
         assert.deepStrictEqual(parsePanelMessage({ type: 'setRange', range: '30d' }), { type: 'setRange', range: '30d' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'setScope', scope: 'workspace' }), { type: 'setScope', scope: 'workspace' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'clear', extra: 1 }), { type: 'clear' });
-        assert.deepStrictEqual(parsePanelMessage({ type: 'turnOn' }), { type: 'turnOn' });
+        assert.deepStrictEqual(parsePanelMessage({ type: 'turnOn', agent: 'codex' }), { type: 'turnOn', agent: 'codex' });
         assert.deepStrictEqual(parsePanelMessage({ type: 'reloadWindow', command: 'x' }), { type: 'reloadWindow' });
         const account = '0f1e2d3c-4b5a-4968-8776-655443322110';
         for (const filter of ['all', 'none', `${account}/`, `${account}/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d`]) {
@@ -1533,6 +1625,195 @@ suite('usage panel messages', () => {
             { type: '__proto__' },
         ]) {
             assert.strictEqual(parsePanelMessage(bad), undefined, JSON.stringify(bad)?.slice(0, 80));
+        }
+    });
+});
+
+suite('usage page, with two agents', () => {
+    const t = totals(1_000);
+    const codexSession = { ...report().sessions[0], provider: 'codex' as const, sessionId: 'codex-thread', accounts: [] };
+    const both = (overrides: Partial<UsageReport> = {}) =>
+        report({
+            agentsSeen: ['claude-code', 'codex'],
+            agents: [
+                { provider: 'codex', sessions: 1, totals: totals(700) },
+                { provider: 'claude-code', sessions: 1, totals: totals(300) },
+            ],
+            sessions: [report().sessions[0], codexSession],
+            limitWindows: [
+                { provider: 'claude-code', account: 'none', limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, 10), date: '2026-10-09' },
+                { provider: 'codex', account: null, limitType: 'weekly', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, 11), date: '2026-10-09' },
+            ],
+            dayModels: [{ provider: 'codex', date: '2026-10-09', model: 'gpt-5.5', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: t }],
+            ...overrides,
+        });
+
+    test("an agent filter, a By agent section, each session's agent and each limit's, once the history holds two agents'", () => {
+        const fragments = renderFragments(view({ report: both(), agentsOn: { 'claude-code': true, codex: true } }));
+        assert.deepStrictEqual(fragments.choices?.agent, {
+            value: 'all',
+            options: [
+                { value: 'all', label: 'All agents' },
+                { value: 'claude-code', label: 'Claude Code' },
+                { value: 'codex', label: 'Codex' },
+            ],
+        });
+        assert.ok(fragments.controls.includes('data-agent-filter="codex" aria-pressed="false"') && fragments.controls.includes('data-agent-filter="all" aria-pressed="true"'));
+        assert.ok(fragments.body.includes('<h2>By agent</h2>'));
+        assert.ok(fragments.body.includes('data-sort-key="agent"') && fragments.body.includes('Codex session codex-thread'));
+        assert.ok(fragments.body.includes('Codex: weekly limit') && fragments.body.includes('Claude Code: five hour limit'));
+        assert.deepStrictEqual(fragments.csv.rows.map(r => r[0]), ['codex']);
+        assert.deepStrictEqual(fragments.copy.rows.map(r => [r[0], r.at(-1)]), [
+            ['claude-code', 'Not recorded'],
+            ['codex', ''],
+        ]);
+        // One agent's history: no filter, no By agent, no Agent column, no agent on a limit.
+        const one = renderFragments(view());
+        assert.deepStrictEqual([one.choices?.agent, one.body.includes('By agent'), one.body.includes('data-sort-key="agent"'), one.body.includes('Claude Code: ')], [null, false, false, false]);
+    });
+
+    test("with one agent chosen, what was read and how new the history is are still the whole history's", () => {
+        const part = { start: Date.UTC(2026, 9, 9, 10), newest: Date.UTC(2026, 9, 9, 10, 30), requests: 1, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 };
+        const whole = { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 41, ahead: 2, files: 2, oversizeLines: 1, malformedLines: 7 };
+        const codex = renderFragments(view({ agent: 'codex', report: both({ agent: 'codex', coverage: part, history: whole }) }));
+        assert.ok(codex.diagnostics.includes('41 requests from 2 files, since 2026-10-01 00:00') && codex.diagnostics.includes('7 malformed, 1 too long to read'), codex.diagnostics);
+        assert.ok(codex.diagnostics.includes("2 requests dated more than a day after this machine's clock"), codex.diagnostics);
+        assert.ok(codex.status.includes('newest record 2026-10-09 11:00'), codex.status);
+        // Its range since its own first record.
+        assert.strictEqual(codex.choices?.since, 'Since 2026-10-09');
+        // A history kept, none of it the chosen agent's: still the history, with its filters to choose another.
+        const none = renderFragments(
+            view({ status: 'no-roots', agent: 'codex', report: both({ agent: 'codex', coverage: { ...part, requests: 0 }, history: whole, totals: emptyTotals(), sessions: [] }) }),
+        );
+        assert.ok(!none.body.includes('No data folder found') && none.controls.includes('data-agent-filter="all"'), none.body.slice(0, 400));
+    });
+
+    test("a page of Codex's limits names no account, nor says each is one's, however many accounts Claude Code's history holds", () => {
+        const accountsSeen = [
+            { key: 'a/', owner: { accountUuid: 'a', organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1, organizationOrdinal: 1, organizations: 1 },
+            { key: 'b/', owner: { accountUuid: 'b', organizationUuid: null }, sessions: 1, firstTs: 3, lastTs: 4, ordinal: 2, organizationOrdinal: 1, organizations: 1 },
+        ];
+        const page = renderFragments(view({ agent: 'codex', report: both({ agent: 'codex', accountsSeen, limitWindows: [both().limitWindows[1]] }) })).body;
+        assert.ok(page.includes('For the whole account, whichever project hit them') && !page.includes('Each for its whole account'), page);
+    });
+
+    test("a sort kept by the Agent column is the table's own sort while one agent's page has no such column, and comes back with it", () => {
+        const rows = [
+            { label: 'a', processed: '9', agent: 'codex' },
+            { label: 'b', processed: '100', agent: 'claude-code' },
+        ];
+        const all = fakeStrip('sessions', 'processed', ['agent', 'label', 'processed'], rows);
+        const page = livePage(renderFragments(view({ report: both() })), [all]);
+        page.click(all.button('agent'));
+        assert.notStrictEqual(all.sortOf('agent'), 'none');
+        const codex = fakeStrip('sessions', 'processed', ['label', 'processed'], rows.slice(0, 1));
+        page.update(renderFragments(view({ agent: 'codex', report: both({ agent: 'codex' }) })), [codex]);
+        assert.deepStrictEqual([codex.sortOf('processed'), codex.sortOf('label')], ['descending', 'none']);
+        const again = fakeStrip('sessions', 'processed', ['agent', 'label', 'processed'], rows);
+        page.update(renderFragments(view({ report: both() })), [again]);
+        assert.deepStrictEqual([again.sortOf('agent') !== 'none', again.sortOf('processed')], [true, 'none']);
+        // On the page that has no Agent column, a click on the column shown sorted turns it round, as on any other.
+        const before = fakeStrip('sessions', 'processed', ['label', 'processed'], rows.slice(0, 1));
+        page.update(renderFragments(view({ agent: 'codex', report: both({ agent: 'codex' }) })), [before]);
+        page.click(before.button('processed'));
+        assert.strictEqual(before.sortOf('processed'), 'ascending');
+    });
+
+    test("the accounts' shares are of Claude Code's tokens, another agent's being in none of them", () => {
+        const owner = { accountUuid: '00000000-0000-4000-8000-00000000000a', organizationUuid: null };
+        const key = `${owner.accountUuid}/`;
+        const accounts = {
+            accounts: [{ key, owner, sessions: 1, totals: totals(300), models: [], projects: [] }],
+            accountsSeen: [{ key, owner, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1, organizationOrdinal: 1, organizations: 1 }],
+        };
+        // 300 of Claude Code's 300, not of every agent's 1,000.
+        const page = renderFragments(view({ report: both({ ...accounts, totals: totals(1_000) }), agentsOn: { 'claude-code': true, codex: true } })).body;
+        assert.ok(page.includes('>100.0%<') && !page.includes('>30.0%<'), page);
+        assert.ok(page.includes("Shares are of Claude Code's tokens: Codex's are in no account here."));
+        // With Claude Code's alone, nothing to say.
+        const alone = renderFragments(view({ report: report({ ...accounts, totals: totals(300), agents: [{ provider: 'claude-code', sessions: 1, totals: totals(300) }] }) })).body;
+        assert.ok(alone.includes('>100.0%<') && !alone.includes('Shares are of'));
+    });
+
+    test("one agent chosen is the page's whole: no By agent, no Agent column, and Codex's has no account filter", () => {
+        const accounts = {
+            accountsSeen: [
+                { key: 'a/', owner: { accountUuid: 'a', organizationUuid: null }, sessions: 1, firstTs: 1, lastTs: 2, ordinal: 1, organizationOrdinal: 1, organizations: 1 },
+                { key: 'b/', owner: { accountUuid: 'b', organizationUuid: null }, sessions: 1, firstTs: 3, lastTs: 4, ordinal: 2, organizationOrdinal: 1, organizations: 1 },
+            ],
+        };
+        const codex = renderFragments(view({ agent: 'codex', report: both({ ...accounts, agent: 'codex' }) }));
+        assert.deepStrictEqual([codex.choices?.agent?.value, codex.choices?.account, codex.body.includes('By agent'), codex.body.includes('data-sort-key="agent"')], ['codex', null, false, false]);
+        assert.ok(codex.csv.notes.some(n => n.includes(', Codex only')));
+        const claude = renderFragments(view({ agent: 'claude-code', report: both({ ...accounts, agent: 'claude-code' }) }));
+        assert.ok(claude.choices?.account !== null, "Claude Code's accounts are still offered");
+        const empty = renderFragments(view({ agent: 'codex', report: both({ agent: 'codex', totals: emptyTotals(), sessions: [], limitWindows: [], coverage: { ...report().coverage, requests: 3 } }) }));
+        assert.ok(empty.body.includes('No Codex request falls in this range.'), empty.body);
+    });
+
+    test("the off page says what each agent's reading reads and keeps, with a Turn On of its own; diagnostics turn the other on", () => {
+        const off = text(renderFragments(view({ status: 'off', report: undefined, agentsOn: { 'claude-code': false, codex: false } })));
+        for (const said of [
+            'in the sessions and archived_sessions folders of its home (<code>~/.codex</code> by default)',
+            "Codex's credentials, configuration, prompt history and databases are never opened",
+            "each session record's path, size, file id and how far it was read, with a hash of the last 64 bytes read and its running totals there",
+            'Never kept: prompts, responses, reasoning, tool inputs or output.',
+        ]) {
+            assert.ok(off.includes(said), said);
+        }
+        const on = text(renderFragments(view({ agentsOn: { 'claude-code': true, codex: false }, codexRoots: [] })));
+        assert.ok(on.includes('Claude Code read · Codex off <button type="button" data-action="turnOn" data-agent="codex">Turn On</button>'));
+        assert.ok(!on.includes("Where Codex's records are read from"));
+        const codexOnly = text(
+            renderFragments(view({ agentsOn: { 'claude-code': false, codex: true }, codexRoots: [{ path: '~/.codex', source: 'the default', exists: true }] })),
+        );
+        assert.ok(codexOnly.includes("Where Codex's records are read from") && !codexOnly.includes("Where Claude Code's records are read from") && !codexOnly.includes('Account names'));
+        const noFolder = text(
+            renderFragments(view({ status: 'no-roots', report: undefined, agentsOn: { 'claude-code': false, codex: true }, codexRoots: [{ path: '~/.codex', source: 'the default', exists: false }] })),
+        );
+        assert.ok(noFolder.includes('<h3>Codex</h3>') && noFolder.includes('data-action="chooseFolder" data-agent="codex"') && !noFolder.includes('<h3>Claude Code</h3>'));
+    });
+
+    test("the page asks for an agent as clicked, and an agent's Turn On and Choose Folder… name it", () => {
+        const page = runPage(renderFragments(view({ report: both() })));
+        page.clickOn({ agentFilter: 'codex' });
+        page.clickOn({ action: 'turnOn', agent: 'codex' });
+        page.clickOn({ action: 'chooseFolder', agent: 'claude-code' });
+        page.clickOn({ action: 'refresh' });
+        // Made in the page's own context: compared as the editor receives them.
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(page.posted.slice(1))), [
+            { type: 'setAgent', agent: 'codex' },
+            { type: 'turnOn', agent: 'codex' },
+            { type: 'chooseFolder', agent: 'claude-code' },
+            { type: 'refresh' },
+        ]);
+    });
+
+    test('an agent chosen is pressed in place, and the filter is taken out alone as it goes, or replaced as it offers another agent', () => {
+        const all = fakeButton({ agentFilter: 'all' }, true);
+        const codex = fakeButton({ agentFilter: 'codex' }, false);
+        const controls = fakeControls(null, [all, codex]);
+        controls.agentGroup = controls.group();
+        const first = renderFragments(view({ report: both() }));
+        const page = runPage(first, { choices: controls });
+        page.message(ORIGIN, renderFragments(view({ agent: 'codex', report: both({ agent: 'codex' }) })));
+        assert.deepStrictEqual([all.getAttribute('aria-pressed'), codex.getAttribute('aria-pressed'), controls.rebuilt, controls.agentsShown], ['false', 'true', 0, 0]);
+        page.message(ORIGIN, renderFragments(view({ report: report() })));
+        assert.deepStrictEqual([controls.rebuilt, controls.agentGroup, controls.agentsShown], [0, null, 1], 'the filter went with the second agent, and was not taken away');
+    });
+
+    test('the panel takes an agent it knows, and nothing else', () => {
+        assert.deepStrictEqual(parsePanelMessage({ type: 'setAgent', agent: 'codex' }), { type: 'setAgent', agent: 'codex' });
+        assert.deepStrictEqual(parsePanelMessage({ type: 'setAgent', agent: 'all' }), { type: 'setAgent', agent: 'all' });
+        assert.deepStrictEqual(parsePanelMessage({ type: 'chooseFolder', agent: 'claude-code' }), { type: 'chooseFolder', agent: 'claude-code' });
+        for (const bad of [
+            { type: 'setAgent', agent: 'gemini' },
+            { type: 'setAgent', agent: '__proto__' },
+            { type: 'turnOn' },
+            { type: 'turnOn', agent: 'all' },
+            { type: 'chooseFolder', agent: 1 },
+        ]) {
+            assert.strictEqual(parsePanelMessage(bad), undefined, JSON.stringify(bad));
         }
     });
 });

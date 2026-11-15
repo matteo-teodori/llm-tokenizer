@@ -783,7 +783,7 @@ suite('usage service', () => {
         assert.deepStrictEqual([service.updatingElsewhere, service.status, service.retrying], [false, 'ready', true]);
         assert.deepStrictEqual(refreshMessage(undefined, service), {
             kind: 'info',
-            text: 'LLM Tokenizer: Claude Code usage could not be refreshed just now; it is tried again in a few seconds.',
+            text: 'LLM Tokenizer: agent usage could not be refreshed just now; it is tried again in a few seconds.',
         });
         await service.refresh();
         assert.deepStrictEqual([service.status, refreshMessage(undefined, service)?.kind], ['failing', 'warning']);
@@ -938,7 +938,7 @@ suite('usage service', () => {
         const { host } = make({ log: { info: () => undefined, warn: m => warnings.push(m), debug: () => undefined } });
         host.answer = request => Promise.resolve(request.type === 'import' ? busy(request) : defaultAnswer(request));
         await settle();
-        assert.deepStrictEqual(warnings, ['Claude Code usage: store-busy (Error, SQLite 5: database is locked); tried again in 5 s']);
+        assert.deepStrictEqual(warnings, ['Agent usage: store-busy (Error, SQLite 5: database is locked); tried again in 5 s']);
     });
 
     test('a look that fails is looked at again after 5 s, and shows as failing only if that fails too', async () => {
@@ -1202,10 +1202,10 @@ suite('usage service', () => {
         assert.ok(logged.some(l => l.includes('once that read ends')), logged.join(' | '));
         assert.ok(logged.some(l => l.includes('2 copies of the history could not be removed yet')), logged.join(' | '));
         // A copy still readable is never called cleared without a word.
-        assert.strictEqual(clearedMessage({ settled: true, copiesLeft: 0 }), 'LLM Tokenizer: Claude Code usage history cleared.');
+        assert.strictEqual(clearedMessage({ settled: true, copiesLeft: 0 }), 'LLM Tokenizer: agent usage history cleared.');
         assert.strictEqual(
             clearedMessage({ settled: true, copiesLeft: 1 }),
-            'LLM Tokenizer: Claude Code usage history cleared, but one copy of it could not be removed yet, perhaps because another window has it open. It is removed as soon as it can be.',
+            'LLM Tokenizer: agent usage history cleared, but one copy of it could not be removed yet, perhaps because another window has it open. It is removed as soon as it can be.',
         );
         assert.ok(clearedMessage({ settled: true, copiesLeft: 2 }).includes('2 copies of it could not be removed yet'));
     });
@@ -1214,13 +1214,13 @@ suite('usage service', () => {
         const at = (status: Parameters<typeof refreshMessage>[1]['status'], updatingElsewhere = false) =>
             refreshMessage(undefined, { status, updatingElsewhere, retrying: false });
         assert.deepStrictEqual(refreshMessage(summaryOf(3), { status: 'ready', updatingElsewhere: false, retrying: false })?.kind, 'info');
-        assert.deepStrictEqual(at('ready', true)?.text, 'LLM Tokenizer: another window is updating the Claude Code usage history; this one shows it as it goes.');
+        assert.deepStrictEqual(at('ready', true)?.text, 'LLM Tokenizer: another window is updating the agent usage history; this one shows it as it goes.');
         // The log says this once, when the folder goes: Refresh says it each time.
         assert.deepStrictEqual(at('no-roots'), {
             kind: 'warning',
-            text: 'LLM Tokenizer: no Claude Code data folder was found. Show Claude Code Usage lists the places looked at.',
+            text: 'LLM Tokenizer: no data folder of an agent turned on was found. Show Agent Usage lists the places looked at.',
         });
-        assert.deepStrictEqual(at('failing')?.text, 'LLM Tokenizer: Claude Code usage could not be refreshed; see the log.');
+        assert.deepStrictEqual(at('failing')?.text, 'LLM Tokenizer: agent usage could not be refreshed; see the log.');
         assert.strictEqual(at('ready'), undefined);
     });
 

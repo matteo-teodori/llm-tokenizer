@@ -175,7 +175,7 @@ suite('usage, loaded on demand', () => {
         assert.ok(errors.some(e => e.includes('could not be loaded') && e.includes('usage.js')), errors.join(' | '));
         // The command says so, rather than throwing.
         await handlers.get('llm-tokenizer.showClaudeCodeUsage')?.();
-        assert.deepStrictEqual(shownErrors, ['LLM Tokenizer: Claude Code usage could not be loaded; see the log.']);
+        assert.deepStrictEqual(shownErrors, ['LLM Tokenizer: agent usage could not be loaded; see the log.']);
         await handlers.get('llm-tokenizer.showClaudeCodeUsage')?.();
         assert.deepStrictEqual([calls.loads, calls.starts, calls.show, shownErrors.length], [3, 1, 1, 1]);
     });

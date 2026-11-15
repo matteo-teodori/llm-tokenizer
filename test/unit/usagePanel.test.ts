@@ -11,15 +11,13 @@ import type { PanelFragments } from '../../src/usage/render';
 import { buildReport, type RangeKey, type UsageReport } from '../../src/usage/report';
 import type { Reading, UsageService } from '../../src/usage/usageService';
 
-/** A history of three requests, none of them in the range shown. */
+/** A history of three requests, none of them in the range shown; the whole history's span is the report's unless one is given. */
 function quietReport(overrides: Partial<UsageReport> = {}): UsageReport {
-    return {
-        ...buildReport(
-            { sums: [], sessions: [], compactions: [], limitHits: [], coverage: { start: null, newest: null, requests: 3, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 } },
-            { range: '7d', zone: 'UTC', now: Date.UTC(2026, 9, 10, 12), scope: 'all' },
-        ),
-        ...overrides,
-    };
+    const built = buildReport(
+        { sums: [], sessions: [], compactions: [], limitHits: [], coverage: { start: null, newest: null, requests: 3, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 } },
+        { range: '7d', zone: 'UTC', now: Date.UTC(2026, 9, 10, 12), scope: 'all' },
+    );
+    return { ...built, ...overrides, history: overrides.history ?? overrides.coverage ?? built.history };
 }
 
 /** A webview panel that records what is done to it, hidden and shown by the test. */
@@ -84,6 +82,7 @@ function fakeService() {
         reading: undefined as Reading | undefined,
         /** A hold that throws, as one did whose watchers could not start. */
         holdThrows: false,
+        agentsOn: { 'claude-code': true, codex: false },
     };
     const service = {
         get status() {
@@ -103,6 +102,9 @@ function fakeService() {
         },
         get reading() {
             return fake.reading;
+        },
+        get agentsOn() {
+            return fake.agentsOn;
         },
         onDidChange: fake.onDidChange,
         hold: () => {
@@ -196,7 +198,7 @@ suite('usage panel', () => {
         const { service } = fakeService();
         UsagePanel.show(context, service, log);
         await until(() => page.posted.length > 0);
-        assert.ok(page.panel.webview.html.includes('Reading Claude Code'), 'the first page should wait for data');
+        assert.ok(page.panel.webview.html.includes('Reading the agents'), 'the first page should wait for data');
 
         page.setVisible(false);
         assert.ok(page.panel.webview.html.includes('No requests fall in this range.'), 'the hidden page is still the empty one');
@@ -210,7 +212,7 @@ suite('usage panel', () => {
         const posts = page.posted.length;
         fake.report = quietReport({ coverage: { ...quietReport().coverage, requests: 0 } });
         changed();
-        await until(() => page.panel.webview.html.includes('No Claude Code requests have been read yet'));
+        await until(() => page.panel.webview.html.includes('No requests have been read yet'));
         assert.strictEqual(page.posted.length, posts, 'posted to a hidden page, which drops it');
     });
 
@@ -246,7 +248,8 @@ suite('usage panel', () => {
         UsagePanel.show(context, service, log);
         await until(() => page.posted.length > 0 || warnings.length > 0);
         assert.deepStrictEqual(warnings, []);
-        assert.strictEqual(page.posted.at(-1)?.copy.rows[0]?.[0], '—');
+        // After the agent's column.
+        assert.strictEqual(page.posted.at(-1)?.copy.rows[0]?.[1], '—');
     });
 
     test("the page brought back is always answered; otherwise only what changed is sent", async () => {
@@ -456,7 +459,7 @@ suite('usage panel', () => {
             await settle();
             page.send({ type: 'nameAccount', account: id });
             await until(() => asked.length === 1);
-            assert.strictEqual(asked[0]?.prompt, 'Shown in Claude Code Usage in place of a@example.com, beside its organization. Leave it empty to show a@example.com again.');
+            assert.strictEqual(asked[0]?.prompt, 'Shown in Agent Usage in place of a@example.com, beside its organization. Leave it empty to show a@example.com again.');
         } finally {
             Object.assign(window, { showInputBox: original });
         }
@@ -481,7 +484,7 @@ suite('usage panel', () => {
             await settle();
             page.send({ type: 'nameAccount', account: id });
             await until(() => asked.length === 1);
-            assert.ok(asked[0]?.prompt?.startsWith(`Shown in Claude Code Usage in place of ${email}, beside its organization.`), asked[0]?.prompt);
+            assert.ok(asked[0]?.prompt?.startsWith(`Shown in Agent Usage in place of ${email}, beside its organization.`), asked[0]?.prompt);
         } finally {
             Object.assign(window, { showInputBox: original });
         }
@@ -505,7 +508,7 @@ suite('usage panel', () => {
             page.send({ type: 'reloadWindow' });
             await settle();
             assert.deepStrictEqual(ran, [
-                ['workbench.action.openSettings', { query: 'llm-tokenizer.enableClaudeCodeUsage' }],
+                ['workbench.action.openSettings', { query: '@ext:matteoteodori.llm-tokenizer' }],
                 ['llm-tokenizer.clearClaudeCodeUsageHistory'],
                 ['workbench.action.reloadWindow'],
             ]);
@@ -564,7 +567,7 @@ suite('usage panel', () => {
         window.showErrorMessage = (...args: unknown[]) => (errors.push(args), Promise.resolve(undefined));
         try {
             UsagePanel.show(context, service, log);
-            page.send({ type: 'turnOn' });
+            page.send({ type: 'turnOn', agent: 'claude-code' });
             await until(() => updates.length > 0);
             await settle();
             assert.deepStrictEqual(updates, [['llm-tokenizer', 'enableClaudeCodeUsage', true, vscode.ConfigurationTarget.Global]]);
@@ -590,10 +593,10 @@ suite('usage panel', () => {
         commands.executeCommand = (...args: unknown[]) => (ran.push(args), Promise.resolve(undefined));
         try {
             UsagePanel.show(context, service, log);
-            page.send({ type: 'turnOn' });
+            page.send({ type: 'turnOn', agent: 'claude-code' });
             await until(() => ran.length > 0);
             assert.deepStrictEqual(errors, [['LLM Tokenizer: Claude Code usage could not be turned on here.', 'Open Settings']]);
-            assert.deepStrictEqual(ran, [['workbench.action.openSettings', { query: 'llm-tokenizer.enableClaudeCodeUsage' }]]);
+            assert.deepStrictEqual(ran, [['workbench.action.openSettings', { query: '@ext:matteoteodori.llm-tokenizer' }]]);
         } finally {
             Object.assign(workspace, { getConfiguration: originals.getConfiguration });
             Object.assign(window, { showErrorMessage: originals.showErrorMessage });
@@ -606,7 +609,7 @@ suite('usage panel', () => {
         fake.reading = { by: 'this window', files: 10, of: 100 };
         UsagePanel.show(context, service, log);
         await until(() => page.posted.length > 0);
-        assert.ok(page.posted.at(-1)?.body.includes('Still reading Claude Code&#39;s records: 10 of 100 files.'), page.posted.at(-1)?.body.slice(0, 300));
+        assert.ok(page.posted.at(-1)?.body.includes('Still reading the agents&#39; records: 10 of 100 files.'), page.posted.at(-1)?.body.slice(0, 300));
         await settle();
         page.send({ type: 'refresh' });
         await settle();
@@ -628,8 +631,8 @@ suite('usage panel', () => {
             fake.holdThrows = true;
             assert.doesNotThrow(() => UsagePanel.show(context, service, log));
             assert.ok(page.disposed(), 'the empty tab was left open');
-            assert.deepStrictEqual(warnings, ['Claude Code usage panel: could not be opened (TypeError)']);
-            assert.deepStrictEqual(shown, ['LLM Tokenizer: the Claude Code Usage panel could not be opened; see the log.']);
+            assert.deepStrictEqual(warnings, ['Agent usage panel: could not be opened (TypeError)']);
+            assert.deepStrictEqual(shown, ['LLM Tokenizer: the Agent Usage panel could not be opened; see the log.']);
             fake.holdThrows = false;
             page = fakePanel();
             UsagePanel.show(context, service, log);
@@ -650,11 +653,97 @@ suite('usage panel', () => {
         } finally {
             (vscode.commands as unknown as Record<string, unknown>).executeCommand = original;
         }
-        const query = { query: 'llm-tokenizer.enableClaudeCodeUsage' };
+        const query = { query: '@ext:matteoteodori.llm-tokenizer' };
         assert.deepStrictEqual(ran, [
             ['workbench.action.openRemoteSettings', query],
             ['workbench.action.openSettings', query],
         ]);
+    });
+
+    test('an agent chosen is kept, asked for, and Codex chosen takes no account with it: accounts are Claude Code\'s', async () => {
+        const { service, fake } = fakeService();
+        fake.report = quietReport({ agentsSeen: ['claude-code', 'codex'] });
+        const asked: [string | undefined, string | undefined][] = [];
+        const watched = {
+            ...service,
+            report: (_range: string, _zone: string, _folders: string[] | null, account?: string, agent?: string) => (
+                asked.push([account, agent]), Promise.resolve(quietReport({ agentsSeen: ['claude-code', 'codex'], agent: (agent as 'codex' | undefined) ?? 'all', account: account ?? 'all' }))
+            ),
+        } as unknown as UsageService;
+        UsagePanel.show(context, watched, log);
+        page.send({ type: 'setAccount', account: 'none', choice: 1 });
+        await until(() => asked.some(([account]) => account === 'none'));
+        page.send({ type: 'setAgent', agent: 'codex' });
+        await until(() => asked.some(([, agent]) => agent === 'codex'));
+        assert.deepStrictEqual(asked.at(-1), ['all', 'codex']);
+        const kept = context.globalState.get('llm-tokenizer.claudeCodeUsage.panel') as { agent?: string; account?: string };
+        assert.deepStrictEqual([kept.agent, kept.account], ['codex', 'all']);
+        // An account chosen on a page from before Codex was, sent late: no filter of Codex's, so none taken.
+        const before = asked.length;
+        page.send({ type: 'setAccount', account: 'none', choice: 2 });
+        await until(() => asked.length > before);
+        assert.deepStrictEqual(asked.at(-1), ['all', 'codex']);
+        // Its number still goes back with the update, so the page takes the host's value again.
+        await until(() => page.choices.at(-1) === 2);
+        assert.strictEqual((context.globalState.get('llm-tokenizer.claudeCodeUsage.panel') as { account?: string }).account, 'all');
+    });
+
+    test('an account kept beside Codex, as an older page could keep it, is none once the panel opens again', async () => {
+        await context.globalState.update('llm-tokenizer.claudeCodeUsage.panel', { agent: 'codex', account: 'none' });
+        const { service } = fakeService();
+        const asked: [string | undefined, string | undefined][] = [];
+        const watched = {
+            ...service,
+            report: (_range: string, _zone: string, _folders: string[] | null, account?: string, agent?: string) => (
+                asked.push([account, agent]), Promise.resolve(quietReport({ agentsSeen: ['claude-code', 'codex'], agent: (agent as 'codex' | undefined) ?? 'all', account: account ?? 'all' }))
+            ),
+        } as unknown as UsageService;
+        UsagePanel.show(context, watched, log);
+        await until(() => asked.length > 0);
+        assert.deepStrictEqual(asked[0], ['all', 'codex']);
+    });
+
+    test("an agent the history no longer holds, after a Clear, is no filter left: every agent's is shown again", async () => {
+        const { service } = fakeService();
+        const asked: (string | undefined)[] = [];
+        const watched = {
+            ...service,
+            report: (_range: string, _zone: string, _folders: string[] | null, _account?: string, agent?: string) => (
+                asked.push(agent), Promise.resolve(quietReport({ agentsSeen: ['claude-code'], agent: (agent as 'codex' | undefined) ?? 'all' }))
+            ),
+        } as unknown as UsageService;
+        UsagePanel.show(context, watched, log);
+        page.send({ type: 'setAgent', agent: 'codex' });
+        await until(() => asked.includes('codex') && asked.at(-1) === undefined);
+        assert.strictEqual((context.globalState.get('llm-tokenizer.claudeCodeUsage.panel') as { agent?: string }).agent, 'all');
+    });
+
+    test("Codex's Turn On turns Codex's reading on, and its Choose Folder… takes a sessions folder picked for its home", async () => {
+        const { service, fake } = fakeService();
+        fake.status = 'off';
+        const updates: unknown[][] = [];
+        const workspace = vscode.workspace as unknown as Record<string, unknown>;
+        const original = { getConfiguration: workspace.getConfiguration, showOpenDialog: vscode.window.showOpenDialog };
+        const picked = path.join(os.tmpdir(), 'codex-elsewhere', 'sessions');
+        workspace.getConfiguration = (section: string) => ({
+            get: () => undefined,
+            inspect: () => undefined,
+            update: (key: string, value: unknown, target: unknown) => (updates.push([section, key, value, target]), Promise.resolve()),
+        });
+        (vscode.window as unknown as Record<string, unknown>).showOpenDialog = () => Promise.resolve([vscode.Uri.file(picked)]);
+        try {
+            UsagePanel.show(context, service, log);
+            page.send({ type: 'turnOn', agent: 'codex' });
+            page.send({ type: 'chooseFolder', agent: 'codex' });
+            await until(() => updates.length >= 2);
+            assert.deepStrictEqual(updates, [
+                ['llm-tokenizer', 'enableCodexUsage', true, vscode.ConfigurationTarget.Global],
+                ['llm-tokenizer', 'codexDataDirectory', vscode.Uri.file(path.dirname(picked)).fsPath, vscode.ConfigurationTarget.Global],
+            ]);
+        } finally {
+            Object.assign(workspace, { getConfiguration: original.getConfiguration });
+            (vscode.window as unknown as Record<string, unknown>).showOpenDialog = original.showOpenDialog;
+        }
     });
 
     test("Choose Folder sets the data folder for the user, and a projects folder picked means its parent", async () => {
@@ -666,7 +755,7 @@ suite('usage panel', () => {
         (vscode.window as unknown as Record<string, unknown>).showOpenDialog = () => Promise.resolve([vscode.Uri.file(picked)]);
         try {
             UsagePanel.show(context, service, log);
-            page.send({ type: 'chooseFolder' });
+            page.send({ type: 'chooseFolder', agent: 'claude-code' });
             // As the editor gives it back: on Windows, with a lower-case drive letter.
             const expected = vscode.Uri.file(path.dirname(picked)).fsPath;
             await until(() => config().inspect('claudeCodeDataDirectory')?.globalValue === expected, 5_000);

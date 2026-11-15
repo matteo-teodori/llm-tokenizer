@@ -163,6 +163,8 @@ suite('usage projects', () => {
         assert.strictEqual(projectLabel({ kind: 'root', path: 'C:\\work\\api' }), 'api');
         assert.strictEqual(projectLabel({ kind: 'root', path: '/' }), '/');
         assert.strictEqual(projectLabel({ kind: 'unattributed', projectDir: '-repo-app' }), 'Unattributed (-repo-app)');
+        // A Codex session whose rollouts name no cwd: its agent's layout has no folder for it.
+        assert.strictEqual(projectLabel({ kind: 'unattributed', projectDir: '' }), 'Unattributed');
     });
 });
 

@@ -30,7 +30,7 @@ suite('Claude Code usage, in the editor', () => {
         await until(() => usageTabs().length > 0);
         assert.deepStrictEqual(
             usageTabs().map(tab => tab.label),
-            ['Claude Code Usage'],
+            ['Agent Usage'],
         );
     });
 });
@@ -120,12 +120,12 @@ suite('Claude Code usage, turned on, in the editor', () => {
 
     test('Refresh says what it read, and while off offers the setting instead', async () => {
         await vscode.commands.executeCommand('llm-tokenizer.refreshClaudeCodeUsage');
-        assert.ok(shown.some(s => s.kind === 'info' && /^LLM Tokenizer: read \d+ changed of 4 Claude Code transcripts\.$/.test(s.message)), JSON.stringify(shown));
+        assert.ok(shown.some(s => s.kind === 'info' && /^LLM Tokenizer: read \d+ changed of 4 session records\.$/.test(s.message)), JSON.stringify(shown));
 
         await config().update('enableClaudeCodeUsage', false, vscode.ConfigurationTarget.Global);
         shown = [];
         await vscode.commands.executeCommand('llm-tokenizer.refreshClaudeCodeUsage');
-        assert.deepStrictEqual(shown.map(s => [s.message, s.items]), [['Claude Code usage is off.', ['Open Settings']]]);
+        assert.deepStrictEqual(shown.map(s => [s.message, s.items]), [['Agent usage is off: neither Claude Code nor Codex is read.', ['Open Settings']]]);
     });
 
     test('Clear asks first, and clears only when told to', async () => {
@@ -138,7 +138,7 @@ suite('Claude Code usage, turned on, in the editor', () => {
 
         answer = 'Clear History';
         await vscode.commands.executeCommand('llm-tokenizer.clearClaudeCodeUsageHistory');
-        assert.deepStrictEqual(shown.at(-1)?.message, 'LLM Tokenizer: Claude Code usage history cleared.');
+        assert.deepStrictEqual(shown.at(-1)?.message, 'LLM Tokenizer: agent usage history cleared.');
         // Read again from what is still on disk.
         shown = [];
         await vscode.commands.executeCommand('llm-tokenizer.refreshClaudeCodeUsage');
@@ -175,7 +175,7 @@ suite('Claude Code usage, turned on from its own page, in the editor', () => {
         assert.strictEqual(config().get('enableClaudeCodeUsage'), false);
         await vscode.commands.executeCommand('llm-tokenizer.showClaudeCodeUsage');
         assert.ok(page.panel.webview.html.includes('data-action="turnOn"'), 'the off page has no Turn On');
-        page.send({ type: 'turnOn' });
+        page.send({ type: 'turnOn', agent: 'claude-code' });
         await until(() => config().inspect('enableClaudeCodeUsage')?.globalValue === true, 5_000);
         const inspected = config().inspect('enableClaudeCodeUsage');
         assert.deepStrictEqual([inspected?.globalValue, inspected?.workspaceValue], [true, undefined]);

@@ -68,10 +68,14 @@ export function isWithin(child: string, folder: string, platform: NodeJS.Platfor
     return c.startsWith(f.endsWith(separator) ? f : f + separator);
 }
 
-/** The last segment of a session root, for a label: `app` for `/repo/app`. */
+/**
+ * The last segment of a session root, for a label: `app` for `/repo/app`.
+ * An unattributed session's, with its folder where its agent's layout gives
+ * one: Codex's sessions have none.
+ */
 export function projectLabel(project: ProjectRef): string {
     if (project.kind === 'unattributed') {
-        return `Unattributed (${project.projectDir})`;
+        return project.projectDir === '' ? 'Unattributed' : `Unattributed (${project.projectDir})`;
     }
     const segments = project.path.split(/[\\/]/).filter(s => s.length > 0);
     return segments.length > 0 ? segments[segments.length - 1] : project.path;

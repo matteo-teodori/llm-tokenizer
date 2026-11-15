@@ -107,6 +107,8 @@ suite('usage status item: the window and what is shown', () => {
         assert.ok(today(false).includes('Today in this workspace: 1.2M processed'), today(false).join('|'));
         assert.ok(today(true).includes('Today in this workspace: ≥1.2M processed'));
         assert.ok(!describeLive(live()).tooltip.some(l => l.startsWith('Today')));
+        // Its click opens the panel, which is every agent's.
+        assert.strictEqual(describeLive(live()).tooltip.at(-1), 'Click to show Agent Usage.');
     });
 
     test('a request that missed a counter, or nothing yet, shows a dash', () => {
