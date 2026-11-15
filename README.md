@@ -167,7 +167,7 @@ either way. While both are off, the page says what turning each on reads and
 keeps, each with a **Turn On** of its own, and **Open Settings**. To hide the
 T, right-click the editor's title bar and choose **Hide 'Show Agent Usage'**.
 
-<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, to its accounts and one account alone and back, down to its projects, turns to the second page of its sessions, each with its active time, and the status item's tooltip shows the running session's context">
+<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Agent Usage; the page goes from today to 30 days, to this workspace and back, to its accounts and one account alone and back, to each agent's share and Codex's alone and back, down to its projects, turns to the second page of its sessions, each with its agent and its active time, and the status item's tooltip shows the running Claude Code session's context">
 
 **The panel** shows today, the last 7 or 30 days, or everything since the
 history starts, for all projects or for this workspace, for every agent or
@@ -187,7 +187,7 @@ one, and for every Claude account or one:
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days, every account: 1.6B tokens processed, 95% of them cache reads, in 12,050 requests and 87 sessions, split into cache reads, cache writes, input and output, by day and by model">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Agent Usage for 30 days, every agent and every account: 2.0B tokens processed, 95% of them cache reads, in 15,102 requests and 123 sessions, split into cache reads, cache writes, input and output, by day, and by agent: Claude Code 81%, Codex 18%">
 </picture>
 
 *Processed* is everything a request sent or received: input, cache writes,
@@ -272,7 +272,7 @@ Code's alone.
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-dark.png" alt="The status item at 532.8K · 53%, and its tooltip: the context's 532,842 of 1,000,000 tokens, the model, the last request, and today's tokens in this workspace">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-dark.png" alt="The status item at 532.8K · 53%, and its tooltip: the Claude Code session's context, 532,842 of 1,000,000 tokens, the model, the last request, today's tokens in this workspace, and a click that shows Agent Usage">
 </picture>
 
 **Export CSV** copies to the clipboard, per day and model, every count a
