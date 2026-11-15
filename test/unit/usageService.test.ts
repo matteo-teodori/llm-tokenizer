@@ -460,6 +460,33 @@ suite('usage service', () => {
         assert.deepStrictEqual(host.sent, ['import', 'import']);
     });
 
+    test('a refresh asked just as a pass ends is a pass of its own, never the one ending, however many ticks after its answer', async () => {
+        // Asked between the pass's last look at what is pending and its end,
+        // it was answered with that pass, and what it asked for waited for
+        // the next hint or the hourly pass.
+        for (let ticks = 0; ticks < 16; ticks++) {
+            const { service, host } = make();
+            await settle();
+            let release: (() => void) | undefined;
+            host.answer = request => {
+                if (request.type === 'import' && !release) {
+                    return new Promise(resolve => (release = () => resolve(defaultAnswer(request))));
+                }
+                return Promise.resolve(defaultAnswer(request));
+            };
+            const first = service.refresh();
+            await settle();
+            const before = host.imports.length;
+            release!();
+            for (let i = 0; i < ticks; i++) {
+                await Promise.resolve();
+            }
+            const second = service.refresh();
+            await Promise.all([first, second]);
+            assert.strictEqual(host.imports.length, before + 1, `a refresh ${ticks} ticks after the answer read nothing`);
+        }
+    });
+
     test('a pass refused because another window holds the lease is tried again, for the same files', async () => {
         const { service, clock, host, hints } = make();
         await settle();

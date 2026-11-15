@@ -619,54 +619,63 @@ export class UsageService implements vscode.Disposable {
             // ends without taking what this start wants: run after it.
             return this.importingGeneration === this.generation ? this.importing : this.importing.then(() => this.drain());
         }
+        if (!this.pending) {
+            return Promise.resolve(undefined);
+        }
         const generation = this.generation;
         const pass = async (): Promise<ImportSummary | undefined> => {
             let summary: ImportSummary | undefined;
-            while (this.pending && generation === this.generation) {
-                const take = this.pending;
-                this.pending = undefined;
-                const outcome = await this.importOnce(take === 'all' ? undefined : [...take], generation);
-                // Hourly from the last full pass: a hint's pass covers only
-                // its files, so it must not put the next full one off. Past
-                // its retries, a failed pass is tried again by this one.
-                if (take === 'all' && outcome !== 'held' && generation === this.generation && this.enabled) {
-                    this.clock.clearTimeout(this.hourlyTimer);
-                    this.hourlyTimer = this.clock.setTimeout(() => void this.runImport(), HOURLY_MS);
-                }
-                if (outcome === 'held' || outcome === 'failed') {
-                    // Keep what this pass was for, and try again: once another
-                    // window's pass is likely over, or, after a failure that
-                    // clears by itself, later each time. (Only this start's
-                    // answers come here; stop() clears the timer.)
-                    this.want(take === 'all' ? undefined : [...take]);
-                    this.clock.clearTimeout(this.retryTimer);
-                    // Past the last retry, none: the hourly pass is the retry.
-                    const after: number | undefined = outcome === 'held' ? LEASE_RETRY_MS : RETRY_MS[this.failures.pass - 1];
-                    this.retryingFailure = outcome === 'failed' && after !== undefined;
-                    if (after !== undefined) {
-                        this.retryTimer = this.clock.setTimeout(() => {
-                            this.retryingFailure = false;
-                            void this.drain();
-                        }, after);
+            try {
+                while (this.pending && generation === this.generation) {
+                    const take = this.pending;
+                    this.pending = undefined;
+                    const outcome = await this.importOnce(take === 'all' ? undefined : [...take], generation);
+                    // Hourly from the last full pass: a hint's pass covers only
+                    // its files, so it must not put the next full one off. Past
+                    // its retries, a failed pass is tried again by this one.
+                    if (take === 'all' && outcome !== 'held' && generation === this.generation && this.enabled) {
+                        this.clock.clearTimeout(this.hourlyTimer);
+                        this.hourlyTimer = this.clock.setTimeout(() => void this.runImport(), HOURLY_MS);
                     }
-                    // Nothing was read: no answer to a Refresh.
-                    summary = undefined;
-                    break;
+                    if (outcome === 'held' || outcome === 'failed') {
+                        // Keep what this pass was for, and try again: once another
+                        // window's pass is likely over, or, after a failure that
+                        // clears by itself, later each time. (Only this start's
+                        // answers come here; stop() clears the timer.)
+                        this.want(take === 'all' ? undefined : [...take]);
+                        this.clock.clearTimeout(this.retryTimer);
+                        // Past the last retry, none: the hourly pass is the retry.
+                        const after: number | undefined = outcome === 'held' ? LEASE_RETRY_MS : RETRY_MS[this.failures.pass - 1];
+                        this.retryingFailure = outcome === 'failed' && after !== undefined;
+                        if (after !== undefined) {
+                            this.retryTimer = this.clock.setTimeout(() => {
+                                this.retryingFailure = false;
+                                void this.drain();
+                            }, after);
+                        }
+                        // Nothing was read: no answer to a Refresh.
+                        summary = undefined;
+                        break;
+                    }
+                    this.retryingFailure = false;
+                    summary = outcome;
                 }
-                this.retryingFailure = false;
-                summary = outcome;
+            } finally {
+                // Over at its last look at what is pending, not a tick later:
+                // what is asked from then on is read by a pass of its own,
+                // never left pending with no pass to take it.
+                this.importing = undefined;
             }
             return summary;
         };
         this.importingGeneration = generation;
-        this.importing = pass().finally(() => {
-            this.importing = undefined;
-        });
+        // Set before the pass can end: it always awaits its first import.
+        this.importing = pass();
         return this.importing;
     }
 
     /** Where each agent turned on writes, now, with the settings as they are. */
-    private resolveNow(): { claude: ResolvedRoots | undefined; codex: ResolvedCodexRoots | undefined } {
+    private resolveNow(): Resolved {
         const settings = this.deps.readSettings();
         const inputs = this.deps.rootInputs();
         this.resolved = settings.enabled
