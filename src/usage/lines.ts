@@ -20,8 +20,8 @@ import * as zlib from 'zlib';
  * and a window running an older build must stop writing once a newer one
  * has (see `UsageStore.outdated`). Claude Code's own history of it is in
  * transcripts.ts, beside `ROWS_SINCE`, the oldest of its parsers whose rows
- * it keeps; 6 is the first that reads Codex's rollouts too, and changes
- * nothing a Claude Code line becomes.
+ * it keeps: 6 is the first that reads Codex's rollouts too, and parses a
+ * line only up to 2 MiB, where 5 parsed 4.
  */
 export const PARSER_VERSION = 6;
 
@@ -33,11 +33,14 @@ export const MAX_LINE_BYTES = 16 << 20;
 
 /**
  * The longest line that is ever parsed. Measured, the longest real assistant
- * line is 396 KiB, and none passes 1 MiB; 8 MiB of dense JSON (`[{},{},…]`)
- * exhausted the worker's 128 MB heap on every pass, where 4 MiB did not. A
- * longer line holding a record's marker is skipped as oversize.
+ * line is 478 KB, and none passes 1 MiB. Parsing costs Node's heap up to 31
+ * bytes a byte, for nested arrays (`[[[…]]]`): 4 MiB of them took 127 MB,
+ * and with what an import holds besides (up to 26 MB), the worker's 128 MB
+ * ran out, on the Node a remote extension host runs; Electron's V8, which
+ * compresses its pointers, spends half as much. 2 MiB take 66 MB. A longer
+ * line holding a record's marker is skipped as oversize.
  */
-export const MAX_PARSED_LINE_BYTES = 4 << 20;
+export const MAX_PARSED_LINE_BYTES = 2 << 20;
 
 /** Reads of more new bytes than this are guarded; see `read_guards` in the store. */
 export const GUARDED_READ_BYTES = 4 << 20;

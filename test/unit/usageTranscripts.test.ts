@@ -1493,6 +1493,33 @@ suite('usage worker', () => {
         assert.ok(response.type === 'imported' && response.summary?.read === 2 && response.summary.oversizeLines === 1, JSON.stringify(response).slice(0, 300));
     });
 
+    test("a record's line just under the longest parsed, of the costliest shape to parse, is read in what the worker's heap has left", async function () {
+        // Nested arrays are the costliest JSON to parse. Measured in this
+        // worker, a line of 2 MiB of them parses in an old generation of 63 MB
+        // on Node and 35 MB on Electron, whose V8 compresses its pointers; one
+        // of 4 MiB, the cap once, in 96 and 57 MB, and with what an import
+        // holds besides (up to 26 MB) the worker's 128 MB ran out on the Node a
+        // remote extension host runs. Given 80 MB, or 46 on Electron, a line
+        // at the cap parses.
+        this.timeout(60_000);
+        const left = process.versions.electron ? 46 : 80;
+        const root = path.join(tmp, 'nested-root');
+        const project = path.join(root, 'projects', 'p');
+        fs.mkdirSync(project, { recursive: true });
+        const head = '{"type":"assistant","message":{"model":"m","id":"x","usage":{}},"timestamp":"2026-10-09T10:00:00Z","sessionId":"s1","pad":';
+        const depth = Math.floor((MAX_PARSED_LINE_BYTES - head.length - 8) / 2);
+        fs.writeFileSync(path.join(project, 'a.jsonl'), `${head}${'['.repeat(depth)}${']'.repeat(depth)}}\n` + line(assistant('after', 1)));
+        const limited = new WorkerHost<UsageWorkerRequest, UsageWorkerResponse>(WORKER, {
+            name: 'usage',
+            fallback: 'showing nothing',
+            log,
+            resourceLimits: { maxOldGenerationSizeMb: left },
+        });
+        hosts.push(limited);
+        const response = await limited.send({ type: 'import', id: 0, storeFile: path.join(tmp, 'store', 'usage.sqlite'), sources: [{ provider: 'claude-code', roots: [root] }] });
+        assert.ok(response.type === 'imported' && response.summary?.read === 1 && response.summary.oversizeLines === 0 && Object.keys(response.summary.malformed).length === 0, JSON.stringify(response).slice(0, 300));
+    });
+
     test("the worker counts a read left unfinished as a crash only when its window says one happened", async () => {
         // A 5 MiB transcript: past the guard's 4 MiB, so its read is guarded.
         const root = path.join(tmp, 'big-root');
