@@ -1722,7 +1722,7 @@ suite('usage worker queries', () => {
         const worker = host();
         const order: string[] = [];
         const [imported] = await Promise.all([
-            worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] }).then(r => (order.push(r.type), r)),
+            worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [path.join(tmp, 'root')] }] }).then(r => (order.push(r.type), r)),
             worker.send(ask(storeFile)).then(r => order.push(r.type)),
         ]);
         assert.deepStrictEqual(order, ['report', 'imported']);
@@ -1733,7 +1733,7 @@ suite('usage worker queries', () => {
     test('the fixtures, through the worker; a newer version\u2019s history can still be read', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] })).type, 'imported');
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] })).type, 'imported');
         const first = await worker.send(ask(storeFile));
         assert.ok(first.type === 'report' && first.report.totals.processed === 1_278, JSON.stringify(first).slice(0, 200));
         await worker.send({ type: 'close', id: 0 });
@@ -1744,7 +1744,7 @@ suite('usage worker queries', () => {
         raw.close();
         const again = await worker.send(ask(storeFile));
         assert.ok(again.type === 'report' && again.report.totals.processed === 1_278, JSON.stringify(again).slice(0, 200));
-        const refused = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        const refused = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'store-read-only');
     });
 
@@ -1765,7 +1765,7 @@ suite('usage worker queries', () => {
         signedIn(A, 'a@example.com');
 
         const worker = host();
-        const imported = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], accountFiles: [config] });
+        const imported = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], accountFiles: [config] });
         assert.strictEqual(imported.type, 'imported');
         // Signed in to B now: A keeps the name it had.
         signedIn(B, 'b@example.com');
@@ -1803,7 +1803,7 @@ suite('usage worker queries', () => {
             const refused = await worker.send(ask(storeFile, bad));
             assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'bad-request', JSON.stringify(bad).slice(0, 80));
         }
-        const badImport = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], signedInFiles: [''] });
+        const badImport = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], signedInFiles: [''] });
         assert.deepStrictEqual(badImport.type === 'failed' && badImport.failure, 'bad-request');
     });
 
@@ -1831,25 +1831,25 @@ suite('usage worker queries', () => {
             return Object.fromEntries(answer.report.accountsSeen.map(a => [a.key, a.ordinal]));
         };
         // A pass over a few files: some accounts' first uses, not others'.
-        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [x] })).type, 'imported');
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], paths: [x] })).type, 'imported');
         assert.deepStrictEqual(await numbers(), { [`${X}/`]: null });
         // A whole pass, while another window holds the history: nothing read here, nothing numbered.
         assert.ok(sqlite, 'this runtime has no node:sqlite');
         const opened = UsageStore.open(sqlite, historyIn(storeFile));
         assert.ok(opened.status === 'ready');
         assert.ok(opened.store.acquireLease('import', 'another window', PARSER_VERSION));
-        const held = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        const held = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] });
         assert.ok(held.type === 'imported' && held.leaseHeldElsewhere, JSON.stringify(held).slice(0, 200));
         assert.deepStrictEqual(await numbers(), { [`${X}/`]: null });
         opened.store.releaseLease('import', 'another window');
         opened.store.close();
         // Read whole here: numbered as they were first used.
-        const whole = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        const whole = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] });
         assert.ok(whole.type === 'imported' && whole.summary && !whole.summary.cancelled, JSON.stringify(whole).slice(0, 200));
         assert.deepStrictEqual(await numbers(), { [`${Y}/`]: 1, [`${X}/`]: 2 });
         // After that, a pass over a few files numbers a new account at once.
         const z = session('z', Z, '2026-10-09T13:00:00Z');
-        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [z] })).type, 'imported');
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], paths: [z] })).type, 'imported');
         assert.deepStrictEqual(await numbers(), { [`${Y}/`]: 1, [`${X}/`]: 2, [`${Z}/`]: 3 });
     });
 
@@ -1882,7 +1882,7 @@ suite('usage worker queries', () => {
             fs.writeFileSync(path.join(projects, `s${i}.jsonl`), line(userRecord(`s${i}`, `/Secret-Client-0xFACE/repo-${i}`, '2026-10-09T09:59:00Z')) + line(assistantRecord(`s${i}`, `m${i}`, '2026-10-09T10:00:00Z')));
         }
         const worker = host({ busyTimeoutMs: 50 });
-        await worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] });
+        await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [path.join(tmp, 'root')] }] });
         assert.ok(sqlite, 'this runtime has no node:sqlite');
         const other = new sqlite.DatabaseSync(historyIn(storeFile));
         other.exec('BEGIN');
@@ -1955,7 +1955,7 @@ suite('usage worker queries', () => {
     test('a copy Clear could not remove is removed by a later request, and nothing set aside since', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         const stuck = path.join(path.dirname(storeFile), 'usage.sqlite.corrupt-1');
         // A folder where a file was expected stands in for a copy another window holds open.
         fs.mkdirSync(path.join(stuck, 'inside'), { recursive: true });
@@ -1979,7 +1979,7 @@ suite('usage worker queries', () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
         const order: string[] = [];
-        const imported = worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] }).then(r => (order.push('import'), r));
+        const imported = worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [path.join(tmp, 'root')] }] }).then(r => (order.push('import'), r));
         await worker.send(ask(storeFile));
         order.push('first query');
         replaceHistory(storeFile);
@@ -2001,7 +2001,7 @@ suite('usage worker queries', () => {
             const windows = [host(), host()];
             // A close loads each worker and touches no file: then both start together.
             await Promise.all(windows.map(w => w.send({ type: 'close', id: 0 })));
-            await Promise.all(windows.map(w => w.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] })));
+            await Promise.all(windows.map(w => w.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] })));
             const histories = fs.readdirSync(path.dirname(storeFile)).filter(name => /^usage-[0-9a-z]+\.sqlite$/.test(name));
             assert.strictEqual(histories.length, 1, `trial ${trial}: ${histories.join(', ')}`);
             for (const w of windows) {
@@ -2018,7 +2018,7 @@ suite('usage worker queries', () => {
         }
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         const pointer = path.join(path.dirname(storeFile), 'usage.current');
         const named = fs.readFileSync(pointer, 'utf8');
         fs.chmodSync(pointer, 0o000);
@@ -2061,7 +2061,7 @@ suite('usage worker queries', () => {
     test('a history deleted or replaced under a resident worker: the one at the path is the history', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         const processed = async () => {
             const r = await worker.send(ask(storeFile));
             return r.type === 'report' ? r.report.totals.processed : -1;
@@ -2073,7 +2073,7 @@ suite('usage worker queries', () => {
             assert.strictEqual(await processed(), 0, 'it went on showing a deleted history');
             // Replaced, as another window replaces a corrupt one: a new
             // history, and the pointer at it.
-            await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+            await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
             replaceHistory(storeFile);
             assert.strictEqual(await processed(), 0, 'it went on showing a replaced history');
         }

@@ -1,7 +1,12 @@
 /**
- * Where Claude Code keeps its data: the one module that reads the home
- * directory or CLAUDE_CONFIG_DIR. Everything downstream takes roots as
- * arguments, which a source-invariant test enforces.
+ * Where each agent keeps its data: the one module that reads the home
+ * directory, CLAUDE_CONFIG_DIR or CODEX_HOME. Everything downstream takes
+ * roots as arguments, which a source-invariant test enforces.
+ *
+ * Codex keeps its own under CODEX_HOME, else `~/.codex` (`%USERPROFILE%\.codex`
+ * on Windows), and nothing moves its sessions elsewhere: of a root, only
+ * `sessions` and `archived_sessions` are read, never its credentials,
+ * configuration, prompt history or databases (see `resolveCodexRoots`).
  *
  * Claude Code 2.1.295 builds its panel's environment from `process.env`, then
  * lets the last absolute CLAUDE_CONFIG_DIR entry of its
@@ -447,4 +452,103 @@ function isUnc(p: string): boolean {
 function isInside(child: string, parent: string): boolean {
     const relative = path.relative(parent, child);
     return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+export type CodexRootSource = 'setting' | 'process-environment' | 'default';
+
+export interface CodexRootCandidate {
+    path: string;
+    source: CodexRootSource;
+    exists: boolean;
+    /** Given as a relative path, which is never read: listed so that the panel says why. */
+    notAbsolute?: true;
+}
+
+export interface CodexRootInputs {
+    /** `llm-tokenizer.codexDataDirectory`. */
+    setting: string;
+    env: NodeJS.ProcessEnv;
+    /** `os.homedir()`, or a fixture under test. */
+    home: string;
+    /** Under test, the only folders a root may be inside. */
+    confineTo?: string[];
+}
+
+export interface ResolvedCodexRoots {
+    /** Every candidate considered, in order, for diagnostics. */
+    candidates: CodexRootCandidate[];
+    /** The distinct ones that exist: what is read. */
+    roots: CodexRootCandidate[];
+    /** Candidates outside `confineTo`, never read. */
+    refused: CodexRootCandidate[];
+}
+
+/**
+ * The Codex homes to read: this extension's setting, CODEX_HOME as the
+ * editor was started with it, and `~/.codex`, each that exists and is a
+ * folder, once. Codex itself uses only one of them, CODEX_HOME when it is
+ * set, but one set in a terminal, or by a script or an alias that starts
+ * Codex, is not the editor's to see, and the setting is for that (one in a
+ * shell's profile it sees: started from the Dock, VS Code takes the login
+ * shell's environment). The history's keys make reading two homes that
+ * share a rollout harmless. An empty CODEX_HOME is unset, as Codex takes it.
+ */
+export function resolveCodexRoots(inputs: CodexRootInputs): ResolvedCodexRoots {
+    const variable = inputs.env.CODEX_HOME?.trim();
+    const proposed: { path: string | null; source: CodexRootSource }[] = [
+        { path: homeRelative(inputs.setting.trim(), inputs.home) || null, source: 'setting' },
+        { path: variable ? variable : null, source: 'process-environment' },
+        { path: path.join(inputs.home, '.codex'), source: 'default' },
+    ];
+    const candidates: CodexRootCandidate[] = [];
+    for (const { path: candidate, source } of proposed) {
+        if (candidate && path.isAbsolute(candidate)) {
+            const resolvedPath = path.resolve(candidate);
+            candidates.push({ path: resolvedPath, source, exists: isDirectory(resolvedPath) });
+        } else if (candidate && source === 'setting') {
+            candidates.push({ path: candidate, source, exists: false, notAbsolute: true });
+        }
+    }
+    const roots: CodexRootCandidate[] = [];
+    const refused: CodexRootCandidate[] = [];
+    const seen = new Set<string>();
+    // Under test, the folders read under a root must stay inside too, as Claude Code's must.
+    const confined = (p: string, mustExist: boolean) => {
+        if (!inputs.confineTo) {
+            return true;
+        }
+        if (!exists(p)) {
+            return !mustExist;
+        }
+        const real = resolved(p);
+        return real !== undefined && inputs.confineTo.some(allowed => isInside(real, realPath(allowed)));
+    };
+    for (const candidate of candidates) {
+        if (!candidate.exists) {
+            continue;
+        }
+        const read = ['sessions', 'archived_sessions'].map(name => path.join(candidate.path, name));
+        if (!confined(candidate.path, true) || !read.every(p => confined(p, false))) {
+            refused.push(candidate);
+            continue;
+        }
+        const identity = realPath(candidate.path);
+        if (!seen.has(identity)) {
+            seen.add(identity);
+            roots.push({ ...candidate, path: identity });
+        }
+    }
+    return { candidates, roots, refused };
+}
+
+/** What chose a Codex home, in words, for the diagnostics. */
+export function codexSourceLabel(source: CodexRootSource): string {
+    switch (source) {
+        case 'setting':
+            return 'the Codex Data Directory setting';
+        case 'process-environment':
+            return 'CODEX_HOME';
+        case 'default':
+            return 'the default';
+    }
 }

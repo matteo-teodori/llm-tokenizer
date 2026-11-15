@@ -32,17 +32,23 @@ function findTests(root: string, prefix = ''): string[] {
 }
 
 export function run(): Promise<void> {
-    // The launch configuration points CLAUDE_CONFIG_DIR at a fixture. A host
-    // started some other way would read the developer's own Claude Code data.
+    // The launch configuration points CLAUDE_CONFIG_DIR and CODEX_HOME at
+    // fixtures. A host started some other way would read the developer's own
+    // Claude Code or Codex data.
     const fixtures = path.resolve(__dirname, '..', '..', 'test', 'fixtures');
-    const configDir = process.env.CLAUDE_CONFIG_DIR;
-    if (!configDir || !path.resolve(configDir).startsWith(fixtures + path.sep)) {
-        return Promise.reject(
-            new Error(
-                `Refusing to run the tests: CLAUDE_CONFIG_DIR must point into ${fixtures}, ` +
-                    `so they cannot read your own Claude Code data (it is ${configDir ?? 'unset'}).`,
-            ),
-        );
+    for (const [variable, agent] of [
+        ['CLAUDE_CONFIG_DIR', 'Claude Code'],
+        ['CODEX_HOME', 'Codex'],
+    ] as const) {
+        const folder = process.env[variable];
+        if (!folder || !path.resolve(folder).startsWith(fixtures + path.sep)) {
+            return Promise.reject(
+                new Error(
+                    `Refusing to run the tests: ${variable} must point into ${fixtures}, ` +
+                        `so they cannot read your own ${agent} data (it is ${folder ?? 'unset'}).`,
+                ),
+            );
+        }
     }
 
     const mocha = new Mocha({

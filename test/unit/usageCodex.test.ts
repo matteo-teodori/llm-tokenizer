@@ -9,6 +9,7 @@ import { UNRECORDED_MODEL, readRollout, rolloutsAt, walkRollouts } from '../../s
 import { importSources } from '../../src/usage/importer';
 import { PARSER_VERSION, eachLineOfZstd } from '../../src/usage/lines';
 import { queryReport } from '../../src/usage/queries';
+import { resolveCodexRoots } from '../../src/usage/roots';
 import type { ReadResult } from '../../src/usage/readers';
 import { UsageStore, loadSqlite } from '../../src/usage/store';
 import type { TranscriptFile } from '../../src/usage/transcripts';
@@ -1049,5 +1050,65 @@ suite('usage Codex rollouts', () => {
         } finally {
             store.close();
         }
+    });
+});
+
+suite("usage Codex homes", () => {
+    let tmp: string;
+
+    setup(() => {
+        tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-codex-homes-')));
+    });
+
+    teardown(() => {
+        fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
+    const folder = (name: string) => {
+        const p = path.join(tmp, name);
+        fs.mkdirSync(p, { recursive: true });
+        return p;
+    };
+
+    test('the setting, then CODEX_HOME as the editor sees it, then ~/.codex, each that is a folder, once', () => {
+        const home = folder('home');
+        const dotCodex = folder(path.join('home', '.codex'));
+        const set = folder('set');
+        const variable = folder('variable');
+        const resolved = resolveCodexRoots({ setting: set, env: { CODEX_HOME: variable }, home });
+        assert.deepStrictEqual(resolved.candidates.map(c => [c.source, c.path, c.exists]), [
+            ['setting', set, true],
+            ['process-environment', variable, true],
+            ['default', dotCodex, true],
+        ]);
+        assert.deepStrictEqual(resolved.roots.map(r => r.path), [set, variable, dotCodex]);
+        // One folder named three ways is read once; an empty CODEX_HOME is unset, as Codex takes it.
+        const once = resolveCodexRoots({ setting: '~/.codex', env: { CODEX_HOME: `${dotCodex}${path.sep}` }, home });
+        assert.deepStrictEqual(once.roots.map(r => [r.source, r.path]), [['setting', dotCodex]]);
+        assert.deepStrictEqual(resolveCodexRoots({ setting: '', env: { CODEX_HOME: '  ' }, home }).candidates.map(c => c.source), ['default']);
+    });
+
+    test('a relative setting is listed and never read, and a missing folder is looked at and not read', () => {
+        const home = path.join(tmp, 'nobody');
+        const resolved = resolveCodexRoots({ setting: 'codex', env: { CODEX_HOME: path.join(tmp, 'missing') }, home });
+        assert.deepStrictEqual(resolved.candidates.map(c => [c.source, c.exists, c.notAbsolute ?? false]), [
+            ['setting', false, true],
+            ['process-environment', false, false],
+            ['default', false, false],
+        ]);
+        assert.deepStrictEqual(resolved.roots, []);
+    });
+
+    test('under test, a home, or its sessions, outside the fixtures is refused, never read', () => {
+        const allowed = folder('allowed');
+        const inside = folder(path.join('allowed', 'codex'));
+        const outside = folder('outside');
+        const leaky = folder(path.join('allowed', 'leaky'));
+        fs.symlinkSync(outside, path.join(leaky, 'sessions'), 'dir');
+        const resolved = resolveCodexRoots({ setting: outside, env: { CODEX_HOME: leaky }, home: inside, confineTo: [allowed] });
+        assert.deepStrictEqual(resolved.refused.map(r => r.source), ['setting', 'process-environment']);
+        assert.deepStrictEqual(resolved.roots, []);
+        const fine = resolveCodexRoots({ setting: '', env: { CODEX_HOME: inside }, home: path.join(tmp, 'nobody'), confineTo: [allowed] });
+        assert.deepStrictEqual(fine.roots.map(r => r.path), [inside]);
     });
 });

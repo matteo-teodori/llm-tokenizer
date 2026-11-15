@@ -454,7 +454,7 @@ suite('usage status item: through the worker', () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         // Everything first, so the session's later Task and workflow requests
         // (10:10 and 23:30) are in the history beside its main conversation.
-        assert.strictEqual((await host.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] })).type, 'imported');
+        assert.strictEqual((await host.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] })).type, 'imported');
         const response = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [FIXTURE_ROOT], sessionId: 'sess-main-1' });
         assert.strictEqual(response.type, 'liveContext', JSON.stringify(response).slice(0, 200));
         if (response.type !== 'liveContext') {
@@ -483,7 +483,7 @@ suite('usage status item: through the worker', () => {
             path.join(subagent, 'sess-x', 'subagents', 'agent-1.jsonl'),
             record({ type: 'system', subtype: 'compact_boundary', uuid: 'sub-compaction', compactMetadata: { trigger: 'auto', preTokens: 9, postTokens: 1 } }),
         );
-        assert.strictEqual((await host.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'sub-root')] })).type, 'imported');
+        assert.strictEqual((await host.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [path.join(tmp, 'sub-root')] }] })).type, 'imported');
         const sub = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [path.join(tmp, 'sub-root')], sessionId: 'sess-x' });
         assert.deepStrictEqual(sub.type === 'liveContext' && sub.compactions, []);
         const report = await host.send({ type: 'query', id: 0, storeFile, range: 'coverage', zone: 'UTC', workspaceFolders: null });
@@ -502,6 +502,11 @@ suite('usage status item: through the worker', () => {
         for (const sessionId of ['../../etc/passwd', 'a/b', '', 'x'.repeat(201)]) {
             const refused = await host.send({ type: 'liveContext', id: 0, storeFile, roots: [FIXTURE_ROOT], sessionId });
             assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'bad-request', sessionId.slice(0, 20));
+        }
+        // Roots as the host never sends them: no list, a relative one, or more than an agent has.
+        for (const roots of [FIXTURE_ROOT, ['relative-root'], [42], Array.from({ length: 17 }, () => FIXTURE_ROOT)]) {
+            const refused = await host.send({ type: 'liveContext', id: 0, storeFile, roots, sessionId: 'sess-main-1' } as unknown as UsageWorkerRequest);
+            assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'bad-request', JSON.stringify(roots).slice(0, 40));
         }
     });
 
@@ -536,7 +541,7 @@ suite('usage status item: through the worker', () => {
         // Last in the pass's order, so not read yet when the look is answered.
         transcript('zzz-live', 7);
         const order: string[] = [];
-        const pass = host.send({ type: 'import', id: 0, storeFile, roots: [root] }).then(r => (order.push('pass'), r));
+        const pass = host.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] }).then(r => (order.push('pass'), r));
         const look = host.send({ type: 'liveContext', id: 0, storeFile, roots: [root], sessionId: 'zzz-live' }).then(r => (order.push('look'), r));
         const [, early] = await Promise.all([pass, look]);
         assert.deepStrictEqual(order, ['look', 'pass'], 'the look waited for the whole pass');

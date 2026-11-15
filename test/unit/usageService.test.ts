@@ -7,6 +7,8 @@ import * as vscode from 'vscode';
 import type { UsageWorkerRequest, UsageWorkerResponse } from '../../src/usage/protocol';
 import type { UsageReport } from '../../src/usage/report';
 import {
+    CLAUDE_CODE_FILES,
+    CODEX_FILES,
     CLOSE_GRACE_MS,
     FIRST_IMPORT_MAX_WAIT_MS,
     HINT_CEILING_MS,
@@ -166,6 +168,8 @@ function defaultAnswer(request: UsageWorkerRequest): UsageWorkerResponse {
             return { type: 'cleared', id: request.id, generation: 1, settled: true, copiesLeft: 0 };
         case 'close':
             return { type: 'closed', id: request.id };
+        case 'cancel':
+            return { type: 'cancelled', id: request.id };
         case 'query':
             return { type: 'failed', id: request.id, failure: 'unknown', errorName: 'Error' };
         case 'liveContext':
@@ -231,6 +235,149 @@ suite('usage service', () => {
         };
         return { service, clock, host, calls, hints, set };
     }
+
+    test("Codex's reading turned on alone reads its homes, with a watcher on each of its two folders, and nothing of Claude Code's", async () => {
+        const home = path.join(tmp, 'home');
+        const codexHome = path.join(tmp, 'codex-home');
+        fs.mkdirSync(path.join(home, '.claude', 'projects'), { recursive: true });
+        fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true });
+        const watched: [string, string][] = [];
+        const { service, host, set } = make({
+            settings: { enabled: false, codex: { enabled: true, dataDirectory: '' } },
+            rootInputs: () => ({ env: { CODEX_HOME: codexHome }, home, platform: process.platform }),
+            watch: (folder, _onHint, glob) => {
+                watched.push([folder, glob]);
+                return new vscode.Disposable(() => undefined);
+            },
+        });
+        const held = service.hold();
+        try {
+            await service.refresh();
+            const real = fs.realpathSync.native(codexHome);
+            const imported = host.requests.find(r => r.type === 'import');
+            assert.deepStrictEqual(imported && imported.type === 'import' ? [imported.sources, imported.accountFiles] : undefined, [[{ provider: 'codex', roots: [real] }], []]);
+            assert.deepStrictEqual(watched, [
+                [path.join(real, 'sessions'), CODEX_FILES],
+                [path.join(real, 'archived_sessions'), CODEX_FILES],
+            ]);
+            assert.deepStrictEqual([service.roots, service.codexRoots?.roots.map(r => [r.source, r.path])], [undefined, [['process-environment', real]]]);
+            // Claude Code's turned on too: both are read, each with its own watcher.
+            watched.length = 0;
+            set({ enabled: true });
+            await service.refresh();
+            const both = host.requests.filter(r => r.type === 'import').at(-1);
+            assert.deepStrictEqual(both && both.type === 'import' ? both.sources.map(s => s.provider) : undefined, ['claude-code', 'codex']);
+            assert.deepStrictEqual(watched.map(([folder, glob]) => [path.basename(folder), glob]), [
+                ['projects', CLAUDE_CODE_FILES],
+                ['sessions', CODEX_FILES],
+                ['archived_sessions', CODEX_FILES],
+            ]);
+        } finally {
+            held.dispose();
+        }
+    });
+
+    test('a pass under way over an agent turned off, or a folder no longer its, is told to stop, and the next reads what the settings say', async () => {
+        const home = path.join(tmp, 'home');
+        const first = path.join(tmp, 'codex-one');
+        const second = path.join(tmp, 'codex-two');
+        fs.mkdirSync(path.join(home, '.claude', 'projects'), { recursive: true });
+        for (const folder of [first, second]) {
+            fs.mkdirSync(path.join(folder, 'sessions'), { recursive: true });
+        }
+        const { service, host, set } = make({
+            settings: { enabled: true, codex: { enabled: true, dataDirectory: first } },
+            rootInputs: () => ({ env: {}, home, platform: process.platform }),
+        });
+        const opened: ((response: UsageWorkerResponse) => void)[] = [];
+        host.answer = request =>
+            request.type === 'import' ? new Promise(resolve => opened.push(resolve)) : Promise.resolve(defaultAnswer(request));
+        const answerPass = async (cancelled: boolean) => {
+            const imported = host.requests.filter(r => r.type === 'import').at(-1)!;
+            opened.shift()!({ type: 'imported', id: imported.id, summary: { ...summaryOf(1), cancelled }, leaseHeldElsewhere: false });
+            await settle();
+        };
+        const lastSources = () => {
+            const imported = host.requests.filter(r => r.type === 'import').at(-1);
+            return imported?.type === 'import' ? imported.sources.map(s => [s.provider, s.roots.map(r => path.basename(r))]) : undefined;
+        };
+        const refreshed = service.refresh();
+        await settle();
+        assert.deepStrictEqual(lastSources(), [['claude-code', ['.claude']], ['codex', ['codex-one']]]);
+        // Nothing the pass reads is dropped: no cancel.
+        set({ codex: { enabled: true, dataDirectory: first } });
+        assert.ok(!host.sent.includes('cancel'), 'a pass over what is still read was cancelled');
+        // Codex's folder changed: the pass is told to stop, and the next reads the new one.
+        set({ codex: { enabled: true, dataDirectory: second } });
+        assert.deepStrictEqual(host.sent.slice(-1), ['cancel']);
+        await answerPass(true);
+        assert.deepStrictEqual(lastSources(), [['claude-code', ['.claude']], ['codex', ['codex-two']]]);
+        // Codex turned off while that one reads: told to stop, and Claude Code's is read alone.
+        set({ codex: { enabled: false, dataDirectory: second } });
+        assert.deepStrictEqual(host.sent.filter(type => type === 'cancel').length, 2);
+        await answerPass(true);
+        assert.deepStrictEqual(lastSources(), [['claude-code', ['.claude']]]);
+        // An agent turned on while a pass reads the other: that pass goes on, and the next reads both.
+        set({ codex: { enabled: true, dataDirectory: second } });
+        assert.deepStrictEqual(host.sent.filter(type => type === 'cancel').length, 2);
+        await answerPass(false);
+        assert.deepStrictEqual(lastSources(), [['claude-code', ['.claude']], ['codex', ['codex-two']]]);
+        await answerPass(false);
+        await refreshed;
+        // Between passes, nothing to stop.
+        set({ codex: { enabled: false, dataDirectory: second } });
+        await settle();
+        assert.deepStrictEqual(host.sent.filter(type => type === 'cancel').length, 2);
+        await answerPass(false);
+    });
+
+    test('a data folder a pass finds after the watchers were set is watched from then on, and one gone is no longer', async () => {
+        const home = path.join(tmp, 'home');
+        const codexHome = path.join(home, '.codex');
+        fs.mkdirSync(home, { recursive: true });
+        const watched: string[] = [];
+        let watching = 0;
+        const { service, host } = make({
+            settings: { enabled: false, codex: { enabled: true, dataDirectory: '' } },
+            rootInputs: () => ({ env: {}, home, platform: process.platform }),
+            watch: folder => {
+                // As the roots are resolved: with the temporary folder's links resolved.
+                watched.push(path.relative(fs.realpathSync.native(home), folder));
+                watching++;
+                return new vscode.Disposable(() => watching--);
+            },
+        });
+        const held = service.hold();
+        try {
+            // The start's own pass first: each refresh below then has a pass of its own.
+            await settle();
+            await service.refresh();
+            assert.deepStrictEqual([service.status, watched, watching], ['no-roots', [], 0]);
+            // Codex run for the first time: its home appears, and the next pass reads and watches it.
+            fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true });
+            await service.refresh();
+            assert.strictEqual(host.requests.filter(r => r.type === 'import').length, 1);
+            assert.deepStrictEqual([watched, watching], [[path.join('.codex', 'sessions'), path.join('.codex', 'archived_sessions')], 2]);
+            // The same folders again: watched as they were, not afresh.
+            await service.refresh();
+            assert.deepStrictEqual([watched.length, watching], [2, 2]);
+            // Gone: no longer watched.
+            fs.rmSync(codexHome, { recursive: true, force: true });
+            await service.refresh();
+            assert.deepStrictEqual([service.status, watched.length, watching], ['no-roots', 2, 0]);
+        } finally {
+            held.dispose();
+        }
+    });
+
+    test('with no data folder of an agent turned on, nothing is asked of the worker, and the status says so', async () => {
+        const { service, host } = make({
+            settings: { enabled: false, codex: { enabled: true, dataDirectory: '' } },
+            rootInputs: () => ({ env: {}, home: path.join(tmp, 'nobody'), platform: process.platform }),
+        });
+        await service.refresh();
+        assert.deepStrictEqual([service.status, host.requests.filter(r => r.type === 'import').length, service.codexRoots?.candidates.map(c => c.source)], ['no-roots', 0, ['default']]);
+    });
 
     test("Claude Code's configuration files go with each pass and look: every one for names, each root's newest for who is signed in", async () => {
         const home = path.join(tmp, 'home');
@@ -962,6 +1109,49 @@ suite('usage service', () => {
         answer();
     });
 
+    test('a first import a settings change stopped part way is not shown as the whole history: a report asked as it ends waits for the pass after it', async () => {
+        // Asked between the stopped pass's answer and the next one's start,
+        // a report showed what had been read as all of it, with no reading
+        // note, until the next pass was a second along.
+        const home = path.join(tmp, 'home');
+        const codexHome = path.join(tmp, 'codex-one');
+        fs.mkdirSync(path.join(home, '.claude', 'projects'), { recursive: true });
+        fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true });
+        const { service, clock, host, set } = make({
+            settings: { enabled: true, codex: { enabled: true, dataDirectory: codexHome } },
+            rootInputs: () => ({ env: {}, home, platform: process.platform }),
+        });
+        const opened: ((response: UsageWorkerResponse) => void)[] = [];
+        const queried: number[] = [];
+        host.answer = request =>
+            request.type === 'import'
+                ? new Promise(resolve => opened.push(resolve))
+                : request.type === 'query'
+                  ? (queried.push(clock.now()), Promise.resolve<UsageWorkerResponse>({ type: 'report', id: request.id, report: {} as UsageReport }))
+                  : Promise.resolve(defaultAnswer(request));
+        await settle();
+        await clock.advance(READING_SHOWN_MS);
+        assert.deepStrictEqual([opened.length, service.reading?.by], [1, 'this window']);
+        set({ codex: { enabled: false, dataDirectory: codexHome } });
+        assert.strictEqual(host.sent.at(-1), 'cancel');
+        // As the panel does: a report asked the moment the page is told the reading is over.
+        let answered = false;
+        const told = service.onDidChange(() => {
+            told.dispose();
+            void service.report('7d', 'UTC', null).then(() => (answered = true));
+        });
+        const first = host.requests.find(r => r.type === 'import')!;
+        opened.shift()!({ type: 'imported', id: first.id, summary: { ...summaryOf(1), cancelled: true }, leaseHeldElsewhere: false });
+        await settle();
+        assert.deepStrictEqual([opened.length, queried, answered], [1, [], false], 'a part of the history was read as the whole');
+        // The next pass's first second, its reading shown: then the report.
+        await clock.advance(READING_SHOWN_MS);
+        assert.deepStrictEqual([queried.length, answered, service.reading?.by], [1, true, 'this window']);
+        const next = host.requests.filter(r => r.type === 'import').at(-1)!;
+        opened.shift()!({ type: 'imported', id: next.id, summary: summaryOf(1), leaseHeldElsewhere: false });
+        await settle();
+    });
+
     test("a hint's pass that went through first does not count as the whole history read", async () => {
         // The first full pass waits for the startup scan; a watcher hint does not.
         const { service, clock, host, hints } = make({ startupSettled: new Promise<void>(() => undefined) });
@@ -1126,7 +1316,12 @@ suite('usage settings', () => {
                     ? ({ key, globalValue: 'user', workspaceValue: 'workspace', workspaceFolderValue: 'folder' } as unknown as { key: string; globalValue?: T })
                     : undefined,
         });
-        assert.deepStrictEqual(readUsageSettings(configuration as never), { enabled: false, dataDirectory: '', editorEnvironment: 'user' });
+        assert.deepStrictEqual(readUsageSettings(configuration as never), {
+            enabled: false,
+            dataDirectory: '',
+            editorEnvironment: 'user',
+            codex: { enabled: false, dataDirectory: '' },
+        });
     });
 
     /** This extension's settings as settings.json holds them, of any type: get() checks none. */
@@ -1153,6 +1348,25 @@ suite('usage settings', () => {
             assert.strictEqual(readUsageSettings(written({ claudeCodeDataDirectory: value }) as never).dataDirectory, '', JSON.stringify(value));
         }
         assert.strictEqual(readUsageSettings(written({ claudeCodeDataDirectory: '~/claude' }) as never).dataDirectory, '~/claude');
+    });
+
+    test("Codex's settings say what is read and kept of its records, and every place its home is looked for", () => {
+        const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'package.json'), 'utf8')) as {
+            contributes: { configuration: { properties: Record<string, { description?: string }> } };
+        };
+        const properties = manifest.contributes.configuration.properties;
+        const enable = properties['llm-tokenizer.enableCodexUsage']?.description ?? '';
+        for (const said of [
+            'the sessions and archived_sessions folders in ~/.codex, or in CODEX_HOME',
+            "Codex's credentials, configuration, prompt history and databases are never opened",
+            "each response's token counts, model, effort, time, ids and Codex version",
+            "each session record's path, size, file id, how far it was read and its running totals there",
+            'Prompts, responses, reasoning and tool output are never kept',
+        ]) {
+            assert.ok(enable.includes(said), said);
+        }
+        // resolveCodexRoots' order.
+        assert.ok(properties['llm-tokenizer.codexDataDirectory']?.description?.includes('CODEX_HOME as this editor sees it, then ~/.codex'));
     });
 
     test('the settings say what is kept as the README does, and every place the data folder is looked for', () => {
@@ -1237,7 +1451,7 @@ suite('usage worker: what it says while it imports, and when SQLite is busy', ()
         const root = manySessions(600);
         const query = (progress?: boolean) =>
             host.send({ type: 'query', id: 0, storeFile, range: 'coverage', zone: 'UTC', workspaceFolders: null, ...(progress ? { progress } : {}) });
-        const pass = host.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        const pass = host.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] });
         const [first, asked] = await Promise.all([query(), query(true)]);
         assert.ok(first.type === 'report' && asked.type === 'report', `${first.type}, ${asked.type}`);
         assert.ok(first.reading && first.reading.files > 0 && first.reading.files < 600 && first.reading.of === undefined, JSON.stringify(first.reading));
@@ -1252,12 +1466,12 @@ suite('usage worker: what it says while it imports, and when SQLite is busy', ()
         assert.ok(sqlite, 'this runtime has no node:sqlite');
         const host = worker({ busyTimeoutMs: 50 });
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
-        assert.strictEqual((await host.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] })).type, 'imported');
+        assert.strictEqual((await host.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] })).type, 'imported');
         // Another window, in the middle of a write.
         const other = new sqlite.DatabaseSync(currentHistory(path.dirname(storeFile)) ?? storeFile);
         other.exec('BEGIN IMMEDIATE');
         try {
-            const refused = await host.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+            const refused = await host.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
             assert.deepStrictEqual(
                 refused.type === 'failed' && [refused.failure, (refused.sqlite?.code ?? 0) & 0xff, refused.sqlite?.text],
                 ['store-busy', 5, 'database is locked'],

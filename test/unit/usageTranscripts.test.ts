@@ -1341,13 +1341,13 @@ suite('usage worker', () => {
         const a = host();
         const b = host();
 
-        const first = await a.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-a' });
+        const first = await a.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }], holder: 'window-a' });
         assert.strictEqual(first.type, 'imported', JSON.stringify(first));
         assert.ok(first.type === 'imported' && !first.leaseHeldElsewhere && first.summary.read === 4);
 
         // The lease lasts one pass: the second window imports at once, and
         // finds nothing left to read.
-        const second = await b.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-b' });
+        const second = await b.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }], holder: 'window-b' });
         assert.ok(second.type === 'imported' && !second.leaseHeldElsewhere && second.summary.unchanged === 4, JSON.stringify(second));
 
         const cleared = await a.send({ type: 'clear', id: 0, storeFile });
@@ -1382,7 +1382,7 @@ suite('usage worker', () => {
                     }
                 }),
             );
-            worker.postMessage({ type: 'import', id: 7, storeFile, roots: [root] } satisfies UsageWorkerRequest);
+            worker.postMessage({ type: 'import', id: 7, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] } satisfies UsageWorkerRequest);
             await imported;
             const beats = seen.slice(0, seen.indexOf('imported:7')).filter(m => m === 'progress:0').length;
             assert.ok(beats >= 2, `${beats} beats before the answer: ${seen.join(' ')}`);
@@ -1398,8 +1398,8 @@ suite('usage worker', () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
         const [first, second] = await Promise.all([
-            worker.send({ type: 'import', id: 0, storeFile, roots: [root] }),
-            worker.send({ type: 'import', id: 0, storeFile, roots: [root] }),
+            worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] }),
+            worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] }),
         ]);
         assert.ok(first.type === 'imported' && second.type === 'imported');
         assert.deepStrictEqual([first.summary?.read, second.summary?.read, second.summary?.unchanged], [120, 0, 120]);
@@ -1412,7 +1412,7 @@ suite('usage worker', () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
         const [imported, cleared] = await Promise.all([
-            worker.send({ type: 'import', id: 0, storeFile, roots: [root] }),
+            worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] }),
             worker.send({ type: 'clear', id: 0, storeFile }),
         ]);
         assert.ok(imported.type === 'imported' && imported.summary?.cancelled, JSON.stringify(imported));
@@ -1428,14 +1428,47 @@ suite('usage worker', () => {
         }
     });
 
+    test('a cancel stops the pass sent before it at its next file, keeping what it committed, and the history stays open', async () => {
+        // As when an agent is turned off, or its folder changed, mid-pass.
+        const root = manyTranscripts();
+        const storeFile = path.join(tmp, 'store', 'usage.sqlite');
+        const worker = host();
+        const [imported, cancelled] = await Promise.all([
+            worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] }),
+            worker.send({ type: 'cancel', id: 0 }),
+        ]);
+        assert.ok(imported.type === 'imported' && imported.summary?.cancelled, JSON.stringify(imported).slice(0, 200));
+        assert.strictEqual(cancelled.type, 'cancelled');
+        // The next pass reads the rest, and every file once.
+        const next = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] });
+        assert.ok(next.type === 'imported' && imported.summary && next.summary, JSON.stringify(next).slice(0, 200));
+        assert.deepStrictEqual([next.summary.cancelled, imported.summary.read + next.summary.read, next.summary.unchanged], [false, 120, imported.summary.read]);
+        const report = await worker.send({ type: 'query', id: 0, storeFile, range: 'coverage', zone: 'UTC', workspaceFolders: null });
+        assert.strictEqual(report.type === 'report' && report.report.coverage.requests, 120);
+    });
+
     test('named paths go through the worker, and anything but a short list of strings is refused', async () => {
         const root = manyTranscripts();
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        const named = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [path.join(root, 'projects', 'p', 's7.jsonl')] });
+        // An agent this build does not read, too many roots, or a root that is no path, is no pass it runs.
+        for (const sources of [
+            [{ provider: 'gemini', roots: [root] }],
+            [{ provider: '__proto__', roots: [root] }],
+            [{ provider: 'claude-code', roots: Array.from({ length: 17 }, () => root) }],
+            [{ provider: 'codex', roots: [42] }],
+            // A root as the host never sends one: relative, or an agent named twice.
+            [{ provider: 'claude-code', roots: ['relative-root'] }],
+            [{ provider: 'claude-code', roots: [root] }, { provider: 'claude-code', roots: [root] }],
+            'claude-code',
+        ]) {
+            const refused = await worker.send({ type: 'import', id: 0, storeFile, sources } as unknown as UsageWorkerRequest);
+            assert.deepStrictEqual(refused.type === 'failed' ? refused.failure : refused.type, 'bad-request', JSON.stringify(sources));
+        }
+        const named = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], paths: [path.join(root, 'projects', 'p', 's7.jsonl')] });
         assert.ok(named.type === 'imported' && named.summary?.files === 1, JSON.stringify(named).slice(0, 200));
         for (const paths of ['nope', [42], Array.from({ length: 1001 }, () => 'x')]) {
-            const response = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: paths as string[] });
+            const response = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], paths: paths as string[] });
             assert.deepStrictEqual(response.type === 'failed' && response.failure, 'bad-request', JSON.stringify(paths).slice(0, 40));
         }
     });
@@ -1456,7 +1489,7 @@ suite('usage worker', () => {
             resourceLimits: { maxOldGenerationSizeMb: 128 },
         });
         hosts.push(limited);
-        const response = await limited.send({ type: 'import', id: 0, storeFile: path.join(tmp, 'store', 'usage.sqlite'), roots: [root] });
+        const response = await limited.send({ type: 'import', id: 0, storeFile: path.join(tmp, 'store', 'usage.sqlite'), sources: [{ provider: 'claude-code', roots: [root] }] });
         assert.ok(response.type === 'imported' && response.summary?.read === 2 && response.summary.oversizeLines === 1, JSON.stringify(response).slice(0, 300));
     });
 
@@ -1477,12 +1510,12 @@ suite('usage worker', () => {
             );
         unfinished();
         const worker = host();
-        const reloaded = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        const reloaded = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] });
         assert.ok(reloaded.type === 'imported' && reloaded.summary?.read === 1, JSON.stringify(reloaded).slice(0, 300));
 
         fs.appendFileSync(file, line(assistant('m2', 1)) + line({ ...assistant('pad2', 1), pad: 'y'.repeat(5 << 20) }));
         unfinished();
-        const crashed = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], crashed: true });
+        const crashed = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], crashed: true });
         assert.ok(crashed.type === 'imported' && crashed.summary?.skipped.crashed === 1, JSON.stringify(crashed).slice(0, 300));
         opened.store.close();
     });
@@ -1492,10 +1525,10 @@ suite('usage worker', () => {
         // A file where the history's folder should be.
         fs.writeFileSync(path.dirname(storeFile), 'x');
         const worker = host();
-        const first = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        const first = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         assert.deepStrictEqual(first.type === 'failed' && first.failure, 'store-io', JSON.stringify(first));
         fs.rmSync(path.dirname(storeFile));
-        const second = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        const second = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         assert.ok(second.type === 'imported' && second.summary?.read === 4, JSON.stringify(second));
     });
 
@@ -1508,15 +1541,15 @@ suite('usage worker', () => {
         // The window's earlier worker died holding it.
         assert.ok(opened.store.acquireLease('import', 'window-1', PARSER_VERSION));
         const worker = host();
-        const other = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-2' });
+        const other = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }], holder: 'window-2' });
         assert.ok(other.type === 'imported' && other.leaseHeldElsewhere, JSON.stringify(other));
-        const same = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-1' });
+        const same = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }], holder: 'window-1' });
         assert.ok(same.type === 'imported' && !same.leaseHeldElsewhere && same.summary.read === 4, JSON.stringify(same));
 
         assert.ok(opened.store.acquireLease('import', 'reloaded', PARSER_VERSION + 1));
         opened.store.releaseLease('import', 'reloaded');
         opened.store.close();
-        const outdated = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT], holder: 'window-1' });
+        const outdated = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }], holder: 'window-1' });
         assert.deepStrictEqual(outdated.type === 'failed' && outdated.failure, 'outdated', JSON.stringify(outdated));
     });
 
@@ -1526,7 +1559,7 @@ suite('usage worker', () => {
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, `{"type":"assistant","secret":"${sentinel}", broken\n` + line(assistant('ok', 1)));
 
-        const response = await host().send({ type: 'import', id: 0, storeFile: path.join(tmp, 'store', 'usage.sqlite'), roots: [path.join(tmp, 'root')] });
+        const response = await host().send({ type: 'import', id: 0, storeFile: path.join(tmp, 'store', 'usage.sqlite'), sources: [{ provider: 'claude-code', roots: [path.join(tmp, 'root')] }] });
         assert.strictEqual(response.type, 'imported');
         assert.ok(!JSON.stringify(response).includes(sentinel), 'a worker message quoted a record');
         assert.ok(!logged.join('\n').includes(sentinel), 'the log quoted a record');
@@ -1750,13 +1783,13 @@ suite('usage roots', () => {
 });
 
 suite('usage source invariants, for the reader', () => {
-    test('only roots.ts finds the home directory or CLAUDE_CONFIG_DIR', () => {
+    test('only roots.ts finds the home directory, CLAUDE_CONFIG_DIR or CODEX_HOME', () => {
         const usage = path.join(__dirname, '..', '..', '..', 'src', 'usage');
         const files = [...fs.readdirSync(usage).map(f => path.join(usage, f)), path.join(usage, '..', 'usageWorker.ts')];
         for (const file of files.filter(f => f.endsWith('.ts') && path.basename(f) !== 'roots.ts')) {
             // Code only: comments may name what they do not touch.
             const code = fs.readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-            assert.ok(!/homedir|CLAUDE_CONFIG_DIR|process\.env/.test(code), `${path.basename(file)} reads the home or the environment`);
+            assert.ok(!/homedir|CLAUDE_CONFIG_DIR|CODEX_HOME|process\.env/.test(code), `${path.basename(file)} reads the home or the environment`);
         }
     });
 });

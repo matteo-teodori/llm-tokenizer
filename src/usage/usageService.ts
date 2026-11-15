@@ -1,6 +1,8 @@
 /**
- * Claude Code usage, on or off: the one owner of the usage worker, its timers
- * and its watchers, which the panel and the status item use.
+ * Agents' usage, on or off: the one owner of the usage worker, its timers
+ * and its watchers, which the panel and the status item use. It is on while
+ * any agent's reading is, Claude Code's or Codex's, each turned on by a
+ * setting of its own, and only an agent turned on is read.
  *
  * Loaded by onDemand.ts, which registers the commands and the settings
  * listener. Off, it touches nothing: no file, no worker, no watcher, no
@@ -37,7 +39,8 @@ import type { ImportProgress, UsageWorkerRequest, UsageWorkerResponse } from './
 import type { RangeKey, UsageReport } from './report';
 import type { LatestRequest } from './store';
 import type { Compaction } from './types';
-import { machineRootInputs, resolveRoots, type ResolvedRoots, type RootInputs } from './roots';
+import { machineRootInputs, resolveCodexRoots, resolveRoots, type ResolvedCodexRoots, type ResolvedRoots, type RootInputs } from './roots';
+import type { AgentSource } from './protocol';
 import { CONFIG_SECTION } from './settings';
 import { UsageStatusItem } from './statusItem';
 
@@ -71,6 +74,10 @@ export const READING_UPDATE_MS = 2_000;
 /** A worker asked to close its history is ended after this, answered or not. */
 export const CLOSE_GRACE_MS = 2_000;
 
+/** What a watcher of each agent's folders hears of: Claude Code's transcripts, and Codex's rollouts, plain or compressed. */
+export const CLAUDE_CODE_FILES = '**/*.jsonl';
+export const CODEX_FILES = '**/*.{jsonl,zst}';
+
 export type UsageStatus = 'off' | 'ready' | 'no-roots' | 'no-sqlite' | 'read-only' | 'failing';
 
 /**
@@ -99,10 +106,18 @@ export interface ClearOutcome {
 }
 
 export interface UsageSettings {
+    /** Claude Code's reading, on or off, and its data folder. */
     enabled: boolean;
     dataDirectory: string;
     /** The user-level `claudeCode.environmentVariables`; only its CLAUDE_CONFIG_DIR is kept. */
     editorEnvironment: unknown;
+    /** Codex's reading, on or off, and its data folder; absent, off. */
+    codex?: { enabled: boolean; dataDirectory: string };
+}
+
+/** Whether the feature is on: any agent's reading turned on. */
+export function usageOn(settings: Pick<UsageSettings, 'enabled' | 'codex'>): boolean {
+    return settings.enabled || settings.codex?.enabled === true;
 }
 
 /**
@@ -118,10 +133,15 @@ export interface UsageSettings {
 export function readUsageSettings(configuration: (section: string) => Pick<vscode.WorkspaceConfiguration, 'get' | 'inspect'>): UsageSettings {
     const config = configuration(CONFIG_SECTION);
     const dataDirectory = config.get<unknown>('claudeCodeDataDirectory');
+    const codexDirectory = config.get<unknown>('codexDataDirectory');
     return {
         enabled: config.get<unknown>('enableClaudeCodeUsage') === true,
         dataDirectory: typeof dataDirectory === 'string' ? dataDirectory : '',
         editorEnvironment: configuration('claudeCode').inspect('environmentVariables')?.globalValue,
+        codex: {
+            enabled: config.get<unknown>('enableCodexUsage') === true,
+            dataDirectory: typeof codexDirectory === 'string' ? codexDirectory : '',
+        },
     };
 }
 
@@ -139,8 +159,12 @@ export interface UsageServiceDeps {
     rootInputs(): Omit<RootInputs, 'setting' | 'editorEnvironment'>;
     /** `onCrash` runs when a worker dies on its own, never when it is stopped. */
     createHost(onCrash: () => void): UsageHost;
-    /** Watch a `projects` folder for transcript changes; each event is only a hint, naming the file. */
-    watch(projectsFolder: string, onHint: (file: string) => void): vscode.Disposable;
+    /**
+     * Watch an agent's folder for changes to the files `glob` matches: a
+     * `projects` folder's transcripts, a Codex home's rollouts. Each event
+     * is only a hint, naming the file.
+     */
+    watch(folder: string, onHint: (file: string) => void, glob: string): vscode.Disposable;
     startupSettled: Thenable<unknown>;
     clock?: Clock;
 }
@@ -174,7 +198,9 @@ export class UsageService implements vscode.Disposable {
     private disposed = false;
     private currentStatus: UsageStatus = 'off';
     private summary: ImportSummary | undefined;
+    /** Each agent's roots at the last look at them; none for an agent turned off. */
     private resolved: ResolvedRoots | undefined;
+    private resolvedCodex: ResolvedCodexRoots | undefined;
     private runtime: { node: string; electron: string | null } | undefined;
 
     /** Bumped on every start and stop, so a timer armed before either does nothing. */
@@ -214,11 +240,15 @@ export class UsageService implements vscode.Disposable {
     private hintTimer: unknown;
     private hintDeadline = 0;
     private hinted = new Set<string>();
+    /** The folders the watchers watch, as one key; empty while none do. */
+    private watching = '';
+    /** What the pass under way reads, each agent's roots, until it is answered. */
+    private passSources: AgentSource[] | undefined;
     private inFlight = 0;
 
     constructor(private readonly deps: UsageServiceDeps) {
         this.clock = deps.clock ?? realClock;
-        if (deps.readSettings().enabled) {
+        if (usageOn(deps.readSettings())) {
             this.start();
         }
     }
@@ -232,9 +262,14 @@ export class UsageService implements vscode.Disposable {
         return this.summary;
     }
 
-    /** Every root considered at the last import, and where each came from. */
+    /** Every root of Claude Code's considered at the last import, and where each came from; none while its reading is off. */
     get roots(): ResolvedRoots | undefined {
         return this.resolved;
+    }
+
+    /** Every Codex home considered at the last import, and where each came from; none while its reading is off. */
+    get codexRoots(): ResolvedCodexRoots | undefined {
+        return this.resolvedCodex;
     }
 
     /** The runtime that has no `node:sqlite`, when that is why nothing shows. */
@@ -290,15 +325,22 @@ export class UsageService implements vscode.Disposable {
 
     /** Re-read the settings: start, stop, or pick up a new data folder. */
     settingsChanged(): void {
-        const enabled = this.deps.readSettings().enabled;
+        const enabled = usageOn(this.deps.readSettings());
         if (enabled && !this.enabled) {
             this.start();
         } else if (!enabled && this.enabled) {
             this.stop();
         } else if (enabled) {
-            // A data folder or Claude Code's own setting changed: watch the new
-            // roots, and read them now.
-            this.restartWatchers();
+            // An agent's setting or its data folder changed: watch the new
+            // roots, and read them now. A pass under way over what is no longer
+            // to be read, an agent turned off or a folder no longer its, stops
+            // at its next file, keeping what it committed, so that the pass
+            // after it reads only what the settings say.
+            const resolved = this.resolveNow();
+            if (this.passSources && readsBeyond(this.passSources, sourcesOf(resolved))) {
+                void this.ask({ type: 'cancel' });
+            }
+            this.restartWatchers(resolved);
             void this.runImport();
         }
     }
@@ -352,7 +394,12 @@ export class UsageService implements vscode.Disposable {
         if (!this.enabled) {
             return undefined;
         }
-        const roots = (this.resolved ?? this.resolveNow()).roots.map(r => r.path);
+        // Claude Code's sessions alone are live: none while its reading is off.
+        const resolved = this.resolved ?? this.resolveNow().claude;
+        if (!resolved) {
+            return undefined;
+        }
+        const roots = resolved.roots.map(r => r.path);
         const response = await this.ask(
             {
                 type: 'liveContext',
@@ -375,11 +422,12 @@ export class UsageService implements vscode.Disposable {
         if (!this.enabled) {
             return undefined;
         }
-        if (!this.readAll && this.readingSince !== undefined && !this.reading) {
+        if (!this.readAll && (this.readingSince !== undefined || this.importing !== undefined) && !this.reading) {
             // No full pass has gone through here yet, as the feature starts
             // or after a Clear: the one under way may be a first import a few
-            // files in, which is not to be shown as the whole history. Its
-            // end, or its first second, when its reading shows, is waited for.
+            // files in, or the pass after one a settings change stopped part
+            // way, which is not to be shown as the whole history. Its end, or
+            // its first second, when its reading shows, is waited for.
             await this.firstSecondOfPass();
             if (!this.enabled) {
                 return undefined;
@@ -607,15 +655,17 @@ export class UsageService implements vscode.Disposable {
         return this.importing;
     }
 
-    /** Where Claude Code writes, now, with the settings as they are. */
-    private resolveNow(): ResolvedRoots {
+    /** Where each agent turned on writes, now, with the settings as they are. */
+    private resolveNow(): { claude: ResolvedRoots | undefined; codex: ResolvedCodexRoots | undefined } {
         const settings = this.deps.readSettings();
-        this.resolved = resolveRoots({
-            ...this.deps.rootInputs(),
-            setting: settings.dataDirectory,
-            editorEnvironment: settings.editorEnvironment,
-        });
-        return this.resolved;
+        const inputs = this.deps.rootInputs();
+        this.resolved = settings.enabled
+            ? resolveRoots({ ...inputs, setting: settings.dataDirectory, editorEnvironment: settings.editorEnvironment })
+            : undefined;
+        this.resolvedCodex = settings.codex?.enabled
+            ? resolveCodexRoots({ setting: settings.codex.dataDirectory, env: inputs.env, home: inputs.home, confineTo: inputs.confineTo })
+            : undefined;
+        return { claude: this.resolved, codex: this.resolvedCodex };
     }
 
     /**
@@ -626,36 +676,46 @@ export class UsageService implements vscode.Disposable {
      */
     private async importOnce(paths: string[] | undefined, generation: number): Promise<ImportSummary | 'held' | 'failed' | undefined> {
         const resolved = this.resolveNow();
-        for (const refused of resolved.refused) {
+        const { claude, codex } = resolved;
+        for (const refused of [...(claude?.refused ?? []), ...(codex?.refused ?? [])]) {
             this.deps.log.warn(`Claude Code usage: refused a root outside the test fixtures (${refused.source})`);
         }
-        if (resolved.roots.length === 0) {
+        if (this.held && watchKey(resolved) !== this.watching) {
+            // A data folder found since the watchers were set, or one gone
+            // since: watched as this pass finds them.
+            this.restartWatchers(resolved);
+        }
+        const sources = sourcesOf(resolved);
+        if (sources.length === 0) {
             if (this.currentStatus !== 'no-roots') {
-                this.deps.log.info(`Claude Code usage: no Claude Code data folder found, of ${resolved.candidates.length} places looked at`);
-                this.deps.log.debug(`Claude Code usage: looked at ${resolved.candidates.map(c => c.path).join(', ')}`);
+                const looked = [...(claude?.candidates ?? []), ...(codex?.candidates ?? [])];
+                this.deps.log.info(`Claude Code usage: no data folder found of an agent turned on, of ${looked.length} places looked at`);
+                this.deps.log.debug(`Claude Code usage: looked at ${looked.map(c => c.path).join(', ')}`);
             }
             this.stopReading();
             this.setStatus('no-roots');
             return undefined;
         }
-        const roots = resolved.roots.map(r => r.path);
+        const roots = sources.flatMap(s => s.roots);
         this.deps.log.debug(`Claude Code usage: importing ${paths ? `${paths.length} changed files in ` : ''}${roots.join(', ')}`);
         // Begun now, or, for the retry of a pass whose reading was shown, when that one began.
         this.readingSince ??= this.clock.now();
         this.followReading();
+        this.passSources = sources;
         const response = await this.ask(
             {
                 type: 'import',
                 storeFile: this.deps.storeFile,
-                roots,
+                sources,
                 paths,
                 holder: this.holder,
                 crashed: this.crashed,
-                accountFiles: resolved.accountFiles,
-                signedInFiles: resolved.signedInFiles,
+                accountFiles: claude?.accountFiles ?? [],
+                signedInFiles: claude?.signedInFiles ?? [],
             },
             'pass',
         );
+        this.passSources = undefined;
         if (generation !== this.generation) {
             return undefined;
         }
@@ -920,19 +980,36 @@ export class UsageService implements vscode.Disposable {
         }
     }
 
-    private restartWatchers(): void {
-        this.stopWatchers();
+    /**
+     * Watch the folders of every agent turned on, as `resolved` finds them,
+     * or as they are now. The hints heard already are kept: a file changed
+     * in the second before is read all the same.
+     */
+    private restartWatchers(resolved?: Resolved): void {
+        this.disposeWatchers();
         if (!this.enabled || this.holders === 0) {
+            this.dropHints();
             return;
         }
-        this.watchers = this.resolveNow().roots.map(root => this.deps.watch(path.join(root.path, 'projects'), file => this.hint(file)));
+        const folders = watchedFolders(resolved ?? this.resolveNow());
+        this.watching = folders.map(f => f.folder).join('\0');
+        this.watchers = folders.map(({ folder, glob }) => this.deps.watch(folder, file => this.hint(file), glob));
     }
 
     private stopWatchers(): void {
+        this.disposeWatchers();
+        this.dropHints();
+    }
+
+    private disposeWatchers(): void {
         for (const watcher of this.watchers) {
             watcher.dispose();
         }
         this.watchers = [];
+        this.watching = '';
+    }
+
+    private dropHints(): void {
         this.clock.clearTimeout(this.hintTimer);
         this.hintDeadline = 0;
         this.hinted.clear();
@@ -977,6 +1054,38 @@ export class UsageService implements vscode.Disposable {
         }
     }
 }
+
+/** Each agent's roots, as resolveNow finds them; none for an agent turned off. */
+interface Resolved {
+    claude: ResolvedRoots | undefined;
+    codex: ResolvedCodexRoots | undefined;
+}
+
+/** What a pass reads: each agent turned on that has a root, with its roots. */
+function sourcesOf({ claude, codex }: Resolved): AgentSource[] {
+    return [
+        ...(claude && claude.roots.length > 0 ? [{ provider: 'claude-code' as const, roots: claude.roots.map(r => r.path) }] : []),
+        ...(codex && codex.roots.length > 0 ? [{ provider: 'codex' as const, roots: codex.roots.map(r => r.path) }] : []),
+    ];
+}
+
+/** Whether a pass over `reading` reads what `wanted` no longer has read: an agent turned off, or a root no longer its. */
+function readsBeyond(reading: readonly AgentSource[], wanted: readonly AgentSource[]): boolean {
+    return reading.some(source => {
+        const roots = wanted.find(s => s.provider === source.provider)?.roots ?? [];
+        return source.roots.some(root => !roots.includes(root));
+    });
+}
+
+/** The folders watched for each agent turned on: Claude Code's projects, and Codex's two, an archived rollout moving from one to the other. */
+function watchedFolders({ claude, codex }: Resolved): { folder: string; glob: string }[] {
+    return [
+        ...(claude?.roots ?? []).map(root => ({ folder: path.join(root.path, 'projects'), glob: CLAUDE_CODE_FILES })),
+        ...(codex?.roots ?? []).flatMap(root => ['sessions', 'archived_sessions'].map(name => ({ folder: path.join(root.path, name), glob: CODEX_FILES }))),
+    ];
+}
+
+const watchKey = (resolved: Resolved): string => watchedFolders(resolved).map(f => f.folder).join('\0');
 
 /** A failure as the log gives it: the error's name, and SQLite's result code and text for it when SQLite raised it. */
 function failureDetail(response: Extract<UsageWorkerResponse, { type: 'failed' }>): string {
@@ -1028,9 +1137,9 @@ export function startClaudeCodeUsage(
                 onExit: onCrash,
                 resourceLimits: { maxOldGenerationSizeMb: 128 },
             }),
-        watch: (projectsFolder, onHint) => {
+        watch: (folder, onHint, glob) => {
             const watcher = vscode.workspace.createFileSystemWatcher(
-                new vscode.RelativePattern(vscode.Uri.file(projectsFolder), '**/*.jsonl'),
+                new vscode.RelativePattern(vscode.Uri.file(folder), glob),
                 false,
                 false,
                 true,

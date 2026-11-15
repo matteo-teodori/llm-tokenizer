@@ -412,7 +412,7 @@ require(${JSON.stringify(WORKER)});
             log: { error: () => undefined, warn: () => undefined },
         });
         hosts.push(host);
-        const answer = await host.send({ type: 'import', id: 0, storeFile: path.join(folder, 'usage.sqlite'), roots: [FIXTURE_ROOT] });
+        const answer = await host.send({ type: 'import', id: 0, storeFile: path.join(folder, 'usage.sqlite'), sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         const named = fs.readFileSync(path.join(folder, 'usage.current'), 'utf8');
         assert.notStrictEqual(named, corrupt);
         assert.ok(fs.existsSync(path.join(folder, named)), 'the history the pointer names was removed');

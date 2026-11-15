@@ -38,8 +38,10 @@ import { sessionTranscripts } from './usage/transcripts';
 import { HistoryFileError, claimFound, createHistory, publishHistory, removeHistory, removeLeftovers, resolveHistory, type Pointer } from './usage/historyFiles';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import {
+    MAX_ROOTS,
     SESSION_ID,
     isAccountFiles,
+    type AgentSource,
     type ImportProgress,
     type SqliteResult,
     type UsageFailure,
@@ -54,6 +56,27 @@ const port = parentPort;
 
 /** More named paths than this are a full pass's job. */
 const MAX_PATHS = 1000;
+
+/** Whether `roots` are a few folders, each an absolute path, as the host resolves them. */
+function isRoots(roots: unknown): roots is string[] {
+    return Array.isArray(roots) && roots.length <= MAX_ROOTS && roots.every(root => typeof root === 'string' && root.length > 0 && root.length <= 4096 && path.isAbsolute(root));
+}
+
+/** Whether `sources` name agents this build reads, each once, with a few roots. */
+function isSources(sources: unknown): sources is AgentSource[] {
+    if (!Array.isArray(sources)) {
+        return false;
+    }
+    const named = new Set<string>();
+    return sources.every(source => {
+        const s = source as Partial<AgentSource> | null;
+        if (typeof s !== 'object' || s === null || typeof s.provider !== 'string' || readerOf(s.provider) === undefined || named.has(s.provider)) {
+            return false;
+        }
+        named.add(s.provider);
+        return isRoots(s.roots);
+    });
+}
 
 
 /** Holds the import lease when the window does not name itself; unique per thread. */
@@ -321,6 +344,11 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
         reply({ type: 'closed', id: request.id });
         return;
     }
+    if (request.type === 'cancel') {
+        // Answered once the passes before it have stopped.
+        reply({ type: 'cancelled', id: request.id });
+        return;
+    }
     if (!sqlite) {
         reply({ type: 'unavailable', id: request.id, node: process.versions.node, electron: process.versions.electron ?? null });
         return;
@@ -388,6 +416,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
         case 'import': {
             const paths = request.paths;
             if (
+                !isSources(request.sources) ||
                 (paths !== undefined && !(Array.isArray(paths) && paths.length <= MAX_PATHS && paths.every(p => typeof p === 'string' && p.length <= 4096))) ||
                 (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles)) ||
                 (request.signedInFiles !== undefined && !isAccountFiles(request.signedInFiles))
@@ -399,7 +428,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 reply({ type: 'failed', id: request.id, failure: 'outdated', errorName: 'StoreError' });
                 return;
             }
-            const sources: AgentRoots[] = [{ provider: 'claude-code', roots: request.roots }];
+            const sources: AgentRoots[] = request.sources;
             const current: Pass = { sources, paths, files: 0, of: paths?.length };
             pass = current;
             let summary: Awaited<ReturnType<typeof importUnderLease>>;
@@ -433,7 +462,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             return;
         }
         case 'liveContext': {
-            if (typeof request.sessionId !== 'string' || !SESSION_ID.test(request.sessionId)) {
+            if (typeof request.sessionId !== 'string' || !SESSION_ID.test(request.sessionId) || !isRoots(request.roots)) {
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
             }
@@ -568,7 +597,7 @@ let fullPasses = 0;
 
 port.on('message', (request: UsageWorkerRequest) => {
     const sequence = ++received;
-    if (request.type === 'clear' || request.type === 'close') {
+    if (request.type === 'clear' || request.type === 'close' || request.type === 'cancel') {
         cancelBefore = sequence;
     }
     const full = request.type === 'import' && request.paths === undefined;

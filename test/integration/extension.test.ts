@@ -316,7 +316,13 @@ suite('extension', () => {
             );
         }
         // Claude Code usage reads no workspace file, so it never rescans.
-        for (const key of ['llm-tokenizer.enableClaudeCodeUsage', 'llm-tokenizer.claudeCodeDataDirectory', 'claudeCode.environmentVariables']) {
+        for (const key of [
+            'llm-tokenizer.enableClaudeCodeUsage',
+            'llm-tokenizer.claudeCodeDataDirectory',
+            'claudeCode.environmentVariables',
+            'llm-tokenizer.enableCodexUsage',
+            'llm-tokenizer.codexDataDirectory',
+        ]) {
             assert.deepStrictEqual(settingsChangeEffects(changed(key)), { rescan: false, download: false, usage: true, usagePanel: false }, key);
         }
         // A name given to an account only changes what the panel shows: no import.
@@ -453,7 +459,7 @@ suite('extension', () => {
         assert.ok(title?.group?.startsWith('navigation'), 'Show Claude Code Usage is not a button in the editor title');
         assert.strictEqual(
             title?.when,
-            'config.llm-tokenizer.enableClaudeCodeUsage || llm-tokenizer.claudeCodeInstalled',
+            'config.llm-tokenizer.enableClaudeCodeUsage || config.llm-tokenizer.enableCodexUsage || llm-tokenizer.agentInstalled',
             "the button shows for everyone, or hides from someone with Claude Code's extension or the feature on",
         );
         // The button and the tabs are one icon: the logo's T.

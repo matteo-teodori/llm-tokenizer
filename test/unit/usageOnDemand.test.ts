@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { CLAUDE_CODE_INSTALLED, registerClaudeCodeUsage } from '../../src/usage/onDemand';
+import { AGENT_INSTALLED, registerClaudeCodeUsage } from '../../src/usage/onDemand';
 import type { UsageCommands, startClaudeCodeUsage } from '../../src/usage/usageService';
 
 type Start = typeof startClaudeCodeUsage;
@@ -19,6 +19,8 @@ suite('usage, loaded on demand', () => {
     let enabled: unknown;
     /** Claude Code's VS Code extension, when installed and enabled. */
     let claudeCode: unknown;
+    let codex: unknown;
+    let codexEnabled: unknown;
     let extensionsChanged: vscode.EventEmitter<void>;
     /** Every setContext the registration ran. */
     let contexts: unknown[][];
@@ -56,7 +58,7 @@ suite('usage, loaded on demand', () => {
             Promise.resolve(),
             load,
             {
-                getExtension: (id: string) => (id === 'anthropic.claude-code' ? claudeCode : undefined),
+                getExtension: (id: string) => (id === 'anthropic.claude-code' ? claudeCode : id === 'openai.chatgpt' ? codex : undefined),
                 onDidChange: extensionsChanged.event,
             } as unknown as typeof vscode.extensions,
         );
@@ -69,6 +71,8 @@ suite('usage, loaded on demand', () => {
         listener = undefined;
         enabled = false;
         claudeCode = undefined;
+        codex = undefined;
+        codexEnabled = false;
         // A registration of an earlier test would answer as well.
         extensionsChanged = new vscode.EventEmitter<void>();
         contexts = [];
@@ -85,7 +89,7 @@ suite('usage, loaded on demand', () => {
         // This extension's own commands are registered already: the fakes stand in.
         commands.registerCommand = (id: string, handler: () => unknown) => (handlers.set(id, handler), new vscode.Disposable(() => undefined));
         workspace.onDidChangeConfiguration = (fn: typeof listener) => ((listener = fn), new vscode.Disposable(() => undefined));
-        workspace.getConfiguration = () => ({ get: <T>(_key: string, fallback?: T) => (enabled as T) ?? fallback });
+        workspace.getConfiguration = () => ({ get: <T>(key: string, fallback?: T) => ((key === 'enableCodexUsage' ? codexEnabled : enabled) as T) ?? fallback });
     });
 
     teardown(() => {
@@ -122,18 +126,27 @@ suite('usage, loaded on demand', () => {
         assert.strictEqual(calls.loads, 0);
     });
 
-    test("the T shows for whoever has Claude Code's extension, as it comes and goes, and that loads nothing", () => {
+    test("the T shows for whoever has Claude Code's extension or Codex's, as they come and go, and that loads nothing", () => {
         register();
         claudeCode = { id: 'anthropic.claude-code' };
         extensionsChanged.fire();
         claudeCode = undefined;
         extensionsChanged.fire();
+        codex = { id: 'openai.chatgpt' };
+        extensionsChanged.fire();
         assert.deepStrictEqual(contexts, [
-            ['setContext', CLAUDE_CODE_INSTALLED, false],
-            ['setContext', CLAUDE_CODE_INSTALLED, true],
-            ['setContext', CLAUDE_CODE_INSTALLED, false],
+            ['setContext', AGENT_INSTALLED, false],
+            ['setContext', AGENT_INSTALLED, true],
+            ['setContext', AGENT_INSTALLED, false],
+            ['setContext', AGENT_INSTALLED, true],
         ]);
         assert.strictEqual(calls.loads, 0, "the feature was loaded for the T's sake");
+    });
+
+    test("Codex's reading turned on alone loads it too, at activation or when it is turned on", () => {
+        codexEnabled = true;
+        register();
+        assert.deepStrictEqual([calls.loads, calls.starts], [1, 1]);
     });
 
     test("the key it sets is the one the editor title's T is shown by", () => {
@@ -141,7 +154,7 @@ suite('usage, loaded on demand', () => {
             contributes: { menus: Record<string, { command: string; when?: string }[]> };
         };
         const title = manifest.contributes.menus['editor/title']?.find(item => item.command === 'llm-tokenizer.showClaudeCodeUsage');
-        assert.strictEqual(title?.when, `config.llm-tokenizer.enableClaudeCodeUsage || ${CLAUDE_CODE_INSTALLED}`);
+        assert.strictEqual(title?.when, `config.llm-tokenizer.enableClaudeCodeUsage || config.llm-tokenizer.enableCodexUsage || ${AGENT_INSTALLED}`);
     });
 
     test('turned on, it is loaded and starts from the settings as they are; later changes are passed on', () => {

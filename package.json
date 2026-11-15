@@ -48,7 +48,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
-      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records, the accounts its configuration file names and its settings files, of which three entries are kept, are read too, outside the workspace."
+      "description": "Workspace files are only read and tokenized; nothing from the workspace is executed. When Claude Code usage is turned on, Claude Code's own session records, the accounts its configuration file names and its settings files, of which three entries are kept, are read too, outside the workspace; when Codex usage is, Codex's own session records."
     },
     "virtualWorkspaces": {
       "supported": "limited",
@@ -117,14 +117,14 @@
       "editor/title": [
         {
           "command": "llm-tokenizer.showClaudeCodeUsage",
-          "when": "config.llm-tokenizer.enableClaudeCodeUsage || llm-tokenizer.claudeCodeInstalled",
+          "when": "config.llm-tokenizer.enableClaudeCodeUsage || config.llm-tokenizer.enableCodexUsage || llm-tokenizer.agentInstalled",
           "group": "navigation@100"
         }
       ],
       "commandPalette": [
         {
           "command": "llm-tokenizer.refreshClaudeCodeUsage",
-          "when": "config.llm-tokenizer.enableClaudeCodeUsage"
+          "when": "config.llm-tokenizer.enableClaudeCodeUsage || config.llm-tokenizer.enableCodexUsage"
         }
       ]
     },
@@ -480,6 +480,18 @@
           "default": false,
           "scope": "machine",
           "description": "Show the context size of the Claude Code session running in this workspace. This also reads Claude Code's running-session files (sessions/*.json) for their session id, folder, status, update time and process id. Needs Enable Claude Code Usage."
+        },
+        "llm-tokenizer.enableCodexUsage": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Show how many tokens Codex processed, its command line, its editor extension and its desktop app alike, read from its own session records on this machine: the sessions and archived_sessions folders in ~/.codex, or in CODEX_HOME. Of those records only the lines that count a response's tokens or name its model and effort, the folder a session started in, and the usage limits reached are read; Codex's credentials, configuration, prompt history and databases are never opened. Kept, in the same database as Claude Code's: each response's token counts, model, effort, time, ids and Codex version; the folder each session started in; each session record's path, size, file id, how far it was read and its running totals there; and the usage limits reached, with when each resets. Prompts, responses, reasoning and tool output are never kept, and nothing is sent anywhere. The history is kept after Codex deletes or compresses its own records; Clear Claude Code Usage History removes it."
+        },
+        "llm-tokenizer.codexDataDirectory": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Codex's home folder, the one that contains sessions/, for when CODEX_HOME is set where this editor does not see it, as in one terminal, or in a script or an alias that starts Codex. CODEX_HOME as this editor sees it, then ~/.codex, are read as well, each that exists. Must be an absolute path."
         },
         "llm-tokenizer.claudeCodeAccountNames": {
           "type": "object",
