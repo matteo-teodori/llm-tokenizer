@@ -44,8 +44,12 @@
  *   written at once, each line stamped as it is written: it ends at the
  *   child's own `thread_settings_applied` (0.144 on), or at the first line
  *   written after a pause, which the child's first response always is.
- * - The model is the latest `turn_context`'s, or `thread_settings_applied`'s;
- *   the project is `session_meta.cwd`; a subagent's session is its root
+ * - The model and the effort are the latest `turn_context`'s, or
+ *   `thread_settings_applied`'s, the effort none where it names none, as
+ *   Codex leaves it out when none is chosen. A response read before any
+ *   line named them takes the first to, where it comes in the same moment,
+ *   as a subagent's first record is written just before its settings.
+ *   The project is `session_meta.cwd`; a subagent's session is its root
  *   thread's (`session_id`, 0.142 on), else its parent's.
  * - A usage limit is the snapshot a 429 refusal leaves in a `token_count`,
  *   with the window that was full, or else the meter it names (`limit_id`:
@@ -140,8 +144,14 @@ const LINE_START = Buffer.from('{"timestamp":"');
 const USAGE_LIMIT_ERROR = Buffer.from('"codex_error_info":"usage_limit_exceeded"');
 /** Within how long a second sighting of a limit is the same refusal: its snapshot sent again, or its turn's end. */
 const SAME_REFUSAL_MS = 5_000;
-/** Within how long of each other lines are written in one go: a review's first request and the line that starts it. */
+/**
+ * Within how long of each other lines are written in one go: a subagent's
+ * first record and the settings it ran on (measured, in the same
+ * millisecond), or a review's first request and the line that starts it.
+ */
 const SAME_MOMENT_MS = 1_000;
+/** The most responses kept waiting for their thread's settings, from one read to the next. */
+const MAX_UNNAMED = 8;
 
 /** Codex's TokenUsage: input with its cached and cache-written tokens, output with its reasoning. */
 interface TokenUsage {
@@ -171,6 +181,10 @@ interface RolloutState {
     total: number[] | null;
     model: string | null;
     effort: string | null;
+    /** Whether a line has named the thread's settings, its model and effort: a turn_context, or thread_settings_applied, a copy's included. */
+    named: boolean;
+    /** The responses read before that line, until it comes: written again with what it names, if it comes in the same moment. */
+    unnamed: UsageRequest[];
     version: string | null;
     /** The last limit read, which a repeat of its event does not count again. */
     hit: { ts: number; limitType: string; resetsAt: number | null } | null;
@@ -201,6 +215,8 @@ function freshState(file: TranscriptFile): RolloutState {
         total: null,
         model: null,
         effort: null,
+        named: false,
+        unnamed: [],
         version: null,
         hit: null,
         pending: null,
@@ -483,13 +499,13 @@ class Reading {
             case 'turn_context':
                 // A request begins: see `unparsed`.
                 this.state.opened = ts;
-                return this.context(payload);
+                return this.context(payload, ts);
             case 'token_usage_record':
                 return this.record(payload, ts, offset);
             case 'token_count':
                 return this.tokenCount(payload, ts, offset);
             case 'thread_settings_applied':
-                return this.settings(payload);
+                return this.settings(payload, ts);
             case 'task_started':
                 this.state.opened = null;
                 return this.begin();
@@ -598,19 +614,50 @@ class Reading {
      * which the child's own then replace: one whose first context fell in
      * the copy runs on its parent's, not on none.
      */
-    private context(payload: Record<string, unknown>): void {
+    private context(payload: Record<string, unknown>, ts: number): void {
         // A request begins, and a review that shows one runs here.
         this.begin();
         if (this.state.review) {
             this.state.review.own = true;
         }
-        this.state.model = boundedString(payload.model, MAX_MODEL) ?? this.state.model;
-        this.state.effort = word(payload.effort) ?? this.state.effort;
+        this.name(boundedString(payload.model, MAX_MODEL), word(payload.effort), ts);
     }
 
-    private settings(payload: Record<string, unknown>): void {
+    private settings(payload: Record<string, unknown>, ts: number): void {
         const settings = objectOf(payload.thread_settings);
-        this.state.model = boundedString(settings?.model, MAX_MODEL) ?? this.state.model;
+        this.name(boundedString(settings?.model, MAX_MODEL), word(settings?.reasoning_effort), ts);
+    }
+
+    /**
+     * The thread's settings from here on: its model, and its effort, none
+     * where none is named, as Codex leaves it out when none is chosen. The
+     * first line to name them names the responses read before it too, where
+     * it comes in the same moment, as a subagent's settings come just after
+     * its first record: in this read, or, read up to that record before, in
+     * the next, which writes them again. Responses from further back ran
+     * before Codex recorded a model, as 0.32 to 0.34 did not, or on what a
+     * resume has since changed: they stay as read.
+     */
+    private name(model: string | null, effort: string | null, ts: number): void {
+        this.state.model = model ?? this.state.model;
+        this.state.effort = effort;
+        if (this.state.named) {
+            return;
+        }
+        this.state.named = true;
+        const named = this.state.model;
+        for (const request of this.state.unnamed.splice(0)) {
+            if (named === null || ts - request.timestamp > SAME_MOMENT_MS) {
+                continue;
+            }
+            const inThisRead = this.result.requests.includes(request);
+            request.model = named;
+            request.effort = effort;
+            request.parserVersion = PARSER_VERSION;
+            if (!inThisRead) {
+                this.result.requests.push(request);
+            }
+        }
     }
 
     /**
@@ -894,6 +941,9 @@ class Reading {
             owner: null,
         };
         this.result.requests.push(request);
+        if (!this.state.named && this.state.unnamed.length < MAX_UNNAMED) {
+            this.state.unnamed.push(request);
+        }
     }
 
     private count(category: MalformedCategory): void {

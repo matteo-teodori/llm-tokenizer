@@ -11,6 +11,7 @@ import { queryReport } from '../../src/usage/queries';
 import { ownerAt } from '../../src/usage/report';
 import { LEASE_TAKEOVER_MS, SCHEMA_VERSION, UsageStore, loadSqlite, type FileCheckpoint, type OpenResult } from '../../src/usage/store';
 import { PARSER_VERSION } from '../../src/usage/lines';
+import { UNRECORDED_MODEL } from '../../src/usage/modelIds';
 import { OWNERS_SINCE } from '../../src/usage/transcripts';
 import type { SessionOwner, UsageRequest } from '../../src/usage/types';
 
@@ -267,6 +268,7 @@ suite('usage history store', () => {
                     isMain: pick([true, false]),
                     cacheRead: pick([0, 5, null]),
                     output: pick([null, 0, 7, 7, 30]),
+                    model: pick(['claude-opus-5-5', UNRECORDED_MODEL]),
                     file: pick(['/r/a.jsonl', '/r/b.jsonl', '/r/\uffff.jsonl', '/r/\u{10000}.jsonl']),
                     byteOffset: pick([0, 10, 20]),
                 }),

@@ -31,6 +31,7 @@ import { BUCKET_MS } from './aggregate';
 import { backupsBeside, copiesBeside, currentHistory, linkWhole, ownFiles, removeQuietly } from './historyFiles';
 import { isComplete } from './provenance';
 import { PARSER_VERSION } from './lines';
+import { UNRECORDED_MODEL } from './modelIds';
 import { OWNERS_SINCE } from './transcripts';
 import type {
     BucketSums,
@@ -817,10 +818,10 @@ ON CONFLICT (provider, message_id) DO UPDATE SET
     owner = coalesce(excluded.owner, requests.owner)
 WHERE excluded.parser_version > requests.parser_version
    OR (excluded.parser_version = requests.parser_version AND (
-        (excluded.is_main, excluded.complete, coalesce(excluded.output, -1))
-          > (requests.is_main, requests.complete, coalesce(requests.output, -1))
-     OR ((excluded.is_main, excluded.complete, coalesce(excluded.output, -1))
-          = (requests.is_main, requests.complete, coalesce(requests.output, -1))
+        (excluded.is_main, excluded.complete, coalesce(excluded.output, -1), excluded.model <> '${UNRECORDED_MODEL}')
+          > (requests.is_main, requests.complete, coalesce(requests.output, -1), requests.model <> '${UNRECORDED_MODEL}')
+     OR ((excluded.is_main, excluded.complete, coalesce(excluded.output, -1), excluded.model <> '${UNRECORDED_MODEL}')
+          = (requests.is_main, requests.complete, coalesce(requests.output, -1), requests.model <> '${UNRECORDED_MODEL}')
          AND ((SELECT path FROM paths WHERE id = excluded.file), excluded.byte_offset)
            < ((SELECT path FROM paths WHERE id = requests.file), requests.byte_offset))))
 `;

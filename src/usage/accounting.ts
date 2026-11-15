@@ -21,11 +21,15 @@
  * 2. The main chain beats a sidechain copy.
  * 3. All four counters reported beats any missing.
  * 4. More output wins; missing output counts as -1.
- * 5. The smallest (file, byte offset) wins, so the result never depends on
+ * 5. A record that names its model beats one that does not: a Codex response
+ *    read before the settings its thread wrote a moment later, read again
+ *    once they are there.
+ * 6. The smallest (file, byte offset) wins, so the result never depends on
  *    the order files were read in. Paths compare as UTF-8 bytes, as SQLite
  *    compares text, so both sides agree on non-BMP characters too.
  */
 
+import { UNRECORDED_MODEL } from './modelIds';
 import { isComplete } from './provenance';
 import type { UsageRequest } from './types';
 
@@ -36,6 +40,7 @@ export function compareRecords(a: UsageRequest, b: UsageRequest): number {
         Number(b.isMain) - Number(a.isMain) ||
         Number(isComplete(b)) - Number(isComplete(a)) ||
         (b.output ?? -1) - (a.output ?? -1) ||
+        Number(b.model !== UNRECORDED_MODEL) - Number(a.model !== UNRECORDED_MODEL) ||
         Buffer.compare(Buffer.from(a.file, 'utf8'), Buffer.from(b.file, 'utf8')) ||
         a.byteOffset - b.byteOffset
     );

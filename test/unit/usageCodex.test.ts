@@ -206,6 +206,52 @@ suite('usage Codex rollouts', () => {
         assert.deepStrictEqual((await read(file)).requests.map(tokensOf), [{ input: 0, cacheRead: 100, cacheCreation: 0, output: 20, thinking: 20 }]);
     });
 
+    test("a response read before its thread names its settings takes the first to, in the same moment, as a subagent's first record is written just before its settings; one further back stays as read", async () => {
+        const spawned = meta(0, { session_id: ROOT, source: { subagent: { thread_spawn: { parent_thread_id: PARENT, depth: 1 } } } });
+        const settings = (second: number, fields: Record<string, unknown>) =>
+            line(second, 'event_msg', { type: 'thread_settings_applied', thread_id: THREAD, thread_settings: { model: 'gpt-6-astra', model_provider_id: 'openai', ...fields } });
+        // As Codex 0.153 writes them, measured: the first record, then the thread's settings and its turn's, in the same millisecond.
+        const lines = [spawned, record(1, 1), settings(1, { reasoning_effort: 'xhigh' }), context(1, 'gpt-6-astra', { effort: 'xhigh' }), record(4, 2), context(5, 'gpt-6.1-sol', { effort: 'low' }), record(6, 3)];
+        const named = (result: ReadResult) => result.requests.map(r => [r.requestId, r.model, r.effort]);
+        const whole = [
+            ['resp_1', 'gpt-6-astra', 'xhigh'],
+            ['resp_2', 'gpt-6-astra', 'xhigh'],
+            ['resp_3', 'gpt-6.1-sol', 'low'],
+        ];
+        assert.deepStrictEqual(named(await read(rollout(lines))), whole);
+        // Read up to its first record, then on: the next read writes it again, named.
+        const file = rollout(lines.slice(0, 2));
+        const first = await read(file);
+        assert.deepStrictEqual(named(first), [['resp_1', UNRECORDED_MODEL, null]]);
+        fs.appendFileSync(file, lines.slice(2).join(''));
+        const next = await read(file, first.checkpoint);
+        assert.deepStrictEqual(named(next), whole);
+        assert.strictEqual(next.requests[0].byteOffset, first.requests[0].byteOffset);
+        // Settings that name no effort name none, whatever the turn's says next.
+        assert.deepStrictEqual(named(await read(rollout([spawned, record(1, 1), settings(1, {}), context(1, 'gpt-6-astra', { effort: 'xhigh' }), record(4, 2)]))), [
+            ['resp_1', 'gpt-6-astra', null],
+            ['resp_2', 'gpt-6-astra', 'xhigh'],
+        ]);
+        // A thread Codex 0.34 began, which recorded no model, resumed eleven days later by 0.41: its own responses stay of none, read whole or as written.
+        const days = 11 * 86_400;
+        const resumed = [meta(0, { cli_version: '0.34.0' }), tokenCount(5, usage(1), usage(1)), tokenCount(9, sum(1, 2), usage(2)), context(days, 'gpt-5-codex'), tokenCount(days + 4, sum(1, 2, 3), usage(3))];
+        const models = (result: ReadResult) => result.requests.map(r => [r.model, r.effort]);
+        assert.deepStrictEqual(models(await read(rollout(resumed))), [
+            [UNRECORDED_MODEL, null],
+            [UNRECORDED_MODEL, null],
+            ['gpt-5-codex', 'medium'],
+        ]);
+        const live = rollout(resumed.slice(0, 3));
+        const before = await read(live);
+        fs.appendFileSync(live, resumed.slice(3).join(''));
+        assert.deepStrictEqual(models(await read(live, before.checkpoint)), [['gpt-5-codex', 'medium']]);
+    });
+
+    test('the effort is the one each turn names, none where it names none: never the one before it, nor one named later', async () => {
+        const file = rollout([meta(0), context(1, 'gpt-5.5', { effort: undefined }), record(2, 1), context(3, 'gpt-5.5', { effort: 'high' }), record(4, 2), context(5, 'gpt-5.5', { effort: undefined }), record(6, 3)]);
+        assert.deepStrictEqual((await read(file)).requests.map(r => r.effort), [null, 'high', null]);
+    });
+
     test('a counter that was never recorded is none: cache writes before Codex 0.145, the model before 0.35', async () => {
         const noWrite = (k: number) => usage(k, false);
         const file = rollout([meta(0, { cli_version: '0.32.0', source: 'exec' }), tokenCount(5, noWrite(1), noWrite(1))]);
@@ -1012,6 +1058,33 @@ suite('usage Codex rollouts', () => {
             } finally {
                 store.close();
             }
+        }
+    });
+
+    test('a response read before its settings, written again once they come, is kept named', async function () {
+        if (!sqlite) {
+            this.skip();
+        }
+        const spawned = meta(0, { session_id: ROOT, source: { subagent: { thread_spawn: { parent_thread_id: PARENT, depth: 1 } } } });
+        const settings = line(1, 'event_msg', { type: 'thread_settings_applied', thread_id: THREAD, thread_settings: { model: 'gpt-6-astra', model_provider_id: 'openai', reasoning_effort: 'xhigh' } });
+        const opened = UsageStore.open(sqlite, path.join(home, 'history', 'usage.sqlite'));
+        assert.strictEqual(opened.status, 'ready');
+        if (opened.status !== 'ready') {
+            return;
+        }
+        const store = opened.store;
+        try {
+            const file = rollout([spawned, record(1, 1)]);
+            await importSources(store, [{ provider: 'codex', roots: [home] }]);
+            assert.deepStrictEqual([...store.requests()].map(r => [r.requestId, r.model, r.effort]), [['resp_1', UNRECORDED_MODEL, null]]);
+            fs.appendFileSync(file, [settings, context(1, 'gpt-6-astra', { effort: 'xhigh' }), record(4, 2)].join(''));
+            await importSources(store, [{ provider: 'codex', roots: [home] }]);
+            assert.deepStrictEqual([...store.requests()].map(r => [r.requestId, r.model, r.effort]), [
+                ['resp_1', 'gpt-6-astra', 'xhigh'],
+                ['resp_2', 'gpt-6-astra', 'xhigh'],
+            ]);
+        } finally {
+            store.close();
         }
     });
 
