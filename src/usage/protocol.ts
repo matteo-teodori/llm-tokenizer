@@ -61,7 +61,8 @@ export type UsageWorkerRequest =
      * every root; asked only once the page says how far a pass has gone.
      * `account`: one account's sessions only, by `accountKey`, or Claude
      * Code's that recorded none (another agent's are no account's); every
-     * session when absent. `accountFiles`: where
+     * session when absent. `agent`: one agent's sessions only; every agent's
+     * when absent. `accountFiles`: where
      * Claude Code names its accounts; `signedInFiles`, those of them that
      * say which it is signed in to now.
      */
@@ -74,6 +75,7 @@ export type UsageWorkerRequest =
           workspaceFolders: string[] | null;
           progress?: boolean;
           account?: string;
+          agent?: UsageProvider;
           accountFiles?: string[];
           signedInFiles?: string[];
       }

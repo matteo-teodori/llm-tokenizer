@@ -283,7 +283,8 @@ export class UsageStatusItem implements vscode.Disposable {
             item.show();
             return;
         }
-        const report = await this.service.report('today', this.deps.zone(), folders);
+        // Claude Code's alone, as the session it shows: another agent's tokens are not its today's.
+        const report = await this.service.report('today', this.deps.zone(), folders, undefined, 'claude-code');
         if (item !== this.item) {
             return;
         }

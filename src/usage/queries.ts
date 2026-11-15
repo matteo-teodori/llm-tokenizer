@@ -19,6 +19,7 @@ import type { ConfiguredAccounts } from './claudeAccounts';
 import { comparablePath, isWithin, projectOf, sessionRoot } from './projects';
 import { buildReport, rangeSince, rangeUntil, type RangeKey, type ReportSession, type UsageReport } from './report';
 import type { AccountName, StoredSession, UsageStore } from './store';
+import type { UsageProvider } from './types';
 
 export interface ReportQuery {
     range: RangeKey;
@@ -29,6 +30,8 @@ export interface ReportQuery {
     platform: NodeJS.Platform;
     /** One account's requests only, by key; every request when absent. */
     account?: string;
+    /** One agent's sessions only; every agent's when absent. */
+    agent?: UsageProvider;
     /** What Claude Code's configuration says now of its accounts. */
     configured?: ConfiguredAccounts;
     /** Resolves symlinks; the path itself when it no longer exists (tests). */
@@ -45,7 +48,9 @@ export function queryReport(store: UsageStore, query: ReportQuery): UsageReport 
         sessions: store.sessions(until),
         compactions: store.compactions(since, until),
         limitHits: store.limitHits(since, until),
-        coverage: store.coverage(until),
+        coverage: store.coverage(until, query.agent),
+        // What was read, whichever agent is shown.
+        history: query.agent === undefined ? undefined : store.coverage(until),
         accountNames: store.accountNames(ACCOUNT_PROVIDER),
         accountNumbers: store.accountNumbers(ACCOUNT_PROVIDER),
     }));
@@ -57,7 +62,14 @@ export function queryReport(store: UsageStore, query: ReportQuery): UsageReport 
             accountNames: mergeNames(configured.names, input.accountNames),
             currentAccounts: configured.current.map(accountKey),
         },
-        { range: query.range, zone: query.zone, now: query.now, scope: query.workspaceFolders ? 'workspace' : 'all', account: query.account },
+        {
+            range: query.range,
+            zone: query.zone,
+            now: query.now,
+            scope: query.workspaceFolders ? 'workspace' : 'all',
+            account: query.account,
+            agent: query.agent,
+        },
     );
 }
 

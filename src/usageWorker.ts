@@ -388,6 +388,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 !RANGE_KEYS.includes(request.range) ||
                 !isTimeZone(request.zone) ||
                 (request.account !== undefined && !isAccountFilter(request.account)) ||
+                (request.agent !== undefined && !(typeof request.agent === 'string' && readerOf(request.agent) !== undefined)) ||
                 (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles)) ||
                 (request.signedInFiles !== undefined && !isAccountFiles(request.signedInFiles))
             ) {
@@ -401,6 +402,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 now: Date.now(),
                 platform: process.platform,
                 account: request.account,
+                agent: request.agent,
                 configured: readClaudeAccounts(request.accountFiles ?? [], request.signedInFiles),
             });
             reply({

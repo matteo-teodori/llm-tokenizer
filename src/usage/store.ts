@@ -735,12 +735,15 @@ interface SessionKeying {
 }
 
 /**
- * The least and greatest agent of each table a report's reads group or
- * match by session: two seeks of each table's key, which the agent leads.
+ * The least and greatest agent of each of `tables`: two seeks of each one's
+ * key, which the agent leads.
  */
-const AGENTS_HELD = `SELECT ${['requests', 'limit_hits', 'owner_changes']
-    .map(table => `(SELECT min(provider) FROM ${table}) AS ${table}_least, (SELECT max(provider) FROM ${table}) AS ${table}_greatest`)
-    .join(', ')}`;
+function agentsHeld(tables: readonly string[]): string {
+    return `SELECT ${tables.map(table => `(SELECT min(provider) FROM ${table}) AS ${table}_least, (SELECT max(provider) FROM ${table}) AS ${table}_greatest`).join(', ')}`;
+}
+
+/** The tables a report's reads group or match by session. */
+const BY_SESSION = ['requests', 'limit_hits', 'owner_changes'];
 
 /** A session's key in memory: its agent's, which has no NUL, and its id. */
 function sessionKey(provider: string, sessionId: string): string {
@@ -1536,25 +1539,36 @@ export class UsageStore {
     }
 
     /**
-     * The span and size of the whole history, whatever range is shown: its
-     * span before `untilMs`, and how many requests are dated later.
+     * The span and size of the whole history, whatever range is shown, or of
+     * one agent's part of it: its span before `untilMs`, and how many
+     * requests are dated later.
      */
-    coverage(untilMs = Number.MAX_SAFE_INTEGER): StoreCoverage {
+    coverage(untilMs = Number.MAX_SAFE_INTEGER, provider?: UsageProvider): StoreCoverage {
+        // Every agent's, or one's: bound only where it is named, and where its
+        // requests and limits are not all there are, for a scan of their times
+        // costs half a walk of the key the agent leads, measured. A file of
+        // another agent's can hold neither.
+        const whole = provider === undefined || this.soleAgent(['requests', 'limit_hits']) === provider;
+        const of = whole ? '' : 'WHERE provider = :provider';
+        const and = whole ? '' : 'AND provider = :provider';
+        const params: Record<string, number | string> = whole ? { until: untilMs } : { until: untilMs, provider };
         const requests = this.db
             .prepare(
                 `SELECT min(ts) FILTER (WHERE ts < :until) AS start, max(ts) FILTER (WHERE ts < :until) AS newest,
                         count(*) AS n, count(*) FILTER (WHERE ts >= :until) AS ahead
-                 FROM requests`,
+                 FROM requests ${of}`,
             )
-            .get({ until: untilMs }) as { start: number | null; newest: number | null; n: number; ahead: number };
+            .get(params) as { start: number | null; newest: number | null; n: number; ahead: number };
         // A limit reached before the first request starts the history too, and one after the last ends it.
-        const limits = this.db.prepare('SELECT min(ts) AS start, max(ts) AS newest FROM limit_hits WHERE ts < ?').get(untilMs) as {
+        const limits = this.db.prepare(`SELECT min(ts) AS start, max(ts) AS newest FROM limit_hits WHERE ts < :until ${and}`).get(params) as {
             start: number | null;
             newest: number | null;
         };
         const files = this.db
-            .prepare('SELECT count(*) AS n, coalesce(sum(oversize_lines), 0) AS oversize, coalesce(sum(malformed_lines), 0) AS malformed FROM files')
-            .get() as { n: number; oversize: number; malformed: number };
+            .prepare(
+                `SELECT count(*) AS n, coalesce(sum(oversize_lines), 0) AS oversize, coalesce(sum(malformed_lines), 0) AS malformed FROM files ${provider === undefined ? '' : 'WHERE provider = :provider'}`,
+            )
+            .get(provider === undefined ? {} : { provider }) as { n: number; oversize: number; malformed: number };
         return {
             start: requests.start === null || limits.start === null ? (requests.start ?? limits.start) : Math.min(requests.start, limits.start),
             newest: requests.newest === null || limits.newest === null ? (requests.newest ?? limits.newest) : Math.max(requests.newest, limits.newest),
@@ -1610,13 +1624,10 @@ export class UsageStore {
 
     /**
      * How the reads by session go now (see `SessionKeying`): by id where one
-     * agent's rows are all the tables they group or match hold. Asked only on
-     * the snapshot of the statements it shapes, in a read or a transaction,
-     * as a report reads: else another window's commit could land between.
+     * agent's rows are all the tables they group or match hold.
      */
     private sessionKeying(): SessionKeying {
-        const held = this.db.isTransaction ? Object.values(this.db.prepare(AGENTS_HELD).get() ?? {}).filter(agent => agent !== null) : [];
-        const sole = new Set(held).size === 1 ? (held[0] as UsageProvider) : null;
+        const sole = this.soleAgent(BY_SESSION);
         const agentColumn = sole === null ? 'provider, ' : '';
         return {
             agentColumn,
@@ -1625,6 +1636,17 @@ export class UsageStore {
             sameSession: table => `${sole === null ? `o.provider = ${table}.provider AND ` : ''}o.session_id = ${table}.session_id`,
             agentOf: row => sole ?? (row.provider as UsageProvider),
         };
+    }
+
+    /**
+     * The one agent whose rows `tables` hold, where they hold one agent's
+     * alone; else null. Asked only on the snapshot of the statements it
+     * shapes, in a read or a transaction, as a report reads: else another
+     * window's commit could land between.
+     */
+    private soleAgent(tables: readonly string[]): UsageProvider | null {
+        const held = this.db.isTransaction ? Object.values(this.db.prepare(agentsHeld(tables)).get() ?? {}).filter(agent => agent !== null) : [];
+        return new Set(held).size === 1 ? (held[0] as UsageProvider) : null;
     }
 
     /**

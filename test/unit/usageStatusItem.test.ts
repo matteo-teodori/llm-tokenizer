@@ -388,6 +388,22 @@ suite('usage status item: the item', () => {
         assert.ok(done.includes('Context: not reported yet.') && !done.includes('Still reading') && done.includes('Today in this workspace: 1.2M processed'), done);
     });
 
+    test("today's total is Claude Code's alone, whatever other agent the history holds", async () => {
+        const asked: Parameters<StatusItemService['report']>[] = [];
+        const h = harness({
+            sessions: [session('/work/repo')],
+            report: (...args) => {
+                asked.push(args);
+                return Promise.resolve({ totals: { processed: 1_000, provenance: 'reported' } } as UsageReport);
+            },
+        });
+        await settle();
+        await h.statusItem.refresh();
+        h.statusItem.dispose();
+        assert.ok(asked.length > 0);
+        assert.deepStrictEqual(asked.map(args => [args[0], args[2], args[3], args[4]]).at(-1), ['today', ['/work/repo'], undefined, 'claude-code']);
+    });
+
     test('a change while a look is under way is looked at once that look ends, not at the next tick', async () => {
         // Found capturing the README's images: a first import's first look
         // read the history still empty, then waited for today's report while

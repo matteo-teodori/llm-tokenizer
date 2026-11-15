@@ -59,7 +59,10 @@ export interface ReportInput {
     sessions: ReportSession[];
     compactions: Compaction[];
     limitHits: LimitHit[];
+    /** The span and size of the history, or of the agent's part of it where the report is one agent's. */
     coverage: StoreCoverage;
+    /** The whole history's, where the report is one agent's: `coverage` where it is every agent's. */
+    history?: StoreCoverage;
     /** What Claude Code's configuration named accounts, the history's and its own now. */
     accountNames?: AccountName[];
     /** Each account's number, by key, as the history gave it, those with no session left included (see `UsageStore.numberAccounts`). */
@@ -80,6 +83,8 @@ export interface ReportOptions {
      * ACCOUNT_PROVIDER): one chosen keeps no other agent's request.
      */
     account?: string;
+    /** One agent's sessions only; every agent's when absent. */
+    agent?: UsageProvider;
     /** Rows kept per list, largest first; the rest are counted in `omitted`. */
     maxSessions?: number;
     maxProjects?: number;
@@ -172,8 +177,16 @@ export interface LimitWindow {
     date: string;
 }
 
-/** A day's requests on one model, at one speed, where they ran and of one prompt size: a CSV row. */
+/** One agent's requests in the range, and its sessions: a By agent row. */
+export interface AgentRow {
+    provider: UsageProvider;
+    sessions: number;
+    totals: UsageTotals;
+}
+
+/** A day's requests of one agent on one model, at one speed, where they ran and of one prompt size: a CSV row. */
 export interface DayModelRow {
+    provider: UsageProvider;
     date: string;
     model: string;
     variant: string | null;
@@ -193,6 +206,8 @@ export interface UsageReport {
     scope: 'all' | 'workspace';
     /** The account filter applied: ALL_ACCOUNTS, or one key. */
     account: string;
+    /** The agent filter applied: every agent's, or one's. */
+    agent: UsageProvider | 'all';
     totals: UsageTotals;
     days: { date: string; totals: UsageTotals }[];
     models: ModelRow[];
@@ -200,8 +215,15 @@ export interface UsageReport {
     efforts: { effort: string | null; totals: UsageTotals }[];
     projects: ProjectRow[];
     sessions: SessionRow[];
-    /** Every input of a hand-made cost calculation, by day and model. */
+    /** Every input of a hand-made cost calculation, by day, agent and model. */
     dayModels: DayModelRow[];
+    /** In the range and scope, by processed: each agent's requests, those of the agent chosen alone where one is. */
+    agents: AgentRow[];
+    /**
+     * Every agent with a session in the history, whatever the range, scope
+     * and filters, in a fixed order: what the agent filter offers.
+     */
+    agentsSeen: UsageProvider[];
     /**
      * In the range, by processed; the sessions with no recorded owner in one
      * row of their own. Claude Code's alone (see ACCOUNT_PROVIDER).
@@ -230,7 +252,10 @@ export interface UsageReport {
         accounts: number;
         accountsSeen: number;
     };
+    /** The span and size of the history the report is of: the agent's part, where one is chosen. */
     coverage: StoreCoverage;
+    /** The whole history's, whichever agent is chosen: what was read, and how new it is. */
+    history: StoreCoverage;
 }
 
 const DEFAULT_MAX_SESSIONS = 200;
@@ -256,6 +281,8 @@ export const MAX_ACCOUNTS_SEEN = 200;
 /** A session's accounts named, in its row: real sessions have one or two. */
 export const MAX_SESSION_ACCOUNTS = 3;
 const KIND_ORDER: readonly TranscriptKind[] = ['main', 'task', 'workflow', 'subagent', 'other'];
+/** The agents in the order the page names them: the filter's, and wherever else they are listed. */
+export const AGENT_ORDER: readonly UsageProvider[] = ['claude-code', 'codex'];
 
 /** The largest UTC offset in use, +14:00: no local day starts earlier than its UTC midnight minus this. */
 const MAX_OFFSET_MS = 14 * 60 * 60 * 1000;
@@ -343,6 +370,8 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     };
     const ofAccount = (key: string | null) => account === ALL_ACCOUNTS || key === account;
     const inScope = (session: ReportSession | undefined) => options.scope === 'all' || session?.inWorkspace === true;
+    // An agent this build does not read, as a newer one sharing the history may, is none of the report's.
+    const ofAgent = (provider: UsageProvider) => AGENT_ORDER.includes(provider) && (options.agent === undefined || provider === options.agent);
 
     let totals = emptyTotals();
     const days = new Map<string, UsageTotals>();
@@ -365,7 +394,7 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         const key = sessionKey(sums.provider, sums.sessionId);
         const session = sessionsById.get(key);
         const { owner, key: accountKey } = accountOf(sums.provider, sums.owner, session, sums.firstTs);
-        if (!inScope(session) || !ofAccount(accountKey)) {
+        if (!ofAgent(sums.provider) || !inScope(session) || !ofAccount(accountKey)) {
             continue;
         }
         noteActivity(activity, key, sums, inRange(date));
@@ -380,10 +409,11 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         addModel(models, modelKey, sums, t);
         add(kinds, sums.kind, t);
         add(efforts, sums.effort, t);
-        // Apart by all that a request's price depends on, beside its model.
-        const dayModelKey = [date, modelKey, sums.speed ?? '', sums.inferenceGeo ?? '', sums.promptSize ?? ''].join('\u0000');
+        // Apart by all that a request's price depends on, beside its agent and model.
+        const dayModelKey = [date, sums.provider, modelKey, sums.speed ?? '', sums.inferenceGeo ?? '', sums.promptSize ?? ''].join('\u0000');
         const dayModel = dayModels.get(dayModelKey);
         dayModels.set(dayModelKey, {
+            provider: sums.provider,
             date,
             model: sums.model,
             variant: sums.variant,
@@ -484,12 +514,12 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     // The newest rows are kept, then listed oldest day first, and within a
     // day largest first.
     const dayModelRows = [...dayModels.values()]
-        .sort((a, b) => compareText(b.date, a.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model))
+        .sort((a, b) => compareText(b.date, a.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model) || compareText(a.provider, b.provider))
         .slice(0, MAX_DAY_MODELS)
-        .sort((a, b) => compareText(a.date, b.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model));
+        .sort((a, b) => compareText(a.date, b.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model) || compareText(a.provider, b.provider));
     const hitAccount = (hit: LimitHit) => accountOf(hit.provider, hit.owner, sessionsById.get(sessionKey(hit.provider, hit.sessionId)), hit.timestamp).key;
     const windows = limitWindows(
-        input.limitHits.filter(hit => ofAccount(hitAccount(hit))),
+        input.limitHits.filter(hit => ofAgent(hit.provider) && ofAccount(hitAccount(hit))),
         hitAccount,
         zone,
         inRange,
@@ -527,6 +557,7 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         zone,
         scope: options.scope,
         account,
+        agent: options.agent ?? 'all',
         totals,
         days: [...days].sort(([a], [b]) => compareText(a, b)).map(([date, t]) => ({ date, totals: t })),
         models: modelRows.slice(0, MAX_MODELS),
@@ -537,6 +568,9 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
             .slice(0, maxProjects),
         sessions: listedSessions,
         dayModels: dayModelRows,
+        agents: agentRows(sessionRows),
+        // An agent with something to show: a request, or a limit reached.
+        agentsSeen: AGENT_ORDER.filter(provider => input.sessions.some(s => s.provider === provider && (s.firstTs !== null || s.limitSpans.length > 0))),
         accounts: listedAccounts,
         accountsSeen: seenKept.sort(bySeenOrder),
         accountNames: input.accountNames ?? [],
@@ -553,7 +587,22 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
             accountsSeen: seenRows.length - seenKept.length,
         },
         coverage: input.coverage,
+        history: input.history ?? input.coverage,
     };
+}
+
+/**
+ * Each agent's requests in the range and its sessions, from the sessions'
+ * own totals: every request counted is one session's, and there are far
+ * fewer sessions than sums to fold.
+ */
+function agentRows(sessions: SessionRow[]): AgentRow[] {
+    const agents = new Map<UsageProvider, AgentRow>();
+    for (const s of sessions) {
+        const a = agents.get(s.provider);
+        agents.set(s.provider, a ? { provider: s.provider, sessions: a.sessions + 1, totals: mergeTotals(a.totals, s.totals) } : { provider: s.provider, sessions: 1, totals: mergeTotals(emptyTotals(), s.totals) });
+    }
+    return [...agents.values()].sort((a, b) => b.totals.processed - a.totals.processed || compareText(a.provider, b.provider));
 }
 
 /** One group of sums as totals: partial when any request in it missed a counter. */

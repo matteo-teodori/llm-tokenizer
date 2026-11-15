@@ -38,7 +38,7 @@ import { UsagePanel, openUsageSettings, savedZone } from './panel';
 import type { ImportProgress, UsageWorkerRequest, UsageWorkerResponse } from './protocol';
 import type { RangeKey, UsageReport } from './report';
 import type { LatestRequest } from './store';
-import type { Compaction } from './types';
+import type { Compaction, UsageProvider } from './types';
 import { machineRootInputs, resolveCodexRoots, resolveRoots, type ResolvedCodexRoots, type ResolvedRoots, type RootInputs } from './roots';
 import type { AgentSource } from './protocol';
 import { CONFIG_SECTION } from './settings';
@@ -416,9 +416,12 @@ export class UsageService implements vscode.Disposable {
         return response.type === 'liveContext' ? { latest: response.latest, compactions: response.compactions } : undefined;
     }
 
-    /** The report for one range and scope, or undefined while off or failing. */
-    /** `account`: one account's sessions only, by key (see accounts.ts); every session when absent. */
-    async report(range: RangeKey, zone: string, workspaceFolders: string[] | null, account?: string): Promise<UsageReport | undefined> {
+    /**
+     * The report for one range and scope, or undefined while off or failing.
+     * `account`: one account's sessions only, by key (see accounts.ts);
+     * `agent`: one agent's; every session when absent.
+     */
+    async report(range: RangeKey, zone: string, workspaceFolders: string[] | null, account?: string, agent?: UsageProvider): Promise<UsageReport | undefined> {
         if (!this.enabled) {
             return undefined;
         }
@@ -448,6 +451,7 @@ export class UsageService implements vscode.Disposable {
                 workspaceFolders,
                 ...(progress ? { progress } : {}),
                 ...(account !== undefined ? { account } : {}),
+                ...(agent !== undefined ? { agent } : {}),
                 accountFiles,
                 signedInFiles,
             },

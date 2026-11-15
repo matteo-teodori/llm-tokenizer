@@ -1604,6 +1604,153 @@ suite('usage report', () => {
         assert.deepStrictEqual([none.totals.coverage.requests, none.sessions.length, none.limitWindows.length], [0, 0, 0]);
     });
 
+    test('one agent chosen is the whole page, its limits and its CSV rows included; every agent seen is offered, whatever the range', () => {
+        const t = (minute: number) => Date.UTC(2026, 9, 10, 11, minute);
+        const sum = (provider: 'claude-code' | 'codex', sessionId: string, minute: number, input: number) => ({
+            bucket: Math.floor(t(minute) / BUCKET_MS),
+            provider,
+            sessionId,
+            model: provider === 'codex' ? 'gpt-5.5' : 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: t(minute),
+            lastTs: t(minute),
+            input,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        });
+        const session = (provider: 'claude-code' | 'codex', sessionId: string, firstTs: number | null) => ({
+            provider,
+            sessionId,
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: false,
+            firstTs,
+            lastTs: firstTs,
+            owners: [],
+            unownedHitTs: null,
+            limitSpans: [],
+            uses: [],
+        });
+        const input = {
+            sums: [sum('claude-code', 'a', 1, 1), sum('codex', 'b', 2, 10), sum('codex', 'c', 3, 100)],
+            // A Codex session sighted with nothing to show, as one it imported from another agent, is no reason to offer it.
+            sessions: [session('claude-code', 'a', t(1)), session('codex', 'b', t(2)), session('codex', 'c', t(3))],
+            compactions: [],
+            limitHits: [
+                { provider: 'claude-code' as const, uuid: 'h1', sessionId: 'a', timestamp: t(4), limitType: 'five_hour', resetsAt: null, owner: null },
+                { provider: 'codex' as const, uuid: 'h2', sessionId: 'b', timestamp: t(5), limitType: 'weekly', resetsAt: null, owner: null },
+            ],
+            coverage: { start: t(1), newest: t(5), requests: 3, ahead: 0, files: 3, oversizeLines: 0, malformedLines: 0 },
+        };
+        const options = { range: 'today' as const, zone: 'UTC', now: FIXTURE_NOW, scope: 'all' as const };
+        const all = buildReport(input, options);
+        assert.deepStrictEqual(
+            [all.agent, all.agentsSeen, all.agents.map(a => [a.provider, a.sessions, a.totals.input]), all.dayModels.map(r => [r.provider, r.model])],
+            [
+                'all',
+                ['claude-code', 'codex'],
+                [
+                    ['codex', 2, 110],
+                    ['claude-code', 1, 1],
+                ],
+                [
+                    ['codex', 'gpt-5.5'],
+                    ['claude-code', 'claude-opus-5-5'],
+                ],
+            ],
+        );
+        const codex = buildReport(input, { ...options, agent: 'codex' });
+        assert.deepStrictEqual(
+            [codex.agent, codex.totals.input, codex.sessions.map(s => s.sessionId).sort(), codex.limitWindows.map(w => w.limitType), codex.agents.map(a => a.provider), codex.agentsSeen],
+            ['codex', 110, ['b', 'c'], ['weekly'], ['codex'], ['claude-code', 'codex']],
+        );
+        const claude = buildReport(input, { ...options, agent: 'claude-code' });
+        assert.deepStrictEqual([claude.totals.input, claude.limitWindows.map(w => w.limitType), claude.dayModels.map(r => r.provider)], [1, ['five_hour'], ['claude-code']]);
+        // Sighted with nothing to show: not offered.
+        const quiet = buildReport({ ...input, sums: input.sums.slice(0, 1), sessions: [session('claude-code', 'a', t(1)), session('codex', 'z', null)], limitHits: [] }, options);
+        assert.deepStrictEqual(quiet.agentsSeen, ['claude-code']);
+        // An agent this build does not read, as a newer one sharing the history may: none of the report's.
+        const unknown = 'gemini' as 'codex';
+        const shared = buildReport(
+            {
+                ...input,
+                sums: [...input.sums, sum(unknown, 'g', 4, 1000)],
+                sessions: [...input.sessions, session(unknown, 'g', t(4))],
+                limitHits: [...input.limitHits, { provider: unknown, uuid: 'h3', sessionId: 'g', timestamp: t(6), limitType: 'weekly', resetsAt: null, owner: null }],
+            },
+            options,
+        );
+        assert.deepStrictEqual(
+            [shared.totals.input, shared.agentsSeen, shared.agents.map(a => a.provider), shared.sessions.length, shared.limitWindows.length, shared.dayModels.length],
+            [all.totals.input, all.agentsSeen, all.agents.map(a => a.provider), all.sessions.length, all.limitWindows.length, all.dayModels.length],
+        );
+        // What was read is the whole history's, whichever agent is shown.
+        const whole = { ...input.coverage, requests: 4, files: 4 };
+        assert.deepStrictEqual([all.history, buildReport({ ...input, history: whole }, { ...options, agent: 'codex' }).history], [input.coverage, whole]);
+    });
+
+    test("one agent's part of the history has its own span, size and files", () => {
+        const store = freshStore();
+        store.transaction(() => {
+            store.upsertRequests([
+                request({ messageId: 'a', timestamp: Date.UTC(2026, 9, 1), file: '/claude.jsonl' }),
+                request({ provider: 'codex', messageId: 'b', timestamp: Date.UTC(2026, 9, 5), file: '/codex.jsonl' }),
+                request({ provider: 'codex', messageId: 'c', timestamp: Date.UTC(2026, 9, 7), file: '/codex.jsonl' }),
+            ]);
+            store.insertLimitHits([{ provider: 'codex', uuid: 'h', sessionId: 's', timestamp: Date.UTC(2026, 9, 8), limitType: 'weekly', resetsAt: null, owner: null }]);
+        });
+        const span = (c: { start: number | null; newest: number | null; requests: number; files: number }) => [c.start, c.newest, c.requests, c.files];
+        const file = (provider: 'claude-code' | 'codex', name: string) =>
+            store.putFile({
+                provider, path: name, root: '/r', kind: 'main', sessionId: 's', runId: null, agentId: null, projectDir: '', dev: null, ino: null,
+                size: 1, mtimeMs: 1, offset: 1, tailHash: null, parserVersion: PARSER_VERSION, oversizeLines: 0, malformedLines: 0, newestVersion: null, readerState: null,
+            });
+        store.transaction(() => ['/claude.jsonl', '/codex.jsonl'].forEach((name, i) => file(i === 0 ? 'claude-code' : 'codex', name)));
+        // Each inside a read, as a report reads it, and outside one.
+        const both = (provider?: 'claude-code' | 'codex') => {
+            const outside = store.coverage(Number.MAX_SAFE_INTEGER, provider);
+            assert.deepStrictEqual(store.read(() => store.coverage(Number.MAX_SAFE_INTEGER, provider)), outside);
+            return span(outside);
+        };
+        assert.deepStrictEqual(both(), [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 8), 3, 2]);
+        assert.deepStrictEqual(both('codex'), [Date.UTC(2026, 9, 5), Date.UTC(2026, 9, 8), 2, 1]);
+        assert.deepStrictEqual(both('claude-code'), [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 1), 1, 1]);
+        const report = queryReport(store, query({ range: 'coverage', agent: 'codex' }));
+        assert.deepStrictEqual([report.agent, report.coverage.start, report.totals.coverage.requests], ['codex', Date.UTC(2026, 9, 5), 2]);
+        // Beside the agent's part, the whole history: what the page says was read, and how new it is.
+        assert.deepStrictEqual(span(report.history), [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 8), 3, 2]);
+        const every = queryReport(store, query({ range: 'coverage' }));
+        assert.deepStrictEqual(every.history, every.coverage);
+        // Codex's requests and limits gone, its file kept: Claude Code's part is every request there is, its files its own.
+        store.transaction(() => store.deleteRequestsFromFile('codex', '/codex.jsonl'));
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(store.file);
+        try {
+            raw.exec("DELETE FROM limit_hits WHERE provider = 'codex'");
+        } finally {
+            raw.close();
+        }
+        assert.deepStrictEqual([both('claude-code'), both('codex'), both()], [
+            [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 1), 1, 1],
+            [null, null, 0, 1],
+            [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 1), 1, 2],
+        ]);
+    });
+
     test("a session with no cwd is grouped by its project folder, another agent's apart from Claude Code's", () => {
         const stored = (provider: 'claude-code' | 'codex', projectDir: string) => ({
             provider,
@@ -1794,8 +1941,13 @@ suite('usage worker queries', () => {
 
         const one = await worker.send(ask(storeFile, { account: `${A}/` }));
         assert.ok(one.type === 'report' && one.report.totals.output === 10 && one.report.account === `${A}/`, JSON.stringify(one).slice(0, 200));
+        // One agent's, through the worker; an agent it does not read is no filter.
+        const codexOnly = await worker.send(ask(storeFile, { agent: 'codex' }));
+        assert.ok(codexOnly.type === 'report' && codexOnly.report.agent === 'codex' && codexOnly.report.totals.coverage.requests === 0, JSON.stringify(codexOnly).slice(0, 200));
         for (const bad of [
             { account: 'everyone' },
+            { agent: 'gemini' as unknown as 'codex' },
+            { agent: 'constructor' as unknown as 'codex' },
             { accountFiles: 'not a list' as unknown as string[] },
             { accountFiles: Array.from({ length: 17 }, () => config) },
             { signedInFiles: 'not a list' as unknown as string[] },

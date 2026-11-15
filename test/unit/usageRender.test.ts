@@ -24,7 +24,7 @@ function totals(processed: number, partial = false): UsageTotals {
 
 function report(overrides: Partial<UsageReport> = {}): UsageReport {
     const t = totals(1_278);
-    return {
+    const shown: Omit<UsageReport, 'history'> = {
         range: '7d',
         from: '2026-10-07',
         to: '2026-10-09',
@@ -53,7 +53,10 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
                 compactions: [{ provider: 'claude-code', uuid: 'c', sessionId: HOSTILE, kind: 'main', timestamp: 0, trigger: HOSTILE, preTokens: 160_000, postTokens: 12_000 }],
             },
         ],
-        dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: t }],
+        dayModels: [{ provider: 'claude-code', date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: t }],
+        agent: 'all',
+        agents: [{ provider: 'claude-code', sessions: 1, totals: t }],
+        agentsSeen: ['claude-code'],
         accounts: [{ key: 'none', owner: null, sessions: 1, totals: t, models: [], projects: [HOSTILE] }],
         accountsSeen: [{ key: 'none', owner: null, sessions: 1, firstTs: Date.UTC(2026, 9, 9, 10), lastTs: Date.UTC(2026, 9, 9, 11, 30), ordinal: null, organizationOrdinal: null, organizations: 0 }],
         accountNames: [],
@@ -63,6 +66,8 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
         coverage: { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 3, ahead: 0, files: 4, oversizeLines: 0, malformedLines: 0 },
         ...overrides,
     };
+    // Every agent's, unless a test says otherwise: the whole history is the report's.
+    return { ...shown, history: overrides.history ?? shown.coverage };
 }
 
 function view(overrides: Partial<PanelView> = {}): PanelView {
@@ -736,7 +741,7 @@ suite('usage page', () => {
     test('the CSV is apart by what a price depends on, and its notes say how to read those columns', () => {
         const t = totals(1);
         const row = (model: string, speed: string | null, inferenceGeo: string | null, promptSize: 'up-to-100k' | 'over-200k' | null) =>
-            ({ date: '2026-10-09', model, variant: null, speed, inferenceGeo, promptSize, totals: t });
+            ({ provider: 'claude-code' as const, date: '2026-10-09', model, variant: null, speed, inferenceGeo, promptSize, totals: t });
         const { csv } = renderFragments(
             view({ report: report({ dayModels: [row('claude-haiku-5-5', 'standard', 'global', 'over-200k'), row('claude-opus-5-5', 'fast', 'us', 'up-to-100k'), row('claude-opus-5-5', null, null, null)] }) }),
         );
@@ -803,7 +808,7 @@ suite('usage page', () => {
     });
 
     test('the page carries the nonce and a strict policy, and its data cannot close the script', () => {
-        const html = renderUsagePage('abc', "default-src 'none'; script-src 'nonce-abc'", renderFragments(view({ report: report({ dayModels: [{ date: '2026-10-09', model: '</script><script>alert(1)</script>', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: totals(1) }] }) })));
+        const html = renderUsagePage('abc', "default-src 'none'; script-src 'nonce-abc'", renderFragments(view({ report: report({ dayModels: [{ provider: 'claude-code', date: '2026-10-09', model: '</script><script>alert(1)</script>', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: totals(1) }] }) })));
         assert.ok(html.includes(`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-abc'">`));
         assert.strictEqual((html.match(/<\/script>/g) ?? []).length, 1);
     });
