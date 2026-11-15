@@ -160,7 +160,7 @@ function emptyState(view: PanelView): string | undefined {
                 <h3>Codex</h3>
                 <p>Turned on, LLM Tokenizer reads Codex's own session records, its command line's, its editor extension's and its desktop app's alike,
                 in the sessions and archived_sessions folders of its home (<code>~/.codex</code> by default), and shows how many tokens Codex processed: by day, project, session and model.
-                Of those records it reads only the lines that count a response's tokens or name its model and effort, the folder a session started in, and the usage limits reached;
+                Of those records it reads only the lines that count a response's tokens or name its model and effort, where a turn or a review begins and ends, the folder a session started in, and the usage limits reached;
                 Codex's credentials, configuration, prompt history and databases are never opened.</p>
                 <p>Kept, in the same database:</p>
                 <ul>

@@ -593,18 +593,31 @@ suite('usage page', () => {
         // The T shows to everyone with Claude Code's extension: this page is
         // where turning the feature on is decided.
         const readme = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'README.md'), 'utf8');
-        const kept = /Tokenizer\) keeps:\r?\n([\s\S]*?)\r?\n\r?\n/.exec(readme)?.[1];
-        assert.ok(kept, "the README's list of what is kept was not found");
-        const items = kept.split(/^- /m).map(item => item.replace(/\s+/g, ' ').trim()).filter(Boolean);
-        assert.strictEqual(items.length, 6, kept);
         const off = renderFragments(view({ status: 'off', report: undefined })).body.replace(/\s+/g, ' ');
-        for (const item of items) {
-            assert.ok(off.includes(item), `the off page does not say: ${item}`);
+        // Each agent's list, as its own section of the page says it.
+        const sections = off.split('<h3>');
+        for (const [agent, opening, count] of [
+            ['Claude Code', /Tokenizer\) keeps, of Claude Code's records:\r?\n([\s\S]*?)\r?\n\r?\n/, 6],
+            ['Codex', /Of Codex's, the same database keeps:\r?\n([\s\S]*?)\r?\n\r?\n/, 5],
+        ] as const) {
+            const kept = opening.exec(readme)?.[1];
+            assert.ok(kept, `the README's list of what is kept of ${agent}'s was not found`);
+            const items = kept.split(/^- /m).map(item => item.replace(/\s+/g, ' ').trim()).filter(Boolean);
+            assert.strictEqual(items.length, count, kept);
+            const section = sections.find(s => s.startsWith(`${agent}</h3>`)) ?? '';
+            for (const item of items) {
+                assert.ok(section.includes(item), `the off page does not say, of ${agent}'s: ${item}`);
+            }
+            assert.strictEqual((section.match(/<li>/g) ?? []).length, count, `${agent}'s list on the page holds more than the README's`);
         }
+        // What Codex's reading reads, as the README says it.
+        const reads = /Of Codex's records it reads only (.+?): a response's/.exec(readme.replace(/\s+/g, ' '))?.[1];
+        assert.ok(reads && off.includes(`Of those records it reads only ${reads};`), reads);
         // And what it shows tokens by, as the README's summary of the feature says it.
-        const by = /tokens Claude Code processed, by (.+?), read from/.exec(readme.replace(/\s+/g, ' '))?.[1];
+        const by = /tokens Claude Code and Codex processed, by (.+?), and Claude Code's by account, read from/.exec(readme.replace(/\s+/g, ' '))?.[1];
         assert.ok(by, "the README's summary of the feature was not found");
-        assert.strictEqual(by, /tokens Claude Code processed: by (.+?)\./.exec(off)?.[1]);
+        assert.strictEqual(by, /tokens Codex processed: by (.+?)\./.exec(off)?.[1]);
+        assert.strictEqual(by.replace('day, ', 'day, account, '), /tokens Claude Code processed: by (.+?)\./.exec(off)?.[1]);
     });
 
     test('while the history is read, the page says how far, every total is a lower bound, and Refresh is busy', () => {
