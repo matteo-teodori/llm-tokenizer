@@ -1662,6 +1662,26 @@ suite('usage page, with two agents', () => {
             ...overrides,
         });
 
+    test("a session's compactions are counted, and their sizes shown where the records give them: Codex's give none", () => {
+        const compaction = (provider: 'claude-code' | 'codex', uuid: string, sizes: boolean) => ({
+            provider,
+            uuid,
+            sessionId: 's',
+            kind: 'main' as const,
+            timestamp: 0,
+            trigger: null,
+            preTokens: sizes ? 160_000 : null,
+            postTokens: sizes ? 12_000 : null,
+        });
+        const sessions = [
+            { ...report().sessions[0], compactions: [compaction('claude-code', 'c1', true)] },
+            { ...codexSession, compactions: [compaction('codex', 'x1', false), compaction('codex', 'x2', false), compaction('codex', 'x3', false)] },
+        ];
+        const body = renderFragments(view({ report: both({ sessions }) })).body;
+        assert.ok(body.includes('<span title="160,000 → 12,000">1</span>'), body.slice(body.indexOf('Compactions'), body.indexOf('Compactions') + 200));
+        assert.ok(!body.includes('? → ?') && /<td[^>]*>3<\/td>/.test(body));
+    });
+
     test('a model no record named is an empty cell in the CSV, with a note', () => {
         const t = both().totals;
         const fragments = renderFragments(

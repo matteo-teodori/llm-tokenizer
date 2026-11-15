@@ -51,6 +51,10 @@
  *   as a subagent's first record is written just before its settings.
  *   The project is `session_meta.cwd`; a subagent's session is its root
  *   thread's (`session_id`, 0.142 on), else its parent's.
+ * - A compaction is a `compacted` line the thread writes once it has
+ *   answered, read from its first bytes, with no size, which Codex does not
+ *   record. One before the thread's first response is the history a fork
+ *   begins with (measured, 20 of 402), not a compaction of its own.
  * - A usage limit is the snapshot a 429 refusal leaves in a `token_count`,
  *   with the window that was full, or else the meter it names (`limit_id`:
  *   Codex's own `codex`, another as `premium`, which has no windows). From
@@ -125,10 +129,14 @@ const LATEST_TIME = Date.UTC(2100, 0, 1);
 
 /** The line types read, by their first `"type":"` value; the payload's own type for an `event_msg`. */
 const TYPE_KEY = Buffer.from('"type":"');
-const WANTED = new Set(['session_meta', 'turn_context', 'token_usage_record']);
+const WANTED = new Set(['session_meta', 'turn_context', 'token_usage_record', 'compacted']);
 const WANTED_EVENTS = new Set(['token_count', 'task_started', 'thread_settings_applied', 'task_complete', 'turn_aborted', 'entered_review_mode', 'exited_review_mode']);
-/** The events read from their bytes alone, never parsed: a turn's end can hold its last message, a review's start its prompt. */
-const UNPARSED = new Set(['task_complete', 'turn_aborted', 'entered_review_mode', 'exited_review_mode']);
+/**
+ * The lines read from their bytes alone, never parsed: a turn's end can hold
+ * its last message, a review's start its prompt, a compaction the whole
+ * history it replaces, megabytes of it.
+ */
+const UNPARSED = new Set(['task_complete', 'turn_aborted', 'entered_review_mode', 'exited_review_mode', 'compacted']);
 
 /**
  * The longest line parsed here: twenty times the longest measured of the
@@ -197,6 +205,8 @@ interface RolloutState {
     snapshot: { limitType: string; resetsAt: number | null } | null;
     /** A review under way: whether it runs in this file, or a subagent's token counts are written into it. */
     review: { own: boolean } | null;
+    /** Whether the file's own thread has answered: a compaction before then is the history a fork begins with. */
+    responded: boolean;
     /** When the latest request began, by its turn_context, until a token count, or its turn ended: see `unparsed`. */
     opened: number | null;
     /** The last running total a review subagent's token count wrote here, until the file's own next one: what a resume from 0.78 seeds its total with. */
@@ -222,6 +232,7 @@ function freshState(file: TranscriptFile): RolloutState {
         pending: null,
         snapshot: null,
         review: null,
+        responded: false,
         opened: null,
         forwarded: null,
         told: null,
@@ -451,7 +462,7 @@ class Reading {
         if (UNPARSED.has(type)) {
             // Read from its bytes, and so never failing to parse: a crash may
             // have cut it short all the same, and a resume written onto it.
-            const next = resumed ? -1 : lastLineStart(bytes, 1);
+            const next = resumed ? -1 : lastLineStart(bytes, Math.max(1, bytes.length - MAX_PARSED_BYTES));
             if (next > 0) {
                 this.unparsed(type, bytes.subarray(0, next));
                 return this.line(bytes.subarray(next), offset + next, true);
@@ -552,6 +563,8 @@ class Reading {
         } else if (type === 'turn_aborted') {
             // The request under way ended with no count: nothing begun is left.
             this.state.opened = null;
+        } else if (type === 'compacted') {
+            this.compacted(ts);
         } else if (type === 'entered_review_mode') {
             // Before 0.51 the review ran here, its first request begun just
             // after this, or, raced, just before, with no count since. From
@@ -821,6 +834,24 @@ class Reading {
         }
     }
 
+    /** A compaction of the thread's own history, once it has answered: Codex records no size. */
+    private compacted(ts: number): void {
+        const sessionId = this.state.session ?? this.state.thread;
+        if (!this.state.responded || !sessionId) {
+            return;
+        }
+        this.result.compactions.push({
+            provider: PROVIDER,
+            uuid: `${this.state.thread ?? ''}:${ts}`,
+            sessionId,
+            kind: this.state.kind,
+            timestamp: ts,
+            trigger: null,
+            preTokens: null,
+            postTokens: null,
+        });
+    }
+
     /** A turn or a request begins: whatever was refused before it is settled, and its own snapshots are yet to come. */
     private begin(): void {
         this.settle();
@@ -907,6 +938,7 @@ class Reading {
             this.count('bad-field:usage');
             return;
         }
+        this.state.responded = true;
         // Cached and cache-written tokens are part of the input, and reasoning part of the output.
         const cacheRead = Math.min(u.cached, u.input);
         const cacheCreation = Math.min(u.cacheWrite, u.input - cacheRead);

@@ -160,14 +160,14 @@ function emptyState(view: PanelView): string | undefined {
                 <h3>Codex</h3>
                 <p>Turned on, LLM Tokenizer reads Codex's own session records, its command line's, its editor extension's and its desktop app's alike,
                 in the sessions and archived_sessions folders of its home (<code>~/.codex</code> by default), and shows how many tokens Codex processed: by day, project, session and model.
-                Of those records it reads only the lines that count a response's tokens or name its model and effort, where a turn or a review begins and ends, the folder a session started in, and the usage limits reached;
+                Of those records it reads only the lines that count a response's tokens or name its model and effort, where a turn or a review begins and ends, where a history is compacted, the folder a session started in, and the usage limits reached;
                 Codex's credentials, configuration, prompt history and databases are never opened.</p>
                 <p>Kept, in the same database:</p>
                 <ul>
                     <li>each response's token counts, model, effort, time and Codex version, and its ids: response, session, and the subagent thread it came from;</li>
                     <li>the folder each session started in;</li>
                     <li>each session record's path, size, file id and how far it was read, with a hash of the last 64 bytes read and its running totals there, to read on from them;</li>
-                    <li>the usage limits reached, with when they reset;</li>
+                    <li>when each compaction happened, and the usage limits reached, with when they reset;</li>
                     <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
                 </ul>
                 <p>Never kept: prompts, responses, reasoning, tool inputs or output. Nothing is sent anywhere. The history outlives Codex's own records, compressed or deleted; Clear Agent Usage History removes it.</p>
@@ -801,7 +801,9 @@ function sessions(report: UsageReport, view: PanelView): string {
                 { key: 'compactions', label: 'Compactions', numeric: true, width: agents ? '13%' : '14%' },
             ],
             report.sessions.map(s => {
+                // The sizes the records give: Codex's give none.
                 const compactions = s.compactions
+                    .filter(c => c.preTokens !== null || c.postTokens !== null)
                     .map(c => `${c.preTokens?.toLocaleString('en-US') ?? '?'} → ${c.postTokens?.toLocaleString('en-US') ?? '?'}`)
                     .join(', ');
                 const between =
@@ -825,7 +827,7 @@ function sessions(report: UsageReport, view: PanelView): string {
                         between ? `<span title="${escapeHtml(between)}">${formatActive(s.activeMs)}</span>` : formatActive(s.activeMs),
                         s.totals.coverage.requests.toLocaleString('en-US'),
                         processedCell(view, s.totals, s.models),
-                        s.compactions.length > 0 ? `<span title="${escapeHtml(compactions)}">${s.compactions.length}</span>` : '0',
+                        compactions ? `<span title="${escapeHtml(compactions)}">${s.compactions.length}</span>` : String(s.compactions.length),
                     ],
                 };
             }),

@@ -314,7 +314,8 @@ Of Codex's, the same database keeps:
 - each session record's path, size, file id and how far it was read, with a
   hash of the last 64 bytes read and its running totals there, to read on
   from them;
-- the usage limits reached, with when they reset;
+- when each compaction happened, and the usage limits reached, with when they
+  reset;
 - the window's process id and this machine's name, which each import writes
   so that two windows never import at once.
 
@@ -343,10 +344,11 @@ managed settings files, it keeps three `env` entries and nothing else:
 `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
 
 Of Codex's records it reads only the lines that count a response's tokens or
-name its model and effort, where a turn or a review begins and ends, the
-folder a session started in, and the usage limits reached: a response's
-content, a tool's output and a compacted history are never decoded. Codex's
-credentials, configuration, prompt history and databases are never opened.
+name its model and effort, where a turn or a review begins and ends, where a
+history is compacted, the folder a session started in, and the usage limits
+reached: a response's content, a tool's output and a compacted history are
+never decoded. Codex's credentials, configuration, prompt history and
+databases are never opened.
 
 Its settings are machine settings, so a repository's settings cannot turn it
 on or point it at another folder; the names you give accounts are an
@@ -397,6 +399,8 @@ add them to `settingsSync.ignoredSettings`.
 - A Codex review before version 0.142, whose records name no session to count
   in: it is a session of its own.
 - A Codex refusal at a usage limit before version 0.41, which wrote nothing.
+- The size of a Codex compaction, which its records never give: a session's
+  compactions are counted, with no sizes on hover.
 - A compressed Codex record cut short: it is counted among the files that
   could not be read.
 

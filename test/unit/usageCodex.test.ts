@@ -651,6 +651,30 @@ suite('usage Codex rollouts', () => {
         }
     });
 
+    test("a compaction is a compacted line the thread writes once it has answered, read from its bytes alone, with no size; the one a fork's history begins with is not its own", async () => {
+        const compacted = (second: number) =>
+            `${JSON.stringify({ timestamp: at(second), type: 'compacted', payload: { message: '', replacement_history: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x'.repeat(200) }] }] } })}\n`;
+        const result = await read(rollout([meta(0), context(1, 'gpt-5.5'), record(2, 1), compacted(3), context(4, 'gpt-5.5'), record(5, 2)]));
+        assert.deepStrictEqual(
+            result.compactions.map(c => [c.provider, c.sessionId, c.kind, c.timestamp, c.trigger, c.preTokens, c.postTokens]),
+            [['codex', THREAD, 'main', Date.parse(at(3)), null, null, null]],
+        );
+        assert.deepStrictEqual([result.requests.length, result.malformed.size], [2, 0]);
+        // Its history is never decoded: one broken past its first bytes is a compaction all the same.
+        const broken = `{"timestamp":"${at(3)}","type":"compacted","payload":{"message":"","replacement_history":[{"type":"mess\n`;
+        const cut = await read(rollout([meta(0), context(1, 'gpt-5.5'), record(2, 1), broken]));
+        assert.deepStrictEqual([cut.compactions.length, [...cut.malformed]], [1, []]);
+        // A spawned subagent's file begins with its context as a compacted line: its own compactions come once it has answered.
+        const spawned = meta(0, { session_id: ROOT, source: { subagent: { thread_spawn: { parent_thread_id: PARENT, depth: 1 } } } });
+        const lines = [spawned, compacted(0.001), context(1, 'gpt-5.5'), record(2, 1), compacted(9)];
+        assert.deepStrictEqual((await read(rollout(lines))).compactions.map(c => [c.sessionId, c.kind, c.timestamp]), [[ROOT, 'subagent', Date.parse(at(9))]]);
+        // Read as it was written, the same.
+        const live = rollout(lines.slice(0, 3));
+        const first = await read(live);
+        fs.appendFileSync(live, lines.slice(3).join(''));
+        assert.deepStrictEqual([first.compactions, (await read(live, first.checkpoint)).compactions.map(c => c.timestamp)], [[], [Date.parse(at(9))]]);
+    });
+
     test('a rollout read on from its checkpoint goes on from what it had made of the lines before it: its thread, model and running total', async () => {
         const file = rollout([meta(0, { cli_version: '0.120.0' }), context(1, 'gpt-5.2-codex'), tokenCount(5, sum(1), usage(1))]);
         const first = await read(file);
