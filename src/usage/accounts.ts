@@ -9,9 +9,17 @@
 
 import { CONFUSABLES } from './confusables';
 import type { AccountName } from './store';
-import type { SessionOwner } from './types';
+import type { SessionOwner, UsageProvider } from './types';
 
-/** The key of the sessions whose transcripts record no owner. */
+/**
+ * The agent whose accounts the panel tells apart: Claude Code, whose
+ * transcripts record the account each session is signed in to. Another
+ * agent's requests are in no account's row, and an account chosen keeps
+ * Claude Code's alone.
+ */
+export const ACCOUNT_PROVIDER: UsageProvider = 'claude-code';
+
+/** The key of Claude Code's sessions whose transcripts record no owner: another agent's are in no account's row, this one's included. */
 export const NOT_RECORDED = 'none';
 /** The filter that keeps every session. */
 export const ALL_ACCOUNTS = 'all';

@@ -229,6 +229,7 @@ suite('usage panel', () => {
     test('a time its zone cannot place is a dash, and the update still goes out', async () => {
         const { service, fake } = fakeService();
         const session = {
+            provider: 'claude-code' as const,
             sessionId: 's',
             project: { kind: 'root' as const, path: '/repo' },
             label: 'repo',

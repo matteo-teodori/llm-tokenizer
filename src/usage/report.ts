@@ -7,11 +7,11 @@
  * gathers the rows; the rules are here, and tested here.
  */
 
-import { ALL_ACCOUNTS, NOT_RECORDED, type AccountNumber } from './accounts';
+import { ACCOUNT_PROVIDER, ALL_ACCOUNTS, NOT_RECORDED, type AccountNumber } from './accounts';
 import { BUCKET_MS, emptyTotals, localDate, mergeTotals, type UsageTotals } from './aggregate';
 import { projectLabel, type ProjectRef } from './projects';
 import type { AccountName } from './store';
-import type { BucketSums, Compaction, LimitHit, OwnerSpan, PromptSize, SessionOwner, StoreCoverage, TranscriptKind } from './types';
+import type { BucketSums, Compaction, LimitHit, OwnerSpan, PromptSize, SessionOwner, StoreCoverage, TranscriptKind, UsageProvider } from './types';
 
 /** Today, the last 7 or 30 local days, or everything held. Never "all time". */
 export type RangeKey = 'today' | '7d' | '30d' | 'coverage';
@@ -20,6 +20,8 @@ export const RANGE_KEYS: readonly RangeKey[] = ['today', '7d', '30d', 'coverage'
 
 /** A session as the report needs it, its project already resolved. */
 export interface ReportSession {
+    /** The agent it was made with: a session is its agent's and its id, never its id alone. */
+    provider: UsageProvider;
     sessionId: string;
     project: ProjectRef;
     /** Groups sessions into projects: equal for two spellings of one folder. */
@@ -72,7 +74,11 @@ export interface ReportOptions {
     zone: string;
     now: number;
     scope: 'all' | 'workspace';
-    /** One account's requests only, by its key, or NOT_RECORDED's; every request when absent or ALL_ACCOUNTS. */
+    /**
+     * One account's requests only, by its key, or NOT_RECORDED's; every
+     * request when absent or ALL_ACCOUNTS. An account is Claude Code's (see
+     * ACCOUNT_PROVIDER): one chosen keeps no other agent's request.
+     */
     account?: string;
     /** Rows kept per list, largest first; the rest are counted in `omitted`. */
     maxSessions?: number;
@@ -94,13 +100,15 @@ export interface ProjectRow {
 }
 
 export interface SessionRow {
+    provider: UsageProvider;
     sessionId: string;
     project: ProjectRef;
     label: string;
     /**
      * The keys of the accounts its requests in the range were made with (see
      * `accountKey`), the first used first, at most MAX_SESSION_ACCOUNTS;
-     * `moreAccounts` counts the rest.
+     * `moreAccounts` counts the rest. None for another agent's session than
+     * ACCOUNT_PROVIDER's.
      */
     accounts: string[];
     moreAccounts: number;
@@ -115,7 +123,8 @@ export interface SessionRow {
 
 /**
  * An account's requests in the range: an account and organization, by key,
- * or those of the sessions that record none.
+ * or those of Claude Code's sessions that record none. Another agent's are
+ * in no row (see ACCOUNT_PROVIDER).
  */
 export interface AccountRow {
     key: string;
@@ -147,10 +156,14 @@ export interface AccountSeen {
     organizations: number;
 }
 
-/** The hits of one limit window: one limit type and one reset time, on one account. */
+/** The hits of one limit window: one agent's, of one limit type and one reset time, on one account. */
 export interface LimitWindow {
-    /** The account that hit it, by key: a limit is an account's. */
-    account: string;
+    provider: UsageProvider;
+    /**
+     * The account that hit it, by key: a limit is an account's. Null for an
+     * agent whose accounts are not told apart (see ACCOUNT_PROVIDER).
+     */
+    account: string | null;
     limitType: string;
     resetsAt: number | null;
     hits: number;
@@ -189,10 +202,13 @@ export interface UsageReport {
     sessions: SessionRow[];
     /** Every input of a hand-made cost calculation, by day and model. */
     dayModels: DayModelRow[];
-    /** In the range, by processed; the sessions with no recorded owner in one row of their own. */
+    /**
+     * In the range, by processed; the sessions with no recorded owner in one
+     * row of their own. Claude Code's alone (see ACCOUNT_PROVIDER).
+     */
     accounts: AccountRow[];
     /**
-     * Every account in the history, whatever the range and scope, by number;
+     * Every Claude Code account in the history, whatever the range and scope, by number;
      * those with no owner last. Capped, as the lists are, at the accounts
      * with the most sessions, and those every other list and the filter
      * name, so that each has its label.
@@ -312,13 +328,20 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
             : rangeStart(options.range, to);
     const inRange = (date: string) => from === null || date >= from;
 
-    const sessionsById = new Map(input.sessions.map(s => [s.sessionId, s]));
+    const sessionsById = new Map(input.sessions.map(s => [sessionKey(s.provider, s.sessionId), s]));
     const account = options.account ?? ALL_ACCOUNTS;
-    // The account requests were made with: the one they record, else their
-    // session's at their time, and its first owner before any.
-    const ownerOf = (owner: SessionOwner | null | undefined, session: ReportSession | undefined, ts: number) =>
-        owner ?? (session ? ownerAt(session.owners, ts) : null);
-    const ofAccount = (key: string) => account === ALL_ACCOUNTS || key === account;
+    // The account requests were made with, by key: the one they record, else
+    // their session's at their time, and its first owner before any; the
+    // sessions' that record none, NOT_RECORDED. Null for another agent's than
+    // the one whose accounts are told apart: they are no account's.
+    const accountOf = (provider: UsageProvider, owner: SessionOwner | null | undefined, session: ReportSession | undefined, ts: number) => {
+        if (provider !== ACCOUNT_PROVIDER) {
+            return { owner: null, key: null };
+        }
+        const made = owner ?? (session ? ownerAt(session.owners, ts) : null);
+        return { owner: made, key: made ? keyOf(made) : NOT_RECORDED };
+    };
+    const ofAccount = (key: string | null) => account === ALL_ACCOUNTS || key === account;
     const inScope = (session: ReportSession | undefined) => options.scope === 'all' || session?.inWorkspace === true;
 
     let totals = emptyTotals();
@@ -328,6 +351,7 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
     const efforts = new Map<string | null, UsageTotals>();
     const dayModels = new Map<string, DayModelRow>();
     const projects = new Map<string, { row: ProjectRow; sessionIds: Set<string>; models: Map<string, ModelRow> }>();
+    // Sessions by `sessionKey`, here and below: one id can be two agents'.
     const sessions = new Map<string, { row: SessionRow; models: Map<string, ModelRow> }>();
     const accounts = new Map<string, { row: AccountRow; sessionIds: Set<string>; models: Map<string, ModelRow>; projects: Map<string, number> }>();
     // The accounts each session's requests in the range were made with, and when each was first.
@@ -338,13 +362,13 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
 
     for (const sums of input.sums) {
         const date = localDate(sums.bucket * BUCKET_MS, zone);
-        const session = sessionsById.get(sums.sessionId);
-        const owner = ownerOf(sums.owner, session, sums.firstTs);
-        const accountKey = owner ? keyOf(owner) : NOT_RECORDED;
+        const key = sessionKey(sums.provider, sums.sessionId);
+        const session = sessionsById.get(key);
+        const { owner, key: accountKey } = accountOf(sums.provider, sums.owner, session, sums.firstTs);
         if (!inScope(session) || !ofAccount(accountKey)) {
             continue;
         }
-        noteActivity(activity, sums, inRange(date));
+        noteActivity(activity, key, sums, inRange(date));
         if (!inRange(date)) {
             continue;
         }
@@ -383,32 +407,35 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
             projects.set(projectKey, p);
         }
         p.row.totals = mergeTotals(p.row.totals, t);
-        p.sessionIds.add(sums.sessionId);
+        p.sessionIds.add(key);
         addModel(p.models, modelKey, sums, t);
 
-        let a = accounts.get(accountKey);
-        if (!a) {
-            a = {
-                row: { key: accountKey, owner, sessions: 0, totals: emptyTotals(), models: [], projects: [] },
-                sessionIds: new Set(),
-                models: new Map(),
-                projects: new Map(),
-            };
-            accounts.set(accountKey, a);
+        if (accountKey !== null) {
+            let a = accounts.get(accountKey);
+            if (!a) {
+                a = {
+                    row: { key: accountKey, owner, sessions: 0, totals: emptyTotals(), models: [], projects: [] },
+                    sessionIds: new Set(),
+                    models: new Map(),
+                    projects: new Map(),
+                };
+                accounts.set(accountKey, a);
+            }
+            a.row.totals = mergeTotals(a.row.totals, t);
+            a.sessionIds.add(key);
+            addModel(a.models, modelKey, sums, t);
+            const projectName = projectLabel(project);
+            a.projects.set(projectName, (a.projects.get(projectName) ?? 0) + t.processed);
+            const used = sessionAccounts.get(key) ?? new Map<string, number>();
+            used.set(accountKey, Math.min(used.get(accountKey) ?? Infinity, sums.firstTs));
+            sessionAccounts.set(key, used);
         }
-        a.row.totals = mergeTotals(a.row.totals, t);
-        a.sessionIds.add(sums.sessionId);
-        addModel(a.models, modelKey, sums, t);
-        const projectName = projectLabel(project);
-        a.projects.set(projectName, (a.projects.get(projectName) ?? 0) + t.processed);
-        const used = sessionAccounts.get(sums.sessionId) ?? new Map<string, number>();
-        used.set(accountKey, Math.min(used.get(accountKey) ?? Infinity, sums.firstTs));
-        sessionAccounts.set(sums.sessionId, used);
 
-        let s = sessions.get(sums.sessionId);
+        let s = sessions.get(key);
         if (!s) {
             s = {
                 row: {
+                    provider: sums.provider,
                     sessionId: sums.sessionId,
                     project,
                     label: projectLabel(project),
@@ -423,14 +450,14 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
                 },
                 models: new Map(),
             };
-            sessions.set(sums.sessionId, s);
+            sessions.set(key, s);
         }
         s.row.totals = mergeTotals(s.row.totals, t);
         addModel(s.models, modelKey, sums, t);
     }
 
     for (const c of input.compactions) {
-        const s = sessions.get(c.sessionId);
+        const s = sessions.get(sessionKey(c.provider, c.sessionId));
         // The main conversation's: a subagent compacts its own context.
         if (s && c.kind === 'main' && inRange(localDate(c.timestamp, zone))) {
             s.row.compactions.push(c);
@@ -442,10 +469,10 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         sessions: sessionIds.size,
         models: byProcessed([...m.values()]),
     }));
-    const sessionRows = [...sessions.values()].map(({ row, models: m }) => ({
+    const sessionRows = [...sessions].map(([key, { row, models: m }]) => ({
         ...row,
-        ...firstUsed(sessionAccounts.get(row.sessionId)),
-        activeMs: activeTime(activity.get(row.sessionId)),
+        ...firstUsed(sessionAccounts.get(key)),
+        activeMs: activeTime(activity.get(key)),
         models: byProcessed([...m.values()]),
     }));
     const maxProjects = options.maxProjects ?? DEFAULT_MAX_PROJECTS;
@@ -460,10 +487,7 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         .sort((a, b) => compareText(b.date, a.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model))
         .slice(0, MAX_DAY_MODELS)
         .sort((a, b) => compareText(a.date, b.date) || b.totals.processed - a.totals.processed || compareText(a.model, b.model));
-    const hitAccount = (hit: LimitHit) => {
-        const owner = ownerOf(hit.owner, sessionsById.get(hit.sessionId), hit.timestamp);
-        return owner ? keyOf(owner) : NOT_RECORDED;
-    };
+    const hitAccount = (hit: LimitHit) => accountOf(hit.provider, hit.owner, sessionsById.get(sessionKey(hit.provider, hit.sessionId)), hit.timestamp).key;
     const windows = limitWindows(
         input.limitHits.filter(hit => ofAccount(hitAccount(hit))),
         hitAccount,
@@ -479,14 +503,21 @@ export function buildReport(input: ReportInput, options: ReportOptions): UsageRe
         }))
         .sort((a, b) => b.totals.processed - a.totals.processed || compareText(a.key, b.key));
     const listedSessions = sessionRows
-        .sort((a, b) => b.totals.processed - a.totals.processed || (b.lastTs ?? 0) - (a.lastTs ?? 0) || compareText(a.sessionId, b.sessionId))
+        .sort((a, b) => b.totals.processed - a.totals.processed || (b.lastTs ?? 0) - (a.lastTs ?? 0) || compareText(a.sessionId, b.sessionId) || compareText(a.provider, b.provider))
         .slice(0, maxSessions);
     const listedAccounts = accountRows.slice(0, MAX_ACCOUNTS);
     const listedWindows = windows.slice(-MAX_LIMIT_WINDOWS);
     // Past the cap, the accounts with the most sessions are kept, and every
     // one the page names elsewhere.
-    const named = new Set([account, ...listedAccounts.map(a => a.key), ...listedSessions.flatMap(s => s.accounts), ...listedWindows.map(w => w.account)]);
-    const seenRows = numbered(accountsSeen(input.sessions), input.accountNumbers).sort((a, b) => b.sessions - a.sessions || bySeenOrder(a, b));
+    const named = new Set([
+        account,
+        ...listedAccounts.map(a => a.key),
+        ...listedSessions.flatMap(s => s.accounts),
+        ...listedWindows.flatMap(w => (w.account === null ? [] : [w.account])),
+    ]);
+    const seenRows = numbered(accountsSeen(input.sessions.filter(s => s.provider === ACCOUNT_PROVIDER)), input.accountNumbers).sort(
+        (a, b) => b.sessions - a.sessions || bySeenOrder(a, b),
+    );
     const seenKept = seenRows.filter((a, i) => i < MAX_ACCOUNTS_SEEN || named.has(a.key));
 
     return {
@@ -555,11 +586,11 @@ interface BucketActivity {
     inRange: boolean;
 }
 
-function noteActivity(activity: Map<string, Map<number, BucketActivity>>, sums: BucketSums, inRange: boolean): void {
-    let buckets = activity.get(sums.sessionId);
+function noteActivity(activity: Map<string, Map<number, BucketActivity>>, key: string, sums: BucketSums, inRange: boolean): void {
+    let buckets = activity.get(key);
     if (!buckets) {
         buckets = new Map();
-        activity.set(sums.sessionId, buckets);
+        activity.set(key, buckets);
     }
     const bucket = buckets.get(sums.bucket);
     if (!bucket) {
@@ -661,11 +692,11 @@ function usedOwners(s: ReportSession): OwnerSpan[] {
 function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
     const seen = new Map<string, AccountSeen>();
     const counted = new Map<string, string>();
-    const note = (owner: SessionOwner | null, sessionId: string, from: number | null, to: number | null) => {
+    const note = (owner: SessionOwner | null, session: string, from: number | null, to: number | null) => {
         const key = owner ? keyOf(owner) : NOT_RECORDED;
         const a = seen.get(key) ?? { key, owner, sessions: 0, firstTs: null, lastTs: null, ordinal: null, organizationOrdinal: null, organizations: 0 };
-        if (counted.get(key) !== sessionId) {
-            counted.set(key, sessionId);
+        if (counted.get(key) !== session) {
+            counted.set(key, session);
             a.sessions++;
         }
         // Never after its end there: a session's first record, or the one that began a change,
@@ -676,6 +707,7 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
         seen.set(key, a);
     };
     for (const s of sessions) {
+        const session = sessionKey(s.provider, s.sessionId);
         const spans = usedOwners(s);
         // Made with one account or none: its last request, or a limit reached
         // after it, the account's own or one that records none, which ownerAt
@@ -688,7 +720,7 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
         const last = latest(s.lastTs, latest(ownedEnd, unowned?.lastTs ?? null));
         // The sessions that record none: from requests and limits before the clock, as nothing numbers them.
         if (spans.length === 0 && (s.lastTs !== null || unowned !== null)) {
-            note(null, s.sessionId, earliest(s.firstTs, unowned?.firstTs ?? null), last);
+            note(null, session, earliest(s.firstTs, unowned?.firstTs ?? null), last);
         }
         // Made with more than one account: each one's last use, those that record none by their time.
         const lastUse = new Map<string, number>();
@@ -704,7 +736,7 @@ function accountsSeen(sessions: ReportSession[]): AccountSeen[] {
         spans.forEach((o, i) =>
             note(
                 o.owner,
-                s.sessionId,
+                session,
                 i === 0 ? earliest(earliest(s.firstTs, o.sinceTs), s.unownedHitTs) : o.sinceTs,
                 spans.length > 1 ? (lastUse.get(keyOf(o.owner)) ?? null) : last,
             ),
@@ -761,8 +793,18 @@ function keyOf(owner: SessionOwner): string {
     return `${owner.accountUuid}/${owner.organizationUuid ?? ''}`;
 }
 
-/** Limit hits in the range, one row per window: an account, a limit type and its reset time. */
-function limitWindows(hits: LimitHit[], accountOf: (hit: LimitHit) => string, zone: string, inRange: (date: string) => boolean): LimitWindow[] {
+/** A session's key: its agent's, which holds no NUL, and its id, which can be another agent's too. */
+function sessionKey(provider: UsageProvider, sessionId: string): string {
+    return `${provider}\u0000${sessionId}`;
+}
+
+/** Limit hits in the range, one row per window: an agent, an account, a limit type and its reset time. */
+function limitWindows(
+    hits: LimitHit[],
+    accountOf: (hit: LimitHit) => string | null,
+    zone: string,
+    inRange: (date: string) => boolean,
+): LimitWindow[] {
     const windows = new Map<string, LimitWindow>();
     for (const hit of hits) {
         const date = localDate(hit.timestamp, zone);
@@ -770,10 +812,11 @@ function limitWindows(hits: LimitHit[], accountOf: (hit: LimitHit) => string, zo
             continue;
         }
         const account = accountOf(hit);
-        const key = `${account}\u0000${hit.limitType}\u0000${hit.resetsAt ?? ''}`;
+        // No account is a key's empty string: none holds a NUL either.
+        const key = `${hit.provider}\u0000${account ?? ''}\u0000${hit.limitType}\u0000${hit.resetsAt ?? ''}`;
         const window = windows.get(key);
         if (!window) {
-            windows.set(key, { account, limitType: hit.limitType, resetsAt: hit.resetsAt, hits: 1, firstTs: hit.timestamp, date });
+            windows.set(key, { provider: hit.provider, account, limitType: hit.limitType, resetsAt: hit.resetsAt, hits: 1, firstTs: hit.timestamp, date });
         } else {
             window.hits++;
             if (hit.timestamp < window.firstTs) {
@@ -782,7 +825,7 @@ function limitWindows(hits: LimitHit[], accountOf: (hit: LimitHit) => string, zo
             }
         }
     }
-    return [...windows.values()].sort((a, b) => a.firstTs - b.firstTs || compareText(a.limitType, b.limitType));
+    return [...windows.values()].sort((a, b) => a.firstTs - b.firstTs || compareText(a.limitType, b.limitType) || compareText(a.provider, b.provider));
 }
 
 function add<K>(map: Map<K, UsageTotals>, key: K, t: UsageTotals): void {

@@ -35,7 +35,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { isSyntheticModel, variantOf } from './modelIds';
-import type { Compaction, LimitHit, OwnerChange, SessionOwner, TranscriptKind, UsageRequest } from './types';
+import type { Compaction, LimitHit, OwnerChange, SessionOwner, TranscriptKind, UsageProvider, UsageRequest } from './types';
+
+/** The agent whose records this module reads. */
+const PROVIDER: UsageProvider = 'claude-code';
 
 /**
  * Bumped whenever what a line becomes changes.
@@ -873,6 +876,7 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
         began(reading, sessionId, timestamp);
         const resetsAt = quota.resetsAt;
         result.limitHits.push({
+            provider: PROVIDER,
             uuid,
             sessionId,
             timestamp,
@@ -931,7 +935,7 @@ function parseAssistant(r: Record<string, unknown>, offset: number, file: Transc
     };
 
     result.requests.push({
-        provider: 'claude-code',
+        provider: PROVIDER,
         messageId,
         requestId: boundedString(r.requestId, MAX_ID),
         sessionId,
@@ -974,6 +978,7 @@ function parseCompaction(r: Record<string, unknown>, file: TranscriptFile, resul
     const tokens = (value: unknown): number | null =>
         typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_COUNTER ? value : null;
     result.compactions.push({
+        provider: PROVIDER,
         uuid,
         sessionId,
         // A subagent compacts its own context, not the main conversation's.

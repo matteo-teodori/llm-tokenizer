@@ -492,7 +492,7 @@ suite('usage history store', () => {
             return req({ messageId: `m${n}`, requestId: `r${n}`, byteOffset: n, model, timestamp: at(minute), input: context, ...extra });
         };
         const latest = () => {
-            const l = store.latestMainRequest('session-a');
+            const l = store.latestMainRequest('claude-code', 'session-a');
             return [l?.model, l?.variant, l?.input, l?.largestContext];
         };
         store.transaction(() =>
@@ -512,8 +512,8 @@ suite('usage history store', () => {
         assert.deepStrictEqual(latest(), ['claude-sonnet-4-6', null, 50_000, 50_000]);
         // A compaction's size before, since then, is a context the window held;
         // one while Opus ran says nothing of Sonnet's.
-        const compaction = (uuid: string, minute: number, preTokens: number) => ({ uuid, sessionId: 'session-a', kind: 'main' as const, timestamp: at(minute), trigger: 'auto', preTokens, postTokens: 1 });
-        store.transaction(() => store.insertCompactions('claude-code', [compaction('on-opus', 1.5, 500_000), compaction('since', 5, 230_000)]));
+        const compaction = (uuid: string, minute: number, preTokens: number) => ({ provider: 'claude-code' as const, uuid, sessionId: 'session-a', kind: 'main' as const, timestamp: at(minute), trigger: 'auto', preTokens, postTokens: 1 });
+        store.transaction(() => store.insertCompactions([compaction('on-opus', 1.5, 500_000), compaction('since', 5, 230_000)]));
         assert.deepStrictEqual(latest(), ['claude-sonnet-4-6', null, 50_000, 230_000]);
     });
 
@@ -730,7 +730,7 @@ suite('usage history store', () => {
         );
         assert.deepStrictEqual([...migrated.requests()].map(r => [r.messageId, r.owner]), [['kept', null]]);
         assert.deepStrictEqual(migrated.sessions().map(s => [s.sessionId, s.cwd, s.owners]), [['session-a', '/work', []]]);
-        assert.deepStrictEqual(migrated.accountNames(), []);
+        assert.deepStrictEqual(migrated.accountNames('claude-code'), []);
     });
 
     const A = { accountUuid: 'a', organizationUuid: 'o' };
@@ -822,11 +822,11 @@ suite('usage history store', () => {
         // One that does not represent it changes nothing.
         store.transaction(() => store.upsertRequests([req({ owner: B, parserVersion: 3, output: 1 })]));
         assert.deepStrictEqual([...store.requests()].map(r => [r.output, r.owner]), [[5, A]]);
-        const hit = { uuid: 'h', sessionId: 'session-a', timestamp: 1, limitType: 'five_hour', resetsAt: null };
-        store.transaction(() => store.insertLimitHits('claude-code', [{ ...hit, owner: null }]));
+        const hit = { provider: 'claude-code' as const, uuid: 'h', sessionId: 'session-a', timestamp: 1, limitType: 'five_hour', resetsAt: null };
+        store.transaction(() => store.insertLimitHits([{ ...hit, owner: null }]));
         assert.deepStrictEqual(store.limitHits().map(h => h.owner), [null]);
-        store.transaction(() => store.insertLimitHits('claude-code', [{ ...hit, owner: A }]));
-        store.transaction(() => store.insertLimitHits('claude-code', [{ ...hit, owner: B }]));
+        store.transaction(() => store.insertLimitHits([{ ...hit, owner: A }]));
+        store.transaction(() => store.insertLimitHits([{ ...hit, owner: B }]));
         assert.deepStrictEqual(store.limitHits().map(h => h.owner), [A]);
     });
 
@@ -834,7 +834,7 @@ suite('usage history store', () => {
         const store = ready(open());
         const agent = '/root/projects/p/session-a/subagents/agent-x.jsonl';
         const elsewhere = '/root/projects/q/session-a/subagents/agent-y.jsonl';
-        const hit = (uuid: string, timestamp: number) => ({ uuid, sessionId: 'session-a', timestamp, limitType: 'five_hour', resetsAt: null });
+        const hit = (uuid: string, timestamp: number) => ({ provider: 'claude-code' as const, uuid, sessionId: 'session-a', timestamp, limitType: 'five_hour', resetsAt: null });
         store.transaction(() => {
             store.upsertRequests([
                 req({ messageId: 'm0', file: MAIN, byteOffset: 0, timestamp: 1, parserVersion: 2 }),
@@ -847,7 +847,7 @@ suite('usage history store', () => {
                 req({ messageId: 'z1', sessionId: 'session-b', file: MAIN, byteOffset: 450, timestamp: 42, parserVersion: 2 }),
             ]);
             // The first request after a change, a limit reached, is under it.
-            store.insertLimitHits('claude-code', [hit('h0', 5), hit('h1', 10), hit('h2', 45)]);
+            store.insertLimitHits([hit('h0', 5), hit('h1', 10), hit('h2', 45)]);
             store.giveOwners('claude-code', MAIN, [change(100, A, 10), change(300, B, 40)]);
         });
         // A subagent's and a limit hit's have no place in the file: a report takes them by time.
@@ -886,7 +886,7 @@ suite('usage history store', () => {
         assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 3);
         assert.ok(!store.hasUnnumberedAccounts('claude-code'));
         // An account's organizations share its number, each with its own after it.
-        const numbers = () => Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, `${n.ordinal}.${n.organization}`]));
+        const numbers = () => Object.fromEntries([...store.accountNumbers('claude-code')].map(([key, n]) => [key, `${n.ordinal}.${n.organization}`]));
         assert.deepStrictEqual(numbers(), { 'a/': '1.1', 'b/': '2.1', 'a/o': '1.2' });
         // A session from before the others, signed in to a new account: next, not first.
         store.transaction(() => sight('s0', 'c', 1));
@@ -897,7 +897,7 @@ suite('usage history store', () => {
         assert.ok(!store.hasUnnumberedAccounts('claude-code'));
         store.transaction(() => sight('s4', 'd', 40));
         store.transaction(() => store.numberAccounts('claude-code'));
-        assert.deepStrictEqual([store.accountNumbers().get('d/')?.ordinal, store.accountNames().map(n => n.email)], [4, ['d@example.com']]);
+        assert.deepStrictEqual([store.accountNumbers('claude-code').get('d/')?.ordinal, store.accountNames('claude-code').map(n => n.email)], [4, ['d@example.com']]);
         assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 0);
         // A session from before Claude Code recorded owners, resumed under one
         // later: used from its first request, before an account first used in between.
@@ -907,14 +907,14 @@ suite('usage history store', () => {
             sight('s6', 'f', 45);
         });
         store.transaction(() => store.numberAccounts('claude-code'));
-        assert.deepStrictEqual([store.accountNumbers().get('g/')?.ordinal, store.accountNumbers().get('f/')?.ordinal], [5, 6]);
+        assert.deepStrictEqual([store.accountNumbers('claude-code').get('g/')?.ordinal, store.accountNumbers('claude-code').get('f/')?.ordinal], [5, 6]);
         // A session's later owner, which no request has followed yet: not numbered until one has.
         const later = { sessionId: 's4', offset: 100, owner: { accountUuid: 'e', organizationUuid: null }, sinceTs: null };
         store.transaction(() => store.putOwnerChanges('claude-code', '/root/projects/p/s4.jsonl', 'p', [later], new Map(), false));
         assert.ok(!store.hasUnnumberedAccounts('claude-code'));
         store.transaction(() => store.putOwnerChanges('claude-code', '/root/projects/p/s4.jsonl', 'p', [], new Map([['s4', 50]]), false));
         assert.strictEqual(store.transaction(() => store.numberAccounts('claude-code')), 1);
-        assert.strictEqual(store.accountNumbers().get('e/')?.ordinal, 7);
+        assert.strictEqual(store.accountNumbers('claude-code').get('e/')?.ordinal, 7);
     });
 
     /** A main transcript's checkpoint, as a build that read it with `parserVersion` left it. */
@@ -972,14 +972,14 @@ suite('usage history store', () => {
                 req({ messageId: 'm2', file: MAIN, parserVersion: 3, byteOffset: 150, timestamp: at(60), input: 10, owner: B }),
                 req({ messageId: 'x1', file: SUB, kind: 'task', parserVersion: 3, timestamp: at(70), input: 100, owner: A }),
             ]);
-            store.insertLimitHits('claude-code', [{ uuid: 'h1', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: A }]);
+            store.insertLimitHits([{ provider: 'claude-code', uuid: 'h1', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: A }]);
             store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10)), change(100, B, at(60))], new Map(), false);
             store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: 'o', email: 'a@example.com', organizationName: 'Org' }], 5);
             store.numberAccounts('claude-code');
             store.putFile(checkpoint(MAIN, 'session-a', 3));
             store.putFile({ ...checkpoint(SUB, 'session-a', 3), kind: 'task', agentId: 'x' });
         });
-        assert.strictEqual(store.accountNumbers().size, 2);
+        assert.strictEqual(store.accountNumbers('claude-code').size, 2);
         store.close();
         opened.length = 0;
         // As 99f34af..7d4fae7 left it: changes keyed without `retired`, no
@@ -1010,8 +1010,8 @@ suite('usage history store', () => {
         assert.deepStrictEqual(again.sessions()[0].owners, [{ owner: A, sinceTs: at(10) }, { owner: B, sinceTs: at(60) }]);
         assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 1, 'b/': 110 });
         // The names are kept; the numbers are given again, by the next pass.
-        assert.deepStrictEqual(again.accountNames().map(n => n.email), ['a@example.com']);
-        assert.strictEqual(again.accountNumbers().size, 0);
+        assert.deepStrictEqual(again.accountNames('claude-code').map(n => n.email), ['a@example.com']);
+        assert.strictEqual(again.accountNumbers('claude-code').size, 0);
         assert.ok(again.hasUnnumberedAccounts('claude-code'));
         // The main transcript is searched again; a subagent's holds what this parser would, and is its from now. A window still running that build stops.
         assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
@@ -1024,7 +1024,7 @@ suite('usage history store', () => {
             again.numberAccounts('claude-code');
         });
         assert.deepStrictEqual(again.sessions()[0].owners, [{ owner: A, sinceTs: at(10) }, { owner: B, sinceTs: at(61) }]);
-        assert.deepStrictEqual(Object.fromEntries([...again.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { 'a/o': 1, 'b/': 2 });
+        assert.deepStrictEqual(Object.fromEntries([...again.accountNumbers('claude-code')].map(([key, n]) => [key, n.ordinal])), { 'a/o': 1, 'b/': 2 });
         // Clear works, and the history is not brought again: its shape is this one now.
         assert.strictEqual(again.clear().settled, true);
         again.transaction(() => again.upsertRequests([req({ messageId: 'n', file: MAIN, parserVersion: 3, owner: B })]));
@@ -1085,7 +1085,7 @@ suite('usage history store', () => {
             raw.close();
 
             const again = ready(open());
-            assert.deepStrictEqual(again.accountNames().map(n => n.email), ['a@example.com'], name);
+            assert.deepStrictEqual(again.accountNames('claude-code').map(n => n.email), ['a@example.com'], name);
             // session-a keeps its owner, where nothing else will say it; session-b's transcript is searched again instead.
             const owners = () => Object.fromEntries(again.sessions().map(s => [s.sessionId, s.owners]));
             assert.deepStrictEqual(owners(), { 'session-a': [{ owner: A, sinceTs: null }], 'session-b': [] }, name);
@@ -1098,7 +1098,7 @@ suite('usage history store', () => {
             });
             assert.deepStrictEqual(owners()['session-b'], [{ owner: B, sinceTs: at(30) }], name);
             assert.deepStrictEqual(tokensByAccount(again), { 'a/o': 11, 'b/': 100 }, name);
-            assert.deepStrictEqual(Object.fromEntries([...again.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { 'a/o': 1, 'b/': 2 }, name);
+            assert.deepStrictEqual(Object.fromEntries([...again.accountNumbers('claude-code')].map(([key, n]) => [key, n.ordinal])), { 'a/o': 1, 'b/': 2 }, name);
             // The kept owner is no change a file says now: no request settles it, and no read from the start retires it again.
             again.transaction(() => {
                 again.putOwnerChanges('claude-code', MAIN, 'p', [], new Map([['session-a', at(10)]]), false);
@@ -1124,14 +1124,14 @@ suite('usage history store', () => {
                 req({ messageId: 'm1', file: MAIN, parserVersion: 3, byteOffset: 50, timestamp: at(10), input: 1, owner: A }),
                 req({ messageId: 'x1', file: SUB, kind: 'task', parserVersion: 3, timestamp: at(70), input: 100, owner: B }),
             ]);
-            store.insertLimitHits('claude-code', [{ uuid: 'h1', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: B }]);
+            store.insertLimitHits([{ provider: 'claude-code', uuid: 'h1', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: B }]);
             store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, at(10))], new Map(), false);
             store.putOwnerChanges('claude-code', GONE, 'p', [change(0, B, at(60), 'session-g'), change(100, A, at(60), 'session-g')], new Map(), false);
             store.numberAccounts('claude-code');
             store.putFile(checkpoint(MAIN, 'session-a', 3));
             store.putFile({ ...checkpoint(SUB, 'session-a', 3), kind: 'task', agentId: 'x' });
         });
-        assert.strictEqual(store.accountNumbers().size, 2);
+        assert.strictEqual(store.accountNumbers('claude-code').size, 2);
         store.close();
         opened.length = 0;
         // Its parser the newest to hold the lease, and the index without times.
@@ -1151,7 +1151,7 @@ suite('usage history store', () => {
         // Of two changes given one time, only the last had it.
         const owners = Object.fromEntries(again.sessions().map(s => [s.sessionId, s.owners]));
         assert.deepStrictEqual(owners['session-g'], [{ owner: A, sinceTs: at(60) }, { owner: B, sinceTs: null }]);
-        assert.strictEqual(again.accountNumbers().size, 0);
+        assert.strictEqual(again.accountNumbers('claude-code').size, 0);
         assert.ok(again.outdated(3) && !again.outdated(PARSER_VERSION));
         assert.deepStrictEqual(indexColumns(again), ['session_id', 'since_ts']);
         // Done once: what this build gives from now on stays.
@@ -1159,13 +1159,13 @@ suite('usage history store', () => {
             again.upsertRequests([req({ messageId: 'm2', file: MAIN, parserVersion: PARSER_VERSION, byteOffset: 60, timestamp: at(80), owner: B })]);
             again.numberAccounts('claude-code');
         });
-        const numbers = [...again.accountNumbers()];
+        const numbers = [...again.accountNumbers('claude-code')];
         assert.ok(numbers.length > 0);
         again.close();
         opened.length = 0;
         const third = ready(open());
         assert.deepStrictEqual([...third.requests()].map(r => r.owner), [A, B, null]);
-        assert.deepStrictEqual([...third.accountNumbers()], numbers);
+        assert.deepStrictEqual([...third.accountNumbers('claude-code')], numbers);
     });
 
     test('a history the last builds before 2.4.0 wrote, at parser 4, is undone as well, once', () => {
@@ -1190,7 +1190,7 @@ suite('usage history store', () => {
         const again = ready(open());
         assert.deepStrictEqual([again.getFile('claude-code', MAIN)?.parserVersion, again.getFile('claude-code', SUB)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
         assert.deepStrictEqual(indexColumns(again), ['session_id', 'since_ts']);
-        assert.strictEqual(again.accountNumbers().size, 0);
+        assert.strictEqual(again.accountNumbers('claude-code').size, 0);
         assert.ok(again.outdated(4) && !again.outdated(PARSER_VERSION));
         assert.strictEqual(again.transaction(() => again.undoPrereleasePasses()), false, 'nothing of that build left to undo');
     });
@@ -1205,13 +1205,13 @@ suite('usage history store', () => {
             store.upsertSession('claude-code', { sessionId: 'session-b', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(70) });
             store.putFile(checkpoint(MAIN, 'session-a', PARSER_VERSION));
             store.putFile(checkpoint(OTHER, 'session-b', PARSER_VERSION));
-            store.insertLimitHits('claude-code', [{ uuid: 'hb', sessionId: 'session-b', timestamp: at(30), limitType: 'five_hour', resetsAt: null, owner: A }]);
+            store.insertLimitHits([{ provider: 'claude-code', uuid: 'hb', sessionId: 'session-b', timestamp: at(30), limitType: 'five_hour', resetsAt: null, owner: A }]);
         });
         assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), false, 'nothing of that build: nothing done');
         // That pass reads session-a's transcripts its way, after this build brought the history.
         store.transaction(() => {
             store.upsertRequests([req({ messageId: 'x1', file: SUB, kind: 'task', parserVersion: 3, timestamp: at(70), owner: B })]);
-            store.insertLimitHits('claude-code', [{ uuid: 'ha', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: B }]);
+            store.insertLimitHits([{ provider: 'claude-code', uuid: 'ha', sessionId: 'session-a', timestamp: at(65), limitType: 'five_hour', resetsAt: null, owner: B }]);
             store.putFile(checkpoint(MAIN, 'session-a', 3));
             store.putFile({ ...checkpoint(SUB, 'session-a', 3), kind: 'task', agentId: 'x' });
         });
@@ -1222,7 +1222,7 @@ suite('usage history store', () => {
         assert.deepStrictEqual([store.getFile('claude-code', MAIN)?.parserVersion, store.getFile('claude-code', OTHER)?.parserVersion], [OWNERS_SINCE - 1, PARSER_VERSION]);
         // The subagent's file, gone or not, is this parser's now: the next pass finds nothing to undo, and leaves this build's limits be.
         assert.strictEqual(store.getFile('claude-code', SUB)?.parserVersion, PARSER_VERSION);
-        store.transaction(() => store.insertLimitHits('claude-code', [{ uuid: 'ha2', sessionId: 'session-a', timestamp: at(66), limitType: 'five_hour', resetsAt: null, owner: A }]));
+        store.transaction(() => store.insertLimitHits([{ provider: 'claude-code', uuid: 'ha2', sessionId: 'session-a', timestamp: at(66), limitType: 'five_hour', resetsAt: null, owner: A }]));
         assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), false);
         assert.deepStrictEqual(store.limitHits().map(h => [h.uuid, h.owner]), [['hb', A], ['ha', null], ['ha2', A]]);
     });
@@ -1243,7 +1243,7 @@ suite('usage history store', () => {
                 store.upsertSession('claude-code', { sessionId: id, root: id === 'session-c' ? dir : '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: at(10), lastTs: at(20) });
             }
             // session-l only reached a limit; session-s's request was read from session-t's transcript.
-            store.insertLimitHits('claude-code', [{ uuid: 'hl', sessionId: 'session-l', timestamp: at(15), limitType: 'five_hour', resetsAt: null, owner: null }]);
+            store.insertLimitHits([{ provider: 'claude-code', uuid: 'hl', sessionId: 'session-l', timestamp: at(15), limitType: 'five_hour', resetsAt: null, owner: null }]);
             store.upsertRequests([
                 req({ messageId: 's1', sessionId: 'session-s', file: '/root/projects/p/session-t.jsonl', parserVersion: 3, timestamp: at(10), input: 1 }),
                 req({ messageId: 't1', sessionId: 'session-t', file: '/root/projects/p/session-t.jsonl', parserVersion: 3, byteOffset: 10, timestamp: at(11), input: 10 }),
@@ -1315,6 +1315,494 @@ suite('usage history store', () => {
         assert.deepStrictEqual(store.bucketSums(0).filter(r => r.sessionId === 'session-b').map(r => r.requests), [2]);
     });
 
+    test("two agents' sessions with one id are two: their rows, sums, owners, uses, limits, compactions and latest requests keep to their own", () => {
+        const store = ready(open());
+        const t = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const ROLLOUT = '/codex/sessions/2026/11/05/rollout-2026-11-05T10-00-00-session-a.jsonl';
+        const codex = (overrides: Partial<UsageRequest>) => req({ provider: 'codex', file: ROLLOUT, model: 'gpt-5.5', claudeCodeVersion: null, ...overrides });
+        const X = { accountUuid: 'x', organizationUuid: null };
+        store.transaction(() => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: '/repo', cwdTs: t(1), projectDir: 'p', firstTs: t(1), lastTs: t(12) });
+            store.upsertSession('codex', { sessionId: 'session-a', root: '/codex', cwd: '/elsewhere', cwdTs: t(2), projectDir: '', firstTs: t(2), lastTs: t(11) });
+            // Claude Code's session-a went from A to B at 10:10; Codex's was X's from 10:05, its one owner.
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, t(1)), change(500, B, t(10))], new Map(), false);
+            store.putOwnerChanges('codex', ROLLOUT, '', [change(0, X, t(5))], new Map(), false);
+            // One message id in both, by chance.
+            store.upsertRequests([
+                req({ messageId: 'm', timestamp: t(4), input: 1 }),
+                req({ messageId: 'm3', timestamp: t(6), input: 3, byteOffset: 300 }),
+                req({ messageId: 'm2', timestamp: t(12), input: 2, byteOffset: 600 }),
+                codex({ messageId: 'm', timestamp: t(2), input: 10 }),
+                codex({ messageId: 'n', timestamp: t(11), input: 20, byteOffset: 100 }),
+            ]);
+            store.insertLimitHits([{ provider: 'codex', uuid: 'h', sessionId: 'session-a', timestamp: t(11), limitType: 'five_hour', resetsAt: null, owner: null }]);
+            store.insertCompactions([
+                { provider: 'claude-code', uuid: 'c', sessionId: 'session-a', kind: 'main', timestamp: t(3), trigger: 'auto', preTokens: 100, postTokens: 10 },
+                { provider: 'codex', uuid: 'c', sessionId: 'session-a', kind: 'main', timestamp: t(4), trigger: 'auto', preTokens: 200, postTokens: 20 },
+            ]);
+        });
+        assert.deepStrictEqual(
+            [...store.requests()].map(r => [r.provider, r.messageId, r.input]),
+            [
+                ['claude-code', 'm', 1],
+                ['claude-code', 'm2', 2],
+                ['claude-code', 'm3', 3],
+                ['codex', 'm', 10],
+                ['codex', 'n', 20],
+            ],
+        );
+        // Claude Code's requests are summed apart by its own change of account in force, never Codex's at 10:05;
+        // Codex's two, in the same quarter hour, are one row: its session never changed account.
+        assert.deepStrictEqual(
+            store
+                .bucketSums(0)
+                .map(r => [r.provider, r.requests, r.input])
+                .sort((x, y) => String(x[0]).localeCompare(String(y[0])) || (x[2] as number) - (y[2] as number)),
+            [
+                ['claude-code', 1, 2],
+                ['claude-code', 2, 4],
+                ['codex', 2, 30],
+            ],
+        );
+        const [claude, other] = store.sessions();
+        const byStart = (spans: { firstTs: number }[]) => [...spans].sort((x, y) => x.firstTs - y.firstTs);
+        assert.deepStrictEqual(
+            [claude.provider, claude.owners.map(o => o.owner), byStart(claude.uses), claude.limitSpans, claude.unownedHitTs, claude.lastTs],
+            [
+                'claude-code',
+                [A, B],
+                [
+                    { owner: null, firstTs: t(4), lastTs: t(6) },
+                    { owner: null, firstTs: t(12), lastTs: t(12) },
+                ],
+                [],
+                null,
+                t(12),
+            ],
+        );
+        assert.deepStrictEqual(
+            [other.provider, other.cwd, other.owners, other.uses, other.limitSpans, other.unownedHitTs, other.lastTs],
+            ['codex', '/elsewhere', [{ owner: X, sinceTs: t(5) }], [], [{ owner: null, firstTs: t(11), lastTs: t(11) }], t(11), t(11)],
+        );
+        assert.deepStrictEqual(
+            [store.latestMainRequest('claude-code', 'session-a')?.input, store.latestMainRequest('codex', 'session-a')?.input],
+            [2, 20],
+        );
+        assert.deepStrictEqual(
+            [store.sessionCompactions('claude-code', 'session-a').map(c => c.preTokens), store.sessionCompactions('codex', 'session-a').map(c => [c.provider, c.preTokens])],
+            [[100], [['codex', 200]]],
+        );
+        assert.deepStrictEqual(store.compactions().map(c => c.provider), ['claude-code', 'codex']);
+        assert.deepStrictEqual(store.limitHits().map(h => [h.provider, h.sessionId]), [['codex', 'session-a']]);
+    });
+
+    suite("two agents' sessions with one id, in each grouping and match", () => {
+        const t = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const ROLLOUT = '/codex/sessions/2026/11/05/rollout-2026-11-05T10-00-00-session-a.jsonl';
+        const codex = (overrides: Partial<UsageRequest>) => req({ provider: 'codex', file: ROLLOUT, claudeCodeVersion: null, ...overrides });
+        const X = { accountUuid: 'x', organizationUuid: null };
+        const Y = { accountUuid: 'y', organizationUuid: null };
+        const both = (store: UsageStore, codexLast = t(13)) => {
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: t(1), lastTs: t(12) });
+            store.upsertSession('codex', { sessionId: 'session-a', root: '/codex', cwd: null, cwdTs: null, projectDir: '', firstTs: t(1), lastTs: codexLast });
+        };
+        // Every read, inside a read as a report reads and outside one.
+        const inAndOut = <T>(store: UsageStore, read: () => T): T => {
+            const inside = store.read(read);
+            assert.deepStrictEqual(read(), inside);
+            return inside;
+        };
+
+        test('requests of one model in one quarter hour are summed by agent', () => {
+            const store = ready(open());
+            store.transaction(() => store.upsertRequests([req({ messageId: 'm', timestamp: t(1), input: 1 }), codex({ messageId: 'm', timestamp: t(2), input: 10 })]));
+            assert.deepStrictEqual(
+                inAndOut(store, () => store.bucketSums(0).map(r => [r.provider, r.model, r.requests, r.input])).sort(),
+                [
+                    ['claude-code', 'claude-opus-5-5', 1, 1],
+                    ['codex', 'claude-opus-5-5', 1, 10],
+                ],
+            );
+        });
+
+        test("a limit reached that records no owner is its own session's", () => {
+            const store = ready(open());
+            store.transaction(() => {
+                both(store);
+                store.insertLimitHits([
+                    { provider: 'claude-code', uuid: 'h1', sessionId: 'session-a', timestamp: t(3), limitType: 'five_hour', resetsAt: null, owner: null },
+                    { provider: 'codex', uuid: 'h2', sessionId: 'session-a', timestamp: t(11), limitType: 'five_hour', resetsAt: null, owner: null },
+                ]);
+            });
+            assert.deepStrictEqual(
+                inAndOut(store, () => store.sessions().map(s => [s.provider, s.limitSpans, s.unownedHitTs])),
+                [
+                    ['claude-code', [{ owner: null, firstTs: t(3), lastTs: t(3) }], t(3)],
+                    ['codex', [{ owner: null, firstTs: t(11), lastTs: t(11) }], t(11)],
+                ],
+            );
+        });
+
+        test("a session is switched by its own changes of account alone, whichever agent's change of its id came first", () => {
+            const store = ready(open());
+            store.transaction(() => {
+                both(store);
+                // Codex's session-a was X's from 10:00, before Claude Code's first change: its one owner.
+                store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, t(1)), change(500, B, t(10))], new Map(), false);
+                store.putOwnerChanges('codex', ROLLOUT, '', [change(0, X, t(0))], new Map(), false);
+                store.upsertRequests([
+                    req({ messageId: 'm1', timestamp: t(4), input: 1, byteOffset: 100 }),
+                    req({ messageId: 'm2', timestamp: t(6), input: 3, byteOffset: 200 }),
+                    req({ messageId: 'm3', timestamp: t(12), input: 2, byteOffset: 600 }),
+                    codex({ messageId: 'n1', timestamp: t(5), input: 10 }),
+                ]);
+            });
+            // Claude Code's requests that record none are summed apart by its own change in force; Codex's is one row.
+            assert.deepStrictEqual(
+                inAndOut(store, () => store.bucketSums(0).map(r => [r.provider, r.requests, r.input])).sort(),
+                [
+                    ['claude-code', 1, 2],
+                    ['claude-code', 2, 4],
+                    ['codex', 1, 10],
+                ],
+            );
+            assert.deepStrictEqual(
+                inAndOut(store, () => store.sessions().map(s => [s.provider, s.uses.length])),
+                [
+                    ['claude-code', 2],
+                    ['codex', 0],
+                ],
+            );
+        });
+
+        test('two switched sessions with one id each keep their own uses', () => {
+            const store = ready(open());
+            store.transaction(() => {
+                both(store);
+                store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, t(5)), change(500, B, t(10))], new Map(), false);
+                store.putOwnerChanges('codex', ROLLOUT, '', [change(0, X, t(5)), change(500, Y, t(10))], new Map(), false);
+                // Each one's request before its first change, under no owner and no change in force.
+                store.upsertRequests([req({ messageId: 'm1', timestamp: t(1), input: 1 }), codex({ messageId: 'n1', timestamp: t(2), input: 10 })]);
+            });
+            assert.deepStrictEqual(
+                inAndOut(store, () => store.sessions().map(s => [s.provider, s.uses.map(u => [u.owner, u.firstTs, u.lastTs])])),
+                [
+                    ['claude-code', [[null, t(1), t(1)]]],
+                    ['codex', [[null, t(2), t(2)]]],
+                ],
+            );
+        });
+
+        test("a session's last time before the end is its own agent's last request's", () => {
+            const store = ready(open());
+            store.transaction(() => {
+                both(store, t(11));
+                // Claude Code's last record is dated two days ahead.
+                store.upsertRequests([
+                    req({ messageId: 'm1', timestamp: t(4), input: 1 }),
+                    req({ messageId: 'm2', timestamp: t(4) + 2 * 86_400_000, input: 1, byteOffset: 10 }),
+                    codex({ messageId: 'n', timestamp: t(11), input: 10 }),
+                ]);
+                store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: t(4), lastTs: t(4) + 2 * 86_400_000 });
+            });
+            assert.deepStrictEqual(
+                inAndOut(store, () => store.sessions(t(30)).map(s => [s.provider, s.lastTs])),
+                [
+                    ['claude-code', t(4)],
+                    ['codex', t(11)],
+                ],
+            );
+        });
+
+        test("the window a session shows is its own: another agent's other model, variant, larger request or compaction under its id change nothing", () => {
+            const store = ready(open());
+            store.transaction(() => {
+                store.upsertRequests([
+                    req({ messageId: 'm1', timestamp: t(1), input: 100 }),
+                    // Codex's: another model, which would start Claude Code's window anew; then its own model with a variant and a larger context.
+                    codex({ messageId: 'n1', timestamp: t(3), model: 'gpt-5.5', input: 7 }),
+                    codex({ messageId: 'n2', timestamp: t(4), variant: '1m', input: 500_000, byteOffset: 10 }),
+                    req({ messageId: 'm2', timestamp: t(5), input: 1, byteOffset: 10 }),
+                ]);
+                store.insertCompactions([{ provider: 'codex', uuid: 'c', sessionId: 'session-a', kind: 'main', timestamp: t(4), trigger: 'auto', preTokens: 700_000, postTokens: 2 }]);
+            });
+            const latest = store.latestMainRequest('claude-code', 'session-a');
+            assert.deepStrictEqual([latest?.model, latest?.variant, latest?.largestContext], ['claude-opus-5-5', null, 100]);
+            assert.deepStrictEqual(store.latestMainRequest('codex', 'session-a')?.largestContext, 700_000);
+        });
+
+        test("an owner is its agent's account, though one call writes two agents' requests and limits naming it", () => {
+            const store = ready(open());
+            store.transaction(() => {
+                store.upsertRequests([req({ owner: A }), codex({ messageId: 'n', owner: A })]);
+                store.upsertRequests([codex({ messageId: 'n2', owner: B }), req({ messageId: 'm2', owner: B })]);
+                store.insertLimitHits([
+                    { provider: 'claude-code', uuid: 'h', sessionId: 'session-a', timestamp: t(3), limitType: 'five_hour', resetsAt: null, owner: X },
+                    { provider: 'codex', uuid: 'h', sessionId: 'session-a', timestamp: t(3), limitType: 'five_hour', resetsAt: null, owner: X },
+                ]);
+            });
+            assert.ok(sqlite, 'this runtime has no node:sqlite');
+            const raw = new sqlite.DatabaseSync(store.file, { readOnly: true });
+            try {
+                const rows = (table: string) =>
+                    raw.prepare(`SELECT t.provider AS row, a.provider AS account FROM ${table} t JOIN accounts a ON a.id = t.owner ORDER BY t.provider`).all();
+                for (const table of ['requests', 'limit_hits']) {
+                    assert.deepStrictEqual(
+                        rows(table).filter(r => r.row !== r.account),
+                        [],
+                        table,
+                    );
+                }
+                assert.strictEqual(rows('requests').length, 4);
+            } finally {
+                raw.close();
+            }
+        });
+
+        test('rows of two agents at one time come in agent order', () => {
+            const store = ready(open());
+            store.transaction(() => {
+                both(store);
+                store.insertLimitHits([
+                    { provider: 'codex', uuid: 'a', sessionId: 'session-a', timestamp: t(3), limitType: 'five_hour', resetsAt: null, owner: null },
+                    { provider: 'claude-code', uuid: 'b', sessionId: 'session-a', timestamp: t(3), limitType: 'five_hour', resetsAt: null, owner: null },
+                ]);
+                store.insertCompactions([
+                    { provider: 'codex', uuid: 'a', sessionId: 'session-a', kind: 'main', timestamp: t(4), trigger: 'auto', preTokens: 2, postTokens: 1 },
+                    { provider: 'claude-code', uuid: 'b', sessionId: 'session-a', kind: 'main', timestamp: t(4), trigger: 'auto', preTokens: 2, postTokens: 1 },
+                ]);
+            });
+            assert.deepStrictEqual(
+                [store.limitHits().map(h => h.provider), store.compactions().map(c => c.provider), store.sessions().map(s => s.provider)],
+                [
+                    ['claude-code', 'codex'],
+                    ['claude-code', 'codex'],
+                    ['claude-code', 'codex'],
+                ],
+            );
+        });
+
+        test("the agents a history holds are each table's: one agent's requests beside another's limits, changes of owner or requests alone are two agents' rows", () => {
+            const fresh = (name: string) => {
+                assert.ok(sqlite, 'this runtime has no node:sqlite');
+                const store = ready(UsageStore.open(sqlite, path.join(dir, name, 'usage.sqlite')));
+                opened.push(store);
+                store.transaction(() => both(store));
+                return store;
+            };
+            // Claude Code's requests; Codex's limit alone.
+            const limits = fresh('limits');
+            limits.transaction(() => {
+                limits.upsertRequests([req({ messageId: 'm', timestamp: t(1), input: 1 })]);
+                limits.insertLimitHits([{ provider: 'codex', uuid: 'h', sessionId: 'session-a', timestamp: t(2), limitType: 'five_hour', resetsAt: null, owner: null }]);
+            });
+            assert.deepStrictEqual(
+                limits.read(() => limits.sessions().map(s => [s.provider, s.limitSpans.length])),
+                [
+                    ['claude-code', 0],
+                    ['codex', 1],
+                ],
+            );
+            // Claude Code's requests; Codex's change of owner alone.
+            const changes = fresh('changes');
+            changes.transaction(() => {
+                changes.upsertRequests([req({ messageId: 'm', timestamp: t(1), input: 1 })]);
+                changes.putOwnerChanges('codex', ROLLOUT, '', [change(0, X, t(2))], new Map(), false);
+            });
+            assert.deepStrictEqual(
+                changes.read(() => changes.sessions().map(s => [s.provider, s.owners.map(o => o.owner)])),
+                [
+                    ['claude-code', []],
+                    ['codex', [X]],
+                ],
+            );
+            // Claude Code's limit and change of owner; Codex's requests alone.
+            const requests = fresh('requests');
+            requests.transaction(() => {
+                requests.insertLimitHits([{ provider: 'claude-code', uuid: 'h', sessionId: 'session-a', timestamp: t(2), limitType: 'five_hour', resetsAt: null, owner: null }]);
+                requests.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, t(1))], new Map(), false);
+                requests.upsertRequests([codex({ messageId: 'n', timestamp: t(3), input: 10 })]);
+            });
+            assert.deepStrictEqual(
+                requests.read(() => requests.bucketSums(0).map(r => [r.provider, r.input])),
+                [['codex', 10]],
+            );
+            // Codex's rows alone, read by id: Codex's, the session of Claude Code's of that id given none of them.
+            const codexAlone = fresh('codex');
+            codexAlone.transaction(() => {
+                codexAlone.putOwnerChanges('codex', ROLLOUT, '', [change(0, X, t(1)), change(100, Y, t(5))], new Map(), false);
+                codexAlone.upsertRequests([codex({ messageId: 'n', timestamp: t(3), input: 10 }), codex({ messageId: 'n2', timestamp: t(6), input: 20, byteOffset: 10 })]);
+                codexAlone.insertLimitHits([{ provider: 'codex', uuid: 'h', sessionId: 'session-a', timestamp: t(7), limitType: 'five_hour', resetsAt: null, owner: null }]);
+            });
+            const read = () => ({
+                sums: codexAlone.bucketSums(0).map(r => [r.provider, r.input]).sort(),
+                sessions: codexAlone.sessions().map(s => [s.provider, s.owners.length, s.uses.length, s.limitSpans.length]),
+            });
+            assert.deepStrictEqual(codexAlone.read(read), {
+                sums: [
+                    ['codex', 10],
+                    ['codex', 20],
+                ],
+                sessions: [
+                    ['claude-code', 0, 0, 0],
+                    ['codex', 2, 2, 1],
+                ],
+            });
+            assert.deepStrictEqual(read(), codexAlone.read(read));
+        });
+
+        test("a history of one agent's rows reads by id as it reads by agent and id, and as beside another agent's", () => {
+            assert.ok(sqlite, 'this runtime has no node:sqlite');
+            const owners = [A, B, { accountUuid: 'c', organizationUuid: null }];
+            const sorted = <T>(rows: T[]) => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+            // The order of a session's spans is no read's.
+            const sessions = (rows: ReturnType<UsageStore['sessions']>) => rows.map(s => ({ ...s, limitSpans: sorted(s.limitSpans), uses: sorted(s.uses) }));
+            let switched = 0;
+            for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+                const random = seeded(seed);
+                const pick = <T>(xs: readonly T[]): T => xs[Math.floor(random() * xs.length)];
+                const store = ready(UsageStore.open(sqlite, path.join(dir, `seed-${seed}`, 'usage.sqlite')));
+                opened.push(store);
+                store.transaction(() => {
+                    for (let s = 0; s < 8; s++) {
+                        const id = `session-${s}`;
+                        const main = `/root/projects/p/${id}.jsonl`;
+                        const sub = `/root/projects/p/${id}/subagents/agent-${s}.jsonl`;
+                        store.upsertSession('claude-code', { sessionId: id, root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: t(0), lastTs: t(150) });
+                        // Up to three changes of owner, some with no request after them yet.
+                        const changes = Array.from({ length: Math.floor(random() * 4) }, (_, i) =>
+                            change(i * 100, pick(owners), random() < 0.2 ? null : t(i * 40 + Math.floor(random() * 40)), id),
+                        );
+                        store.putOwnerChanges('claude-code', main, 'p', changes, new Map(), false);
+                        store.upsertRequests(
+                            Array.from({ length: Math.floor(random() * 12) }, (_, i) => {
+                                const task = random() < 0.4;
+                                return req({
+                                    messageId: `${id}-${i}`,
+                                    sessionId: id,
+                                    file: task ? sub : main,
+                                    kind: task ? 'task' : 'main',
+                                    isMain: !task,
+                                    timestamp: t(Math.floor(random() * 150)),
+                                    model: pick(['claude-opus-5-5', 'claude-sonnet-5-5']),
+                                    input: Math.floor(random() * 1000),
+                                    owner: !task && random() < 0.5 ? pick(owners) : null,
+                                    byteOffset: i * 10,
+                                });
+                            }),
+                        );
+                        store.insertLimitHits(
+                            Array.from({ length: Math.floor(random() * 3) }, (_, i) => ({
+                                provider: 'claude-code' as const,
+                                uuid: `${id}-h${i}`,
+                                sessionId: id,
+                                timestamp: t(Math.floor(random() * 150)),
+                                limitType: 'five_hour',
+                                resetsAt: null,
+                                owner: random() < 0.5 ? pick(owners) : null,
+                            })),
+                        );
+                    }
+                });
+                const reads = () => ({
+                    sessions: sessions(store.sessions()),
+                    until: sessions(store.sessions(t(100))),
+                    sums: sorted(store.bucketSums(0)),
+                    sumsUntil: sorted(store.bucketSums(t(20), t(100))),
+                });
+                // In a read, by id alone; outside one, by agent and id.
+                const alone = store.read(reads);
+                assert.deepStrictEqual(alone, reads(), `seed ${seed}`);
+                switched += alone.sessions.filter(s => s.uses.length > 0).length;
+                // Beside another agent's sessions, its own read the same.
+                store.transaction(() => {
+                    store.upsertSession('codex', { sessionId: 'other', root: '/codex', cwd: null, cwdTs: null, projectDir: '', firstTs: t(1), lastTs: t(2) });
+                    store.putOwnerChanges('codex', ROLLOUT, '', [change(0, X, t(1), 'other'), change(100, Y, t(2), 'other')], new Map(), false);
+                    store.upsertRequests([codex({ messageId: 'n', sessionId: 'other', timestamp: t(2), input: 5 })]);
+                    store.insertLimitHits([{ provider: 'codex', uuid: 'h', sessionId: 'other', timestamp: t(2), limitType: 'five_hour', resetsAt: null, owner: null }]);
+                });
+                const beside = store.read(reads);
+                assert.deepStrictEqual(
+                    {
+                        sessions: beside.sessions.filter(s => s.provider === 'claude-code'),
+                        until: beside.until.filter(s => s.provider === 'claude-code'),
+                        sums: beside.sums.filter(r => r.provider === 'claude-code'),
+                        sumsUntil: beside.sumsUntil.filter(r => r.provider === 'claude-code'),
+                    },
+                    alone,
+                    `seed ${seed}`,
+                );
+            }
+            // Sessions made with more than one account were among them.
+            assert.ok(switched > 5, String(switched));
+        });
+    });
+
+    test("an agent's accounts are numbered and named among its own, and what builds of 2.4.0 made before its release wrote is undone in Claude Code's files alone", () => {
+        const store = ready(open());
+        const t = (minute: number) => Date.UTC(2026, 10, 5, 10, minute);
+        const X = { accountUuid: 'x', organizationUuid: null };
+        const ROLLOUT = '/codex/sessions/2026/11/05/rollout-2026-11-05T10-00-00-s.jsonl';
+        store.transaction(() => {
+            // Another agent's account, used first and numbered first among its own.
+            store.upsertSession('codex', { sessionId: 's', root: '/codex', cwd: null, cwdTs: null, projectDir: '', firstTs: t(1), lastTs: t(1) });
+            store.putOwnerChanges('codex', ROLLOUT, '', [change(0, X, t(1), 's')], new Map(), false);
+            store.rememberAccounts('codex', [{ ...X, email: 'x@example.com', organizationName: null }], 1);
+            store.numberAccounts('codex');
+            store.upsertSession('claude-code', { sessionId: 'session-a', root: '/root', cwd: null, cwdTs: null, projectDir: 'p', firstTs: t(2), lastTs: t(2) });
+            store.putOwnerChanges('claude-code', MAIN, 'p', [change(0, A, t(2))], new Map(), false);
+            store.numberAccounts('claude-code');
+        });
+        const ordinals = (provider: 'claude-code' | 'codex') => Object.fromEntries([...store.accountNumbers(provider)].map(([key, n]) => [key, n.ordinal]));
+        assert.deepStrictEqual([ordinals('claude-code'), ordinals('codex')], [{ 'a/o': 1 }, { 'x/': 1 }]);
+        assert.deepStrictEqual([store.accountNames('claude-code'), store.accountNames('codex').map(n => n.email)], [[], ['x@example.com']]);
+
+        // Rows of another agent at a parser number those builds used, with owners, in a session Claude Code
+        // has too: none is theirs to undo, and they make no Claude Code row theirs.
+        const ROLLOUT_A = '/codex/sessions/2026/11/05/rollout-2026-11-05T10-00-00-session-a.jsonl';
+        const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
+        const checkpoint = (provider: 'claude-code' | 'codex', path: string, kind: 'main' | 'task', sessionId: string) => ({
+            provider, path, root: '/r', kind, sessionId, runId: null, agentId: null, projectDir: 'p', dev: null, ino: null, size: 1, mtimeMs: 1,
+            offset: 1, tailHash: null, parserVersion: 3, oversizeLines: 0, malformedLines: 0, newestVersion: null,
+        });
+        const hit = (provider: 'claude-code' | 'codex', uuid: string, sessionId: string, owner: SessionOwner) =>
+            ({ provider, uuid, sessionId, timestamp: t(3), limitType: 'five_hour', resetsAt: null, owner });
+        store.transaction(() => {
+            store.putFile(checkpoint('codex', ROLLOUT, 'main', 's'));
+            store.putFile(checkpoint('codex', `${ROLLOUT}.child`, 'task', 's'));
+            store.putFile(checkpoint('codex', ROLLOUT_A, 'main', 'session-a'));
+            store.upsertRequests([req({ provider: 'codex', messageId: 'k', sessionId: 's', file: `${ROLLOUT}.child`, kind: 'task', owner: X, parserVersion: 3 })]);
+            store.insertLimitHits([hit('codex', 'h', 'session-a', X), hit('claude-code', 'hs', 's', A)]);
+        });
+        const state = () => [
+            ...[['codex', ROLLOUT], ['codex', `${ROLLOUT}.child`], ['codex', ROLLOUT_A], ['claude-code', MAIN], ['claude-code', SUB]].map(
+                ([provider, path]) => store.getFile(provider as 'claude-code' | 'codex', path)?.parserVersion ?? null,
+            ),
+            Object.fromEntries([...store.requests()].map(r => [`${r.provider}:${r.messageId}`, r.owner?.accountUuid ?? null])),
+            Object.fromEntries(store.limitHits().map(h => [`${h.provider}:${h.uuid}`, h.owner?.accountUuid ?? null])),
+        ];
+        assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), false, 'only Claude Code files are such builds');
+        assert.deepStrictEqual(state(), [3, 3, 3, null, null, { 'codex:k': 'x' }, { 'codex:h': 'x', 'claude-code:hs': 'a' }]);
+
+        // Now one such build's pass over Claude Code's session-a: it alone is undone.
+        store.transaction(() => {
+            store.putFile(checkpoint('claude-code', MAIN, 'main', 'session-a'));
+            store.putFile(checkpoint('claude-code', SUB, 'task', 'session-a'));
+            store.upsertRequests([req({ messageId: 'c1', file: SUB, kind: 'task', owner: A, parserVersion: 3 })]);
+            store.insertLimitHits([hit('claude-code', 'ha', 'session-a', A)]);
+        });
+        assert.strictEqual(store.transaction(() => store.undoPrereleasePasses()), true);
+        assert.deepStrictEqual(state(), [
+            3,
+            3,
+            3,
+            OWNERS_SINCE - 1,
+            PARSER_VERSION,
+            { 'claude-code:c1': null, 'codex:k': 'x' },
+            { 'claude-code:ha': null, 'claude-code:hs': 'a', 'codex:h': 'x' },
+        ]);
+    });
+
     test('an account first used in a session with no request, only a limit reached, is numbered by when it was', () => {
         const store = ready(open());
         store.transaction(() => {
@@ -1328,7 +1816,7 @@ suite('usage history store', () => {
             store.putOwnerChanges('claude-code', '/root/projects/p/s7.jsonl', 'p', [change(0, { accountUuid: 'h', organizationUuid: null }, null, 's7')], new Map(), false);
             store.numberAccounts('claude-code');
         });
-        assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { 'z/': 1, 'y/': 2 });
+        assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers('claude-code')].map(([key, n]) => [key, n.ordinal])), { 'z/': 1, 'y/': 2 });
     });
 
     test('a Clear in a build before this schema, which knows nothing of accounts, leaves no account named on disk', () => {
@@ -1354,7 +1842,7 @@ suite('usage history store', () => {
         } finally {
             old.close();
         }
-        assert.deepStrictEqual(store.accountNames(), []);
+        assert.deepStrictEqual(store.accountNames('claude-code'), []);
         assert.deepStrictEqual(
             [holding('Secret-Person-0xFACE'), holding('Secret-Org-0xFEED'), holding('Secret-Session-0xBEEF')],
             [[], [], []],
@@ -1368,7 +1856,7 @@ suite('usage history store', () => {
         const raw = new sqlite.DatabaseSync(file);
         raw.exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'store_generation'");
         raw.close();
-        assert.strictEqual(store.accountNames().length, 1);
+        assert.strictEqual(store.accountNames('claude-code').length, 1);
     });
 
     test('account names are kept as Claude Code last gave them, and kept once it no longer does', () => {
@@ -1385,12 +1873,12 @@ suite('usage history store', () => {
         );
         // Signed in to a again later, its organization renamed, its email not given this time.
         store.transaction(() => store.rememberAccounts('claude-code', [{ accountUuid: 'a', organizationUuid: 'o', email: null, organizationName: 'Org 2' }], 2));
-        assert.deepStrictEqual(store.accountNames(), [
+        assert.deepStrictEqual(store.accountNames('claude-code'), [
             { accountUuid: 'a', organizationUuid: 'o', email: 'one@example.com', organizationName: 'Org 2' },
             { accountUuid: 'b', organizationUuid: null, email: 'two@example.com', organizationName: null },
         ]);
         store.clear();
-        assert.deepStrictEqual(store.accountNames(), [], 'Clear forgets them with the rest');
+        assert.deepStrictEqual(store.accountNames('claude-code'), [], 'Clear forgets them with the rest');
     });
 
     test('a build before this schema that had the history open as it was migrated stops writing, and says to reload', () => {

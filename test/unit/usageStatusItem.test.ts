@@ -61,13 +61,13 @@ suite('usage status item: the window and what is shown', () => {
 
     test('a compaction after the latest request shows what it left', () => {
         const compacted = describeLive(
-            live({ compactions: [{ uuid: 'c', sessionId: 's', kind: 'main', timestamp: Date.UTC(2026, 9, 9, 11), trigger: 'auto', preTokens: 160_000, postTokens: 12_000 }] }),
+            live({ compactions: [{ provider: 'claude-code', uuid: 'c', sessionId: 's', kind: 'main', timestamp: Date.UTC(2026, 9, 9, 11), trigger: 'auto', preTokens: 160_000, postTokens: 12_000 }] }),
         );
         assert.strictEqual(compacted.text, '$(comment-discussion) 12.0K · 1%');
         assert.ok(compacted.tooltip.some(l => l.includes('12,000 of 1,000,000 tokens') && l.includes('after compacting')));
 
         const before = describeLive(
-            live({ compactions: [{ uuid: 'c', sessionId: 's', kind: 'main', timestamp: Date.UTC(2026, 9, 9, 9), trigger: 'manual', preTokens: 100_000, postTokens: 9_000 }] }),
+            live({ compactions: [{ provider: 'claude-code', uuid: 'c', sessionId: 's', kind: 'main', timestamp: Date.UTC(2026, 9, 9, 9), trigger: 'manual', preTokens: 100_000, postTokens: 9_000 }] }),
         );
         assert.strictEqual(before.text, '$(comment-discussion) 850.0K · 85%'.replace('$(comment-discussion)', '$(warning)'));
         assert.ok(before.tooltip.some(l => l.startsWith('Compactions: 1, the last 100,000 → 9,000')));

@@ -236,7 +236,7 @@ suite('usage report', () => {
         );
         assert.deepStrictEqual(session.compactions.map(c => [c.trigger, c.preTokens, c.postTokens]), [['auto', 160_000, 12_000]]);
         assert.deepStrictEqual(report.limitWindows, [
-            { account: 'none', limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
+            { provider: 'claude-code', account: 'none', limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
         ]);
         assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0, accounts: 0, accountsSeen: 0 });
         assert.deepStrictEqual([report.coverage.requests, report.coverage.files], [4, 4]);
@@ -665,6 +665,7 @@ suite('usage report', () => {
     test('limit windows are capped at the newest, the rest counted', () => {
         const store = freshStore();
         const hits = Array.from({ length: 210 }, (_, i) => ({
+            provider: 'claude-code' as const,
             uuid: `l${i}`,
             sessionId: 's',
             timestamp: Date.UTC(2026, 9, 1) + i * 60_000,
@@ -788,7 +789,7 @@ suite('usage report', () => {
                 ['none', 1, Date.parse('2026-10-09T06:30:00Z'), Date.parse('2026-10-09T06:30:00Z')],
             ]);
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
+            assert.deepStrictEqual([...store.accountNumbers('claude-code').keys()], [`${C}/`]);
             // Chosen, C shows its limit.
             assert.deepStrictEqual(queryReport(store, query({ account: `${C}/` })).limitWindows.map(w => w.account), [`${C}/`]);
         });
@@ -839,7 +840,7 @@ suite('usage report', () => {
             ]);
             // D was used first: it is 1, by its limit, not by C's request after it.
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers('claude-code')].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
             // Everything held starts at that limit, and lists it; it ends at its newest record, the last limit before the clock.
             assert.strictEqual(report.coverage.start, Date.parse('2026-10-07T07:00:00Z'));
             assert.strictEqual(report.coverage.newest, Date.parse('2026-10-10T10:30:00Z'));
@@ -906,7 +907,7 @@ suite('usage report', () => {
             // F is used by that refusal: offered as the numbering takes it.
             store.transaction(() => store.numberAccounts('claude-code'));
             assert.ok(`${F}/` in seen, JSON.stringify(Object.keys(seen)));
-            assert.ok(store.accountNumbers().has(`${F}/`));
+            assert.ok(store.accountNumbers('claude-code').has(`${F}/`));
             // A session that records no account, its only record a refusal dated ahead: nothing to show, nothing offered.
             assert.ok(!('none' in seen), JSON.stringify(Object.keys(seen)));
         });
@@ -962,7 +963,7 @@ suite('usage report', () => {
             assert.deepStrictEqual(report.limitWindows.map(w => w.account), [`${C}/`]);
             assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions]), [[`${C}/`, 1], ['none', 1]]);
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
+            assert.deepStrictEqual([...store.accountNumbers('claude-code').keys()], [`${C}/`]);
         });
 
         test('tokens are split by account and organization, subagents included, the sessions that record none in a row of their own', async () => {
@@ -1021,9 +1022,9 @@ suite('usage report', () => {
             assert.deepStrictEqual(numbers(), [
                 [keyA, null, null, 2], [keyB, null, null, 1], [keyA2, null, null, 2], ['none', null, null, 0],
             ]);
-            assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), {});
+            assert.deepStrictEqual(Object.fromEntries(store.accountNumbers('claude-code')), {});
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.strictEqual(store.accountNumbers().size, 3);
+            assert.strictEqual(store.accountNumbers('claude-code').size, 3);
             assert.deepStrictEqual(numbers(), [
                 [keyA, 1, 1, 2], [keyA2, 1, 2, 2], [keyB, 2, 1, 1], ['none', null, null, 0],
             ]);
@@ -1122,7 +1123,7 @@ suite('usage report', () => {
             const report = queryReport(store, query());
             assert.deepStrictEqual(report.accounts.map(a => [a.key, a.totals.output]), [[`${C}/`, 20], [keyA, 10]]);
             assert.deepStrictEqual(report.limitWindows.map(w => w.account), [`${E}/`]);
-            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [keyA]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers('claude-code')].map(([key, n]) => [key, n.ordinal])), { [keyA]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
         });
 
         test('one account chosen narrows a range too, and a request whose session the history has no row for counts under the owner it records, or none', async () => {
@@ -1174,6 +1175,7 @@ suite('usage report', () => {
     test('accounts are capped as the other lists are: those with most tokens listed, those with most sessions offered', () => {
         const owner = (i: number) => ({ accountUuid: `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`, organizationUuid: null });
         const sessions = Array.from({ length: 260 }, (_, i) => ({
+            provider: 'claude-code' as const,
             sessionId: `s${i}`,
             project: { kind: 'root' as const, path: '/repo' },
             projectKey: 'root:/repo',
@@ -1187,6 +1189,7 @@ suite('usage report', () => {
         const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
         const sums = [...sessions, ...extra].map((s, i) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
+            provider: 'claude-code' as const,
             sessionId: s.sessionId,
             model: 'claude-opus-5-5',
             variant: null,
@@ -1238,6 +1241,7 @@ suite('usage report', () => {
     test('accounts are offered by the numbers kept, whatever first use says now, and one a session or a limit names is kept past the cap', () => {
         const id = (i: number) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
         const session = (sessionId: string, accountUuid: string, firstTs: number) => ({
+            provider: 'claude-code' as const,
             sessionId,
             project: { kind: 'root' as const, path: '/repo' },
             projectKey: 'root:/repo',
@@ -1249,6 +1253,7 @@ suite('usage report', () => {
         });
         const sum = (sessionId: string, input: number) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
+            provider: 'claude-code' as const,
             sessionId,
             model: 'claude-opus-5-5',
             variant: null,
@@ -1315,7 +1320,7 @@ suite('usage report', () => {
         const crowd = Array.from({ length: 201 }, (_, i) => [session(`a${i}`, id(i), i), session(`b${i}`, id(i), i)]).flat();
         const z = session('z', id(999), 1_000);
         const sums = [...crowd.map(s => sum(s.sessionId, 2)), sum('z', 1)];
-        const hit = { uuid: 'h', sessionId: 'z', timestamp: Date.UTC(2026, 9, 9, 12), limitType: 'five_hour', resetsAt: null };
+        const hit = { provider: 'claude-code' as const, uuid: 'h', sessionId: 'z', timestamp: Date.UTC(2026, 9, 9, 12), limitType: 'five_hour', resetsAt: null };
         const base = { sums, sessions: [...crowd, z], compactions: [], coverage };
         const zKey = `${id(999)}/`;
         const listed = buildReport({ ...base, limitHits: [] }, { ...options, maxSessions: 1_000 });
@@ -1332,6 +1337,7 @@ suite('usage report', () => {
         const owners = Array.from({ length: 300 }, (_, i) => ({ owner: { accountUuid: id(i), organizationUuid: null }, sinceTs: at(i) }));
         const sums = owners.map((o, i) => ({
             bucket: Math.floor(at(i) / BUCKET_MS),
+            provider: 'claude-code' as const,
             sessionId: 's',
             model: 'claude-opus-5-5',
             variant: null,
@@ -1358,7 +1364,7 @@ suite('usage report', () => {
         const report = buildReport(
             {
                 sums,
-                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null, limitSpans: [], uses: [] }],
+                sessions: [{ provider: 'claude-code', sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null, limitSpans: [], uses: [] }],
                 compactions: [],
                 limitHits: [],
                 coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },
@@ -1367,6 +1373,240 @@ suite('usage report', () => {
         );
         assert.deepStrictEqual([report.sessions[0].accounts, report.sessions[0].moreAccounts], [[`${id(0)}/`, `${id(1)}/`, `${id(2)}/`], 297]);
         assert.deepStrictEqual([report.accountsSeen.length, report.omitted.accountsSeen], [200, 100]);
+    });
+
+    suite("two agents' sessions with one id, in each lookup and order", () => {
+        const A = { accountUuid: '00000000-0000-4000-8000-00000000000a', organizationUuid: null };
+        const keyA = `${A.accountUuid}/`;
+        const t = (minute: number) => Date.UTC(2026, 9, 10, 11, minute);
+        const session = (provider: 'claude-code' | 'codex', owners: { owner: typeof A; sinceTs: number | null }[]) => ({
+            provider,
+            sessionId: 'x',
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: true,
+            firstTs: t(1),
+            lastTs: t(10),
+            owners,
+            unownedHitTs: null,
+            limitSpans: [],
+            uses: [],
+        });
+        const hit = (provider: 'claude-code' | 'codex') => ({
+            provider,
+            uuid: `h-${provider}`,
+            sessionId: 'x',
+            timestamp: t(5),
+            limitType: 'five_hour',
+            resetsAt: null,
+            owner: null,
+        });
+        const sum = (provider: 'claude-code' | 'codex') => ({
+            bucket: Math.floor(t(1) / BUCKET_MS),
+            provider,
+            sessionId: 'x',
+            model: 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: t(1),
+            lastTs: t(2),
+            input: 5,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        });
+        const coverage = { start: t(1), newest: t(10), requests: 2, ahead: 0, files: 2, oversizeLines: 0, malformedLines: 0 };
+        const options = { range: 'today' as const, zone: 'UTC', now: FIXTURE_NOW, scope: 'workspace' as const };
+        const orders = [
+            ['claude-code', 'codex'],
+            ['codex', 'claude-code'],
+        ] as const;
+
+        test("a limit that records no owner takes its own agent's session's owner, and two agents' limits of one time are listed in agent order, in any order given", () => {
+            const owners = { 'claude-code': [{ owner: A, sinceTs: t(1) }], codex: [] };
+            for (const order of orders) {
+                const report = buildReport(
+                    { sums: [], sessions: order.map(p => session(p, owners[p])), compactions: [], limitHits: order.map(hit), coverage },
+                    options,
+                );
+                assert.deepStrictEqual(
+                    report.limitWindows.map(w => [w.provider, w.account]),
+                    [
+                        ['claude-code', keyA],
+                        ['codex', null],
+                    ],
+                    order.join(),
+                );
+            }
+        });
+
+        test('sessions alike in tokens and time are listed in agent order, in any order given, and kept so at the cap', () => {
+            for (const order of orders) {
+                const input = { sums: order.map(sum), sessions: order.map(p => session(p, [])), compactions: [], limitHits: [], coverage };
+                assert.deepStrictEqual(
+                    [buildReport(input, options).sessions.map(s => s.provider), buildReport(input, { ...options, maxSessions: 1 }).sessions.map(s => s.provider)],
+                    [['claude-code', 'codex'], ['claude-code']],
+                    order.join(),
+                );
+            }
+        });
+
+        test('a limit of an agent whose accounts are not told apart keeps no account that records none past the cap of accounts seen', () => {
+            const id = (i: number) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
+            // 201 accounts with a session each, then one session before the range that records none: past the cap of 200.
+            const sessions = [
+                ...Array.from({ length: 201 }, (_, i) => ({ ...session('claude-code', [{ owner: { accountUuid: id(i), organizationUuid: null }, sinceTs: null }]), sessionId: `s${i}` })),
+                { ...session('claude-code', []), sessionId: 'old', firstTs: t(1) - 86_400_000, lastTs: t(1) - 86_400_000 },
+                session('codex', []),
+            ];
+            const report = buildReport({ sums: [], sessions, compactions: [], limitHits: [hit('codex')], coverage }, options);
+            assert.deepStrictEqual(
+                [report.limitWindows.map(w => [w.provider, w.account]), report.accountsSeen.length, report.accountsSeen.some(a => a.key === 'none')],
+                [[['codex', null]], 200, false],
+            );
+        });
+    });
+
+    test("two agents' sessions with one id are two, each with its own time, project row, accounts, limits and compactions", () => {
+        const A = { accountUuid: '00000000-0000-4000-8000-00000000000a', organizationUuid: null };
+        const keyA = `${A.accountUuid}/`;
+        const t = (minute: number) => Date.UTC(2026, 9, 10, 11, minute);
+        const sum = (provider: 'claude-code' | 'codex', first: number, last: number, input: number) => ({
+            bucket: Math.floor(t(first) / BUCKET_MS),
+            provider,
+            sessionId: 'x',
+            model: provider === 'codex' ? 'gpt-5.5' : 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 2,
+            completeRequests: 2,
+            firstTs: t(first),
+            lastTs: t(last),
+            input,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        });
+        const session = (provider: 'claude-code' | 'codex', owners: { owner: typeof A; sinceTs: number | null }[]) => ({
+            provider,
+            sessionId: 'x',
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: true,
+            firstTs: t(1),
+            lastTs: t(10),
+            owners,
+            unownedHitTs: null,
+            limitSpans: [],
+            uses: [],
+        });
+        const hit = (provider: 'claude-code' | 'codex', owner: typeof A | null) => ({
+            provider,
+            uuid: `h-${provider}`,
+            sessionId: 'x',
+            timestamp: t(5),
+            limitType: 'five_hour',
+            resetsAt: null,
+            owner,
+        });
+        const compaction = (provider: 'claude-code' | 'codex', preTokens: number) => ({
+            provider,
+            uuid: 'c',
+            sessionId: 'x',
+            kind: 'main' as const,
+            timestamp: t(4),
+            trigger: 'auto',
+            preTokens,
+            postTokens: 1,
+        });
+        // Claude Code's x worked from 11:01 to 11:03 under A; Codex's x, from 11:02 to 11:10, under no account.
+        const input = {
+            sums: [sum('claude-code', 1, 3, 1), sum('codex', 2, 10, 10)],
+            sessions: [session('claude-code', [{ owner: A, sinceTs: null }]), session('codex', [])],
+            compactions: [compaction('claude-code', 100), compaction('codex', 200)],
+            limitHits: [hit('claude-code', A), hit('codex', null)],
+            coverage: { start: t(1), newest: t(10), requests: 4, ahead: 0, files: 2, oversizeLines: 0, malformedLines: 0 },
+        };
+        const options = { range: 'today' as const, zone: 'UTC', now: FIXTURE_NOW, scope: 'workspace' as const };
+        const report = buildReport(input, options);
+        const rows = Object.fromEntries(report.sessions.map(s => [s.provider, s]));
+        assert.deepStrictEqual(
+            [rows['claude-code'].activeMs, rows.codex.activeMs, rows['claude-code'].accounts, rows.codex.accounts],
+            [2 * 60_000, 8 * 60_000, [keyA], []],
+        );
+        assert.deepStrictEqual(
+            [rows['claude-code'].compactions.map(c => c.preTokens), rows.codex.compactions.map(c => c.preTokens)],
+            [[100], [200]],
+        );
+        // One folder, two sessions; accounts are Claude Code's, and Codex's tokens are in none of them.
+        assert.deepStrictEqual([report.projects.length, report.projects[0].sessions, report.totals.input], [1, 2, 11]);
+        assert.deepStrictEqual(report.accounts.map(a => [a.key, a.sessions, a.totals.input]), [[keyA, 1, 1]]);
+        assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions]), [[keyA, 1]]);
+        // Each agent's limit is a window of its own, Codex's of no account.
+        assert.deepStrictEqual(
+            report.limitWindows.map(w => [w.provider, w.account, w.hits]),
+            [
+                ['claude-code', keyA, 1],
+                ['codex', null, 1],
+            ],
+        );
+        // An account chosen is Claude Code's: none of Codex's requests or limits are its, nor those that record none.
+        const chosen = buildReport(input, { ...options, account: keyA });
+        assert.deepStrictEqual(
+            [chosen.totals.input, chosen.sessions.map(s => s.provider), chosen.limitWindows.map(w => w.provider)],
+            [1, ['claude-code'], ['claude-code']],
+        );
+        const none = buildReport(input, { ...options, account: 'none' });
+        assert.deepStrictEqual([none.totals.coverage.requests, none.sessions.length, none.limitWindows.length], [0, 0, 0]);
+    });
+
+    test("a session with no cwd is grouped by its project folder, another agent's apart from Claude Code's", () => {
+        const stored = (provider: 'claude-code' | 'codex', projectDir: string) => ({
+            provider,
+            sessionId: 'x',
+            root: '/root',
+            cwd: null,
+            cwdTs: null,
+            projectDir,
+            firstTs: 1,
+            lastTs: 1,
+            owners: [],
+            unownedHitTs: null,
+            limitSpans: [],
+            uses: [],
+        });
+        const sessions = reportSessions([stored('claude-code', 'p'), stored('codex', 'p'), stored('claude-code', 'codex:p')], query());
+        assert.deepStrictEqual(
+            sessions.map(s => [s.provider, s.projectKey]),
+            [
+                ['claude-code', 'dir:p'],
+                ['codex', 'codex:dir:p'],
+                // A folder named like another agent's key is still Claude Code's own.
+                ['claude-code', 'dir:codex:p'],
+            ],
+        );
     });
 
     test('a missing counter makes the report a lower bound', () => {

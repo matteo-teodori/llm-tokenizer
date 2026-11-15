@@ -427,8 +427,8 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     // the session, whatever order they are read in.
     const requests = [...dedupe(result.requests).values()];
     store.upsertRequests(requests);
-    store.insertCompactions(PROVIDER, result.compactions);
-    store.insertLimitHits(PROVIDER, result.limitHits);
+    store.insertCompactions(result.compactions);
+    store.insertLimitHits(result.limitHits);
     if (file.kind === 'main') {
         store.putOwnerChanges(PROVIDER, file.path, file.projectDir, result.ownerChanges, result.firstRequestTs, result.restarted !== null);
         if (result.restarted === null && previous && previous.offset > 0 && needsOwnerScan(file, previous)) {

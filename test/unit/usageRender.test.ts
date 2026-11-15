@@ -39,6 +39,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
         projects: [{ project: { kind: 'root', path: `/repo/${HOSTILE}` }, label: HOSTILE, sessions: 1, totals: t, models: [] }],
         sessions: [
             {
+                provider: 'claude-code',
                 sessionId: HOSTILE,
                 project: { kind: 'root', path: `/repo/${HOSTILE}` },
                 label: HOSTILE,
@@ -49,7 +50,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
                 activeMs: 47 * 60_000,
                 totals: t,
                 models: [],
-                compactions: [{ uuid: 'c', sessionId: HOSTILE, kind: 'main', timestamp: 0, trigger: HOSTILE, preTokens: 160_000, postTokens: 12_000 }],
+                compactions: [{ provider: 'claude-code', uuid: 'c', sessionId: HOSTILE, kind: 'main', timestamp: 0, trigger: HOSTILE, preTokens: 160_000, postTokens: 12_000 }],
             },
         ],
         dayModels: [{ date: '2026-10-09', model: '=cmd|"/c calc"!A1', variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: t }],
@@ -57,7 +58,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
         accountsSeen: [{ key: 'none', owner: null, sessions: 1, firstTs: Date.UTC(2026, 9, 9, 10), lastTs: Date.UTC(2026, 9, 9, 11, 30), ordinal: null, organizationOrdinal: null, organizations: 0 }],
         accountNames: [],
         currentAccounts: [],
-        limitWindows: [{ account: 'none', limitType: HOSTILE, resetsAt: 1791561600, hits: 2, firstTs: Date.UTC(2026, 9, 9, 10, 6), date: '2026-10-09' }],
+        limitWindows: [{ provider: 'claude-code', account: 'none', limitType: HOSTILE, resetsAt: 1791561600, hits: 2, firstTs: Date.UTC(2026, 9, 9, 10, 6), date: '2026-10-09' }],
         omitted: { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0, accounts: 0, accountsSeen: 0 },
         coverage: { start: Date.UTC(2026, 9, 1), newest: Date.UTC(2026, 9, 9, 11), requests: 3, ahead: 0, files: 4, oversizeLines: 0, malformedLines: 0 },
         ...overrides,
@@ -906,7 +907,7 @@ suite('usage page', () => {
     });
 
     test('Usage limits reached lists the newest first, a page at a time', () => {
-        const windows = Array.from({ length: 12 }, (_, i) => ({ account: 'none', limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, i), date: '2026-10-09' }));
+        const windows = Array.from({ length: 12 }, (_, i) => ({ provider: 'claude-code' as const, account: 'none', limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, i), date: '2026-10-09' }));
         const body = renderFragments(view({ report: report({ limitWindows: windows }) })).body;
         const newest = body.indexOf('refused from 2026-10-09 11:00');
         const oldest = body.indexOf('refused from 2026-10-09 00:00');
@@ -1362,8 +1363,8 @@ suite('usage page', () => {
     test("a session's account is on hover and in Copy; a limit says whose it is once there are two; one account's export says which", () => {
         const both = accountsReport({
             limitWindows: [
-                { account: KEY_A, limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, 10), date: '2026-10-09' },
-                { account: `${ID_B}/`, limitType: 'five_hour', resetsAt: null, hits: 2, firstTs: Date.UTC(2026, 9, 9, 11), date: '2026-10-09' },
+                { provider: 'claude-code', account: KEY_A, limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, 10), date: '2026-10-09' },
+                { provider: 'claude-code', account: `${ID_B}/`, limitType: 'five_hour', resetsAt: null, hits: 2, firstTs: Date.UTC(2026, 9, 9, 11), date: '2026-10-09' },
             ],
         });
         const fragments = renderFragments(view({ report: both }));
@@ -1412,6 +1413,19 @@ suite('usage page', () => {
         );
         const line = semicolon.click('export').split('\n').find(l => l.startsWith('# range: ')) ?? '';
         assert.ok(line.endsWith('(x =1+1)') && !line.includes(';'), line);
+    });
+
+    test("another agent's limit, of no account, names none, and makes no page of one account say whose", () => {
+        const claude = { provider: 'claude-code' as const, account: `${ID_B}/`, limitType: 'five_hour', resetsAt: null, hits: 2, firstTs: Date.UTC(2026, 9, 9, 11), date: '2026-10-09' };
+        const codex = { provider: 'codex' as const, account: null, limitType: 'five_hour', resetsAt: null, hits: 1, firstTs: Date.UTC(2026, 9, 9, 11, 30), date: '2026-10-09' };
+        const both = accountsReport({ limitWindows: [claude, codex] });
+        // One account seen: neither line says whose.
+        const single = renderFragments(view({ report: { ...both, accountsSeen: both.accountsSeen.slice(1, 2) } })).body;
+        assert.ok(single.includes('<li><span>five hour limit, 2 requests refused') && single.includes('For the whole account, whichever project'), single);
+        // Two seen: Claude Code's says whose; Codex's names no account, not even as one not recorded.
+        const two = renderFragments(view({ report: both })).body;
+        assert.ok(two.includes('<li><span>Account 2: five hour limit, 2 requests refused'), two);
+        assert.ok(two.includes('<li><span>five hour limit, 1 request refused'), two);
     });
 
     test('the diagnostics say which configuration file names the accounts, or that none does', () => {

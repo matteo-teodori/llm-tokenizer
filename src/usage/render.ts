@@ -517,15 +517,17 @@ function limitWindows(report: UsageReport, view: PanelView): string {
     // Newest first: the page in view on opening is the latest limits.
     const windows = [...report.limitWindows].reverse();
     // A limit is an account's: where the page holds more than one account's
-    // sessions, each says whose, though one account alone hit any.
+    // sessions, each says whose, though one account alone hit any. Another
+    // agent's, whose accounts are not told apart, names none.
     const labels = labelsOf(view);
-    const whose = new Set(windows.map(w => w.account)).size > 1 || (view.account === ALL_ACCOUNTS && report.accountsSeen.length > 1);
+    const hitBy = new Set(windows.flatMap(w => (w.account === null ? [] : [w.account])));
+    const whose = hitBy.size > 1 || (view.account === ALL_ACCOUNTS && report.accountsSeen.length > 1);
     const pages = pagesOf(windows).map(
         (page, i) =>
             `<ul class="page plain-list"${i > 0 ? ' inert' : ''}>${page
                 .map(
                     w =>
-                        `<li><span>${whose ? `${escapeHtml(labelOf(labels, w.account))}: ` : ''}${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
+                        `<li><span>${whose && w.account !== null ? `${escapeHtml(labelOf(labels, w.account))}: ` : ''}${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
                             w.hits === 1 ? 'request' : 'requests'
                         } refused from ${escapeHtml(view.formatTime(w.firstTs))}</span><span class="reason">${
                             w.resetsAt !== null ? `reset ${escapeHtml(view.formatTime(w.resetsAt * 1000))}` : ''

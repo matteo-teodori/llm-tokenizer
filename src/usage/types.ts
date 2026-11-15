@@ -11,8 +11,12 @@
  * only a lower bound (see `provenance.ts`).
  */
 
-/** Every key carries its provider, so a second one costs no migration. */
-export type UsageProvider = 'claude-code';
+/**
+ * The coding agent a record was read from. Every key carries it, in the
+ * history and in a report: two agents' sessions or requests with one id,
+ * by chance or by a hostile record, are two.
+ */
+export type UsageProvider = 'claude-code' | 'codex';
 
 /**
  * Which kind of transcript a request was read from. Main, task and workflow
@@ -41,7 +45,7 @@ export interface TokenCounts {
 /** One request: the record chosen to represent one `message.id`. */
 export interface UsageRequest extends TokenCounts {
     provider: UsageProvider;
-    /** The request's key, global across files and roots. */
+    /** The request's key within its agent, across files and roots. */
     messageId: string;
     /** An attribute only: OpenTelemetry joins on it. */
     requestId: string | null;
@@ -85,13 +89,15 @@ export interface UsageRequest extends TokenCounts {
      * The account it was made with, where its own transcript says: the
      * owner its main transcript records before it. Null or absent where none
      * does, as for a subagent's: a report then takes its session's owner at
-     * its time, and its first owner before any (see `OwnerChange`).
+     * its time, and its first owner before any (see `OwnerChange`), for
+     * Claude Code's; another agent's are no account's (see ACCOUNT_PROVIDER).
      */
     owner?: SessionOwner | null;
 }
 
 /** A context compaction: how many tokens a session held before and after it. */
 export interface Compaction {
+    provider: UsageProvider;
     uuid: string;
     sessionId: string;
     /** The transcript it was in: a subagent compacts its own context. */
@@ -103,10 +109,11 @@ export interface Compaction {
 }
 
 /**
- * A request Claude Code was refused because a usage limit was reached. A log
+ * A request an agent was refused because a usage limit was reached. A log
  * of hits, not a gauge of how much of an allowance is used.
  */
 export interface LimitHit {
+    provider: UsageProvider;
     uuid: string;
     sessionId: string;
     timestamp: number;
@@ -188,6 +195,7 @@ export type PromptSize = 'up-to-100k' | '100k-to-200k' | 'over-200k';
 export interface BucketSums {
     /** `floor(ts / BUCKET_MS)`. */
     bucket: number;
+    provider: UsageProvider;
     sessionId: string;
     model: string;
     variant: string | null;
@@ -200,7 +208,7 @@ export interface BucketSums {
     /**
      * The account the requests were made with, where their own transcript
      * records it before them; null elsewhere, and a report takes their
-     * session's owner at their time.
+     * session's owner at their time, for Claude Code's (see ACCOUNT_PROVIDER).
      */
     owner: SessionOwner | null;
     requests: number;

@@ -49,8 +49,9 @@ export type UsageWorkerRequest =
      * `workspaceFolders` null reports every project. `progress`: with how
      * many files the running pass has to go through, which takes a walk of
      * every root; asked only once the page says how far a pass has gone.
-     * `account`: one account's sessions only, by `accountKey`, or those that
-     * recorded none; every session when absent. `accountFiles`: where
+     * `account`: one account's sessions only, by `accountKey`, or Claude
+     * Code's that recorded none (another agent's are no account's); every
+     * session when absent. `accountFiles`: where
      * Claude Code names its accounts; `signedInFiles`, those of them that
      * say which it is signed in to now.
      */

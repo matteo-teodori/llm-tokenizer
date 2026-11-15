@@ -26,7 +26,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parentPort, workerData } from 'worker_threads';
 
-import { isAccountFilter } from './usage/accounts';
+import { ACCOUNT_PROVIDER, isAccountFilter } from './usage/accounts';
 import { isTimeZone } from './usage/aggregate';
 import { readClaudeAccounts } from './usage/claudeAccounts';
 import { importUnderLease } from './usage/importer';
@@ -443,8 +443,9 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             reply({
                 type: 'liveContext',
                 id: request.id,
-                latest: store.latestMainRequest(request.sessionId, rangeUntil(Date.now())) ?? null,
-                compactions: store.sessionCompactions(request.sessionId, rangeUntil(Date.now())).slice(0, 20),
+                // The status item's: Claude Code's live sessions alone.
+                latest: store.latestMainRequest('claude-code', request.sessionId, rangeUntil(Date.now())) ?? null,
+                compactions: store.sessionCompactions('claude-code', request.sessionId, rangeUntil(Date.now())).slice(0, 20),
                 ...takeRecovered(),
             });
             return;
@@ -488,8 +489,9 @@ function settleAccounts(store: UsageStore, files: string[], read: 'whole' | 'som
         if (read === 'whole') {
             readThrough = history;
         }
-        if (read !== 'none' && readThrough === history && store.hasUnnumberedAccounts('claude-code')) {
-            store.transaction(() => store.numberAccounts('claude-code'));
+        // Numbered as the report reads them; the names below are Claude Code's own configuration's.
+        if (read !== 'none' && readThrough === history && store.hasUnnumberedAccounts(ACCOUNT_PROVIDER)) {
+            store.transaction(() => store.numberAccounts(ACCOUNT_PROVIDER));
         }
         const { names } = readClaudeAccounts(files);
         const said = JSON.stringify([store.file, store.storeId(), store.generation(), names]);
