@@ -30,7 +30,8 @@ import { numberAccounts, type AccountNumber } from './accounts';
 import { BUCKET_MS } from './aggregate';
 import { backupsBeside, copiesBeside, currentHistory, linkWhole, ownFiles, removeQuietly } from './historyFiles';
 import { isComplete } from './provenance';
-import { OWNERS_SINCE, PARSER_VERSION } from './transcripts';
+import { PARSER_VERSION } from './lines';
+import { OWNERS_SINCE } from './transcripts';
 import type {
     BucketSums,
     Compaction,

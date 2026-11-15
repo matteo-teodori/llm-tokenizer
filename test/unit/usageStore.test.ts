@@ -10,7 +10,8 @@ import { createHistory, publishHistory, resolveHistory } from '../../src/usage/h
 import { queryReport } from '../../src/usage/queries';
 import { ownerAt } from '../../src/usage/report';
 import { LEASE_TAKEOVER_MS, SCHEMA_VERSION, UsageStore, loadSqlite, type FileCheckpoint, type OpenResult } from '../../src/usage/store';
-import { OWNERS_SINCE, PARSER_VERSION } from '../../src/usage/transcripts';
+import { PARSER_VERSION } from '../../src/usage/lines';
+import { OWNERS_SINCE } from '../../src/usage/transcripts';
 import type { SessionOwner, UsageRequest } from '../../src/usage/types';
 
 const sqlite = loadSqlite();

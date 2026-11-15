@@ -6,7 +6,7 @@ import * as path from 'path';
 
 import { totalsOf } from '../../src/usage/aggregate';
 import { currentHistory } from '../../src/usage/historyFiles';
-import { PARSER_VERSION } from '../../src/usage/transcripts';
+import { PARSER_VERSION } from '../../src/usage/lines';
 import { UsageStore, loadSqlite } from '../../src/usage/store';
 
 const FIXTURE_ROOT = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'claude-config');

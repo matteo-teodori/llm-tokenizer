@@ -11,12 +11,10 @@ import { execFileSync } from 'child_process';
 import { Worker } from 'worker_threads';
 
 import { queryReport } from '../../src/usage/queries';
+import { MAX_LINE_BYTES, MAX_PARSED_LINE_BYTES, PARSER_VERSION } from '../../src/usage/lines';
 import {
     MAX_COUNTER,
-    MAX_LINE_BYTES,
-    MAX_PARSED_LINE_BYTES,
     OWNERS_SINCE,
-    PARSER_VERSION,
     ROWS_SINCE,
     newerVersion,
     readTranscript,
@@ -469,7 +467,7 @@ suite('usage transcripts', () => {
         transcripts(2);
         const a = freshStore();
         const b = freshStore();
-        assert.ok(await importUnderLease(a, [tmp], 'window-a'));
+        assert.ok(await importUnderLease(a, [{ provider: 'claude-code', roots: [tmp] }], 'window-a'));
         assert.ok(b.acquireLease('import', 'window-b', PARSER_VERSION), "the finished pass kept the lease");
     });
 
@@ -1066,7 +1064,7 @@ suite('usage transcripts', () => {
         raw.exec("UPDATE requests SET owner = (SELECT min(id) FROM accounts) WHERE kind != 'main'; UPDATE files SET parser_version = 3 WHERE kind != 'main'");
         raw.close();
         assert.deepStrictEqual(owners(store), { a1: A, m1: A });
-        assert.ok(await importUnderLease(store, [tmp], 'window-a'));
+        assert.ok(await importUnderLease(store, [{ provider: 'claude-code', roots: [tmp] }], 'window-a'));
         assert.deepStrictEqual(owners(store), { a1: null, m1: A });
     });
 
@@ -1089,7 +1087,7 @@ suite('usage transcripts', () => {
             }
             fs.rmSync(path.join(tmp, 'store'), { recursive: true, force: true });
             const store = freshStore();
-            assert.ok(await importUnderLease(store, [tmp], 'window-a'));
+            assert.ok(await importUnderLease(store, [{ provider: 'claude-code', roots: [tmp] }], 'window-a'));
             const full = split(store);
             assert.deepStrictEqual(full, { output: { [KEY_A]: 5 + 3, [KEY_B]: 9 }, limits: [] }, `parser ${prerelease}`);
             // As that build left it: its checkpoints, the time it gave B (the error's), and itself the newest to hold the lease.
@@ -1100,7 +1098,7 @@ suite('usage transcripts', () => {
                       INSERT OR REPLACE INTO meta (key, value) VALUES ('newest_parser', '${prerelease}');`);
             raw.close();
             assert.notDeepStrictEqual(split(store), full, `parser ${prerelease}: the error's time gave B the subagent's request`);
-            const summary = await importUnderLease(store, [tmp], 'window-a');
+            const summary = await importUnderLease(store, [{ provider: 'claude-code', roots: [tmp] }], 'window-a');
             assert.ok(summary);
             assert.deepStrictEqual([summary.restarted, summary.records], [0, 0], `parser ${prerelease}: no row read again`);
             assert.deepStrictEqual(split(store), full, `parser ${prerelease}`);
@@ -1277,7 +1275,7 @@ suite('usage transcripts', () => {
         const b = freshStore({ now: () => now });
         const attempts: boolean[] = [];
         let yields = 0;
-        const summary = await importUnderLease(a, [tmp], 'window-a', {
+        const summary = await importUnderLease(a, [{ provider: 'claude-code', roots: [tmp] }], 'window-a', {
             filesPerYield: 2,
             pause: () => {
                 now += 15_000;
@@ -1293,7 +1291,7 @@ suite('usage transcripts', () => {
         });
         assert.deepStrictEqual(attempts, [false, true]);
         assert.deepStrictEqual([summary?.read, summary?.cancelled], [6, true]);
-        assert.strictEqual(await importUnderLease(a, [tmp], 'window-a'), null, 'the outdated window took the lease back');
+        assert.strictEqual(await importUnderLease(a, [{ provider: 'claude-code', roots: [tmp] }], 'window-a'), null, 'the outdated window took the lease back');
     });
 
     test('Claude Code versions compare by number, not as text', () => {

@@ -11,7 +11,7 @@ import { inFolders, queryReport, reportSessions, type ReportQuery } from '../../
 import { buildReport, ownerAt, rangeSince, rangeUntil, type RangeKey } from '../../src/usage/report';
 import { createHistory, currentHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
-import { PARSER_VERSION } from '../../src/usage/transcripts';
+import { PARSER_VERSION } from '../../src/usage/lines';
 import type { UsageRequest } from '../../src/usage/types';
 import { WorkerHost } from '../../src/workerHost';
 

@@ -29,10 +29,12 @@ import { parentPort, workerData } from 'worker_threads';
 import { ACCOUNT_PROVIDER, isAccountFilter } from './usage/accounts';
 import { isTimeZone } from './usage/aggregate';
 import { readClaudeAccounts } from './usage/claudeAccounts';
-import { importUnderLease } from './usage/importer';
+import { importUnderLease, type AgentRoots } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS, rangeUntil } from './usage/report';
-import { PARSER_VERSION, sessionTranscripts, walkProjects } from './usage/transcripts';
+import { PARSER_VERSION } from './usage/lines';
+import { readerOf } from './usage/readers';
+import { sessionTranscripts } from './usage/transcripts';
 import { HistoryFileError, claimFound, createHistory, publishHistory, removeHistory, removeLeftovers, resolveHistory, type Pointer } from './usage/historyFiles';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import {
@@ -90,7 +92,7 @@ let recovered: string | undefined;
 
 /** The import under way, for a report read meanwhile: how far it has gone. */
 interface Pass {
-    roots: string[];
+    sources: readonly AgentRoots[];
     paths: readonly string[] | undefined;
     /** Files gone through so far. */
     files: number;
@@ -107,7 +109,10 @@ let pass: Pass | undefined;
  */
 function progressOf(current: Pass, total: boolean): ImportProgress {
     if (total && current.of === undefined) {
-        current.of = current.roots.reduce((n, root) => n + walkProjects(root).files.length, 0);
+        current.of = current.sources.reduce((n, { provider, roots }) => {
+            const reader = readerOf(provider);
+            return reader ? roots.reduce((m, root) => m + reader.walk(root).files.length, n) : n;
+        }, 0);
     }
     // A transcript Claude Code started since the walk can take the pass past it.
     return current.of === undefined ? { files: current.files } : { files: current.files, of: Math.max(current.of, current.files) };
@@ -394,14 +399,15 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 reply({ type: 'failed', id: request.id, failure: 'outdated', errorName: 'StoreError' });
                 return;
             }
-            const current: Pass = { roots: request.roots, paths, files: 0, of: paths?.length };
+            const sources: AgentRoots[] = [{ provider: 'claude-code', roots: request.roots }];
+            const current: Pass = { sources, paths, files: 0, of: paths?.length };
             pass = current;
             let summary: Awaited<ReturnType<typeof importUnderLease>>;
             try {
                 summary = await holdingStore(() =>
                     importUnderLease(
                         store,
-                        request.roots,
+                        sources,
                         holderOf(request),
                         {
                             // The importer asks this once before each file: the count is how far it has gone.
@@ -437,7 +443,13 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             if (paths.length > 0 && result.status === 'ready' && !store.outdated(PARSER_VERSION)) {
                 // Null when another window holds the lease: what is stored is read all the same.
                 await holdingStore(() =>
-                    importUnderLease(store, request.roots, holderOf(request), { isCancelled, countCrashes: request.crashed === true, progress: beat }, paths),
+                    importUnderLease(
+                        store,
+                        [{ provider: 'claude-code', roots: request.roots }],
+                        holderOf(request),
+                        { isCancelled, countCrashes: request.crashed === true, progress: beat },
+                        paths,
+                    ),
                 );
             }
             reply({
