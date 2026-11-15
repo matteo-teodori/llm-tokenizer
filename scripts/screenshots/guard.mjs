@@ -1,8 +1,8 @@
 /**
  * The refusals both scripts make before they write anything: the work folder
- * must be a scratch folder of this pipeline's own, never one Claude Code or the
- * extension could take for real records, and the demo's day must have room
- * for today's sessions.
+ * must be a scratch folder of this pipeline's own, never one Claude Code,
+ * Codex or the extension could take for real records, and the demo's day
+ * must have room for today's sessions.
  */
 
 import { existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
@@ -30,15 +30,16 @@ const within = (p, folder) => p === folder || p.startsWith(`${folder}/`);
 export function claimWork(work) {
     const home = os.homedir();
     const at = comparable(work);
-    // Every data folder Claude Code reads, and the extension with it.
-    const dataFolders = [join(home, '.claude'), process.env.CLAUDE_CONFIG_DIR].filter(Boolean).map(comparable);
+    // Every data folder Claude Code and Codex read, and the extension with them.
+    const dataFolders = [join(home, '.claude'), process.env.CLAUDE_CONFIG_DIR, join(home, '.codex'), process.env.CODEX_HOME].filter(Boolean).map(comparable);
     if (within(comparable(home), at) || dataFolders.some(folder => within(at, folder))) {
-        throw new Error('the work folder must be a scratch folder of its own: not the home, nor in a Claude Code data folder');
+        throw new Error('the work folder must be a scratch folder of its own: not the home, nor in a Claude Code or Codex data folder');
     }
     // A data folder named elsewhere, in a setting or a settings file, reads
-    // every transcript under its projects/: nothing goes under one.
-    if (at.split('/').includes('projects')) {
-        throw new Error('the work folder must not be inside a folder named projects, where it could be read as Claude Code records');
+    // every transcript under its projects/, and a Codex home every rollout
+    // under its sessions/ and archived_sessions/: nothing goes under one.
+    if (at.split('/').some(part => ['projects', 'sessions', 'archived_sessions'].includes(part))) {
+        throw new Error('the work folder must not be inside a folder named projects, sessions or archived_sessions, where it could be read as an agent\'s records');
     }
     const mark = join(work, '.llm-tokenizer-screenshots');
     if (existsSync(work) && !existsSync(mark) && readdirSync(work).length > 0) {

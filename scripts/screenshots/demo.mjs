@@ -3,7 +3,8 @@
  * acme-storefront, and 30 days of Claude Code records for it and four other
  * invented projects, laid out as Claude Code lays out its own, on three
  * invented Claude accounts, with Claude Code's own configuration file naming
- * the one signed in now and one other.
+ * the one signed in now and one other; and 27 days of Codex rollouts for
+ * three of those projects, from a generator of their own.
  *
  *   node demo.mjs <work dir> [now, ISO 8601]
  *
@@ -335,6 +336,147 @@ void morning;
 // its own two days ago, made last so that every figure before it stays.
 session({ project: 'data-pipeline', start: today - 2 * DAY + 10 * 3_600_000, minutes: 55, count: 60, model: 'claude-sonnet-5-5' });
 
+// ── Codex's rollouts, from a generator of their own ─────────────────────────
+// Made after Claude Code's, from a seed of their own, so that every figure of
+// Claude Code's stays as it was. As Codex 0.169 writes them, under its home's
+// sessions/YYYY/MM/DD (local time, which the capture runs in UTC): a record
+// per model response, the running totals after it with the limits' snapshot,
+// each turn's start, context and end, and a subagent's rollout of its own.
+const codex = join(home, '.codex');
+const codexTotals = { requests: 0, sessions: 0, limits: 0, input: 0, cacheCreation: 0, cacheRead: 0, output: 0, thinking: 0 };
+{
+    let codexSeed = 20261115;
+    const crand = () => {
+        codexSeed = (codexSeed + 0x6d2b79f5) | 0;
+        let t = Math.imul(codexSeed ^ (codexSeed >>> 15), 1 | codexSeed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const cbetween = (lo, hi) => lo + Math.floor(crand() * (hi - lo + 1));
+    const cpick = weighted => {
+        let r = crand() * weighted.reduce((s, [, w]) => s + w, 0);
+        for (const [value, w] of weighted) {
+            if ((r -= w) < 0) return value;
+        }
+        return weighted[weighted.length - 1][0];
+    };
+    const chex = n => Array.from({ length: n }, () => Math.floor(crand() * 16).toString(16)).join('');
+    // Codex's thread ids are UUIDv7: their first 48 bits are when the thread began.
+    const thread = at => `${Math.floor(at).toString(16).padStart(12, '0').slice(0, 8)}-${Math.floor(at).toString(16).padStart(12, '0').slice(8)}-7${chex(3)}-${cpick([['8', 1], ['9', 1], ['a', 1], ['b', 1]])}${chex(3)}-${chex(12)}`;
+    const stamp = ms => new Date(ms).toISOString().slice(0, 19).replace(/:/g, '-');
+    const CODEX_PROJECTS = [
+        ['acme-storefront', 5],
+        ['inventory-api', 3],
+        ['data-pipeline', 2],
+    ];
+    const CODEX_MODELS = [
+        ['gpt-5.6-sol', 6],
+        ['gpt-5.5', 3],
+    ];
+    const codexByProject = {};
+    const rollout = (id, at) => join(codex, 'sessions', ...new Date(at).toISOString().slice(0, 10).split('-'), `rollout-${stamp(at)}-${id}.jsonl`);
+    /** A thread's rollout: `turns` turns of a few responses each, on a context that grows and is mostly read from the cache. */
+    function codexThread({ id, session, project, start, turns, model, effort, subagent, refused }) {
+        const cwd = join(home, 'code', project);
+        const file = rollout(id, start);
+        const lines = [];
+        const line = (at, type, payload) => lines.push(JSON.stringify({ timestamp: iso(Math.min(at, NOW - 60_000)), type, payload }));
+        line(start, 'session_meta', {
+            session_id: session,
+            id,
+            timestamp: iso(start),
+            cwd,
+            originator: 'codex_vscode',
+            cli_version: '0.169.0',
+            source: subagent ? { subagent: { thread_spawn: { parent_thread_id: session, depth: 1, agent_nickname: 'Helper', agent_role: 'worker' } } } : 'vscode',
+            model_provider: 'openai',
+        });
+        const total = { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 0 };
+        let context = cbetween(16_000, 26_000);
+        let at = start;
+        let used = cbetween(4, 30);
+        for (let turn = 0; turn < turns; turn++) {
+            const turnId = thread(at);
+            line(at, 'event_msg', { type: 'task_started', turn_id: turnId, started_at: Math.floor(at / 1000), model_context_window: 272_000 });
+            line(at + 5, 'turn_context', { turn_id: turnId, cwd, approval_policy: 'on-request', model, effort, summary: 'auto' });
+            const responses = cbetween(4, 14);
+            for (let r = 0; r < responses; r++) {
+                at += cbetween(6, 70) * 1000;
+                const added = cbetween(1_500, 9_000);
+                const output = 90 + Math.floor(crand() ** 2 * 2_400);
+                const reasoning = Math.floor(output * (0.2 + crand() * 0.4));
+                const write = cbetween(0, 40);
+                const usage = { input_tokens: context + added, cached_input_tokens: context, cache_write_input_tokens: write, output_tokens: output, reasoning_output_tokens: reasoning, total_tokens: context + added + output };
+                for (const key of Object.keys(total)) {
+                    total[key] += usage[key];
+                }
+                const responseId = `resp_${chex(48)}`;
+                line(at, 'token_usage_record', { thread_id: id, turn_id: turnId, session_id: session, root_turn_id: turnId, response_id: responseId, usage });
+                used = Math.min(97, used + cbetween(0, 2));
+                line(at + 3, 'event_msg', {
+                    type: 'token_count',
+                    info: { total_token_usage: { ...total }, last_token_usage: usage, last_usage_includes_reasoning: true, model_context_window: 272_000 },
+                    rate_limits: { limit_id: 'codex', limit_name: null, primary: { used_percent: used, window_minutes: 300, resets_at: Math.floor(at / 1000) + 3 * 3600 }, secondary: { used_percent: Math.floor(used / 3), window_minutes: 10_080, resets_at: Math.floor(at / 1000) + 4 * 86_400 }, credits: null, individual_limit: null, spend_control_reached: null, plan_type: 'plus', rate_limit_reached_type: null },
+                });
+                codexTotals.requests++;
+                // As the panel counts them: input what is left of the cache, thinking part of the output.
+                codexTotals.input += usage.input_tokens - usage.cached_input_tokens - Math.min(write, added);
+                codexTotals.cacheRead += usage.cached_input_tokens;
+                codexTotals.cacheCreation += Math.min(write, added);
+                codexTotals.output += output;
+                codexTotals.thinking += reasoning;
+                context += added + output;
+            }
+            line(at + 8, 'event_msg', { type: 'task_complete', turn_id: turnId, last_agent_message: '(demo)', started_at: Math.floor(start / 1000), completed_at: Math.floor(at / 1000) });
+            at += cbetween(2, 25) * 60_000;
+        }
+        if (refused) {
+            // A request refused at the five-hour limit: its snapshot names it, and its turn ends on it.
+            const turnId = thread(at);
+            line(at, 'event_msg', { type: 'task_started', turn_id: turnId, started_at: Math.floor(at / 1000), model_context_window: 272_000 });
+            line(at + 5, 'turn_context', { turn_id: turnId, cwd, approval_policy: 'on-request', model, effort, summary: 'auto' });
+            line(at + 600, 'event_msg', {
+                type: 'token_count',
+                info: { total_token_usage: { ...total }, last_token_usage: { ...total }, last_usage_includes_reasoning: true, model_context_window: 272_000 },
+                rate_limits: { limit_id: 'codex', limit_name: null, primary: { used_percent: 100, window_minutes: 300, resets_at: Math.floor(at / 1000) + refused * 3600 }, secondary: { used_percent: 41, window_minutes: 10_080, resets_at: Math.floor(at / 1000) + 3 * 86_400 }, credits: null, individual_limit: null, spend_control_reached: null, plan_type: 'plus', rate_limit_reached_type: 'rate_limit_reached' },
+            });
+            line(at + 640, 'event_msg', { type: 'task_complete', turn_id: turnId, last_agent_message: null, error: { message: '(demo) usage limit reached', codex_error_info: 'usage_limit_exceeded' } });
+            codexTotals.limits++;
+        }
+        files.set(file, lines);
+        return at;
+    }
+    function codexSession({ project, start, model }) {
+        const before = codexTotals.requests;
+        const id = thread(start);
+        const effort = cpick([['medium', 4], ['high', 3], ['xhigh', 1]]);
+        const end = codexThread({ id, session: id, project, start, turns: cbetween(3, 8), model, effort, refused: codexTotals.sessions === 6 ? 2 : 0 });
+        if (crand() < 0.3) {
+            codexThread({ id: thread(start + 60_000), session: id, project, start: start + cbetween(2, 20) * 60_000, turns: cbetween(1, 2), model: 'gpt-5.4-mini', effort: 'low', subagent: true });
+        }
+        codexTotals.sessions++;
+        const own = (codexByProject[project] ??= { requests: 0, sessions: 0 });
+        own.requests += codexTotals.requests - before;
+        own.sessions++;
+        return end;
+    }
+    for (let d = 27; d >= 1; d--) {
+        const day = today - d * DAY;
+        const weekday = new Date(day).getUTCDay();
+        const n = weekday === 0 || weekday === 6 ? cpick([[0, 3], [1, 2]]) : cpick([[1, 3], [2, 3], [3, 1]]);
+        for (let s = 0; s < n; s++) {
+            codexSession({ project: cpick(CODEX_PROJECTS), start: day + cbetween(8, 19) * 3_600_000 + cbetween(0, 59) * 60_000, model: cpick(CODEX_MODELS) });
+        }
+    }
+    // Today, in the workspace, before the Claude Code session running now.
+    codexSession({ project: 'acme-storefront', start: Math.max(today + 10 * 60_000, NOW - 3.2 * 3_600_000), model: 'gpt-5.6-sol' });
+    for (const [project, own] of Object.entries(codexByProject)) {
+        const both = (byProject[project] ??= { requests: 0, sessions: 0 });
+        both.requests += own.requests;
+        both.sessions += own.sessions;
+    }
+}
+
 for (const [file, lines] of files) {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, lines.join('\n') + '\n');
@@ -368,6 +510,11 @@ writeFileSync(
     ),
 );
 
+// Each agent's alone, and every agent's, as the page shows them.
+const claudeOnly = { requests: totals.requests, sessions: totals.sessions };
+for (const key of ['requests', 'sessions', 'limits', 'input', 'cacheCreation', 'cacheRead', 'output', 'thinking']) {
+    totals[key] += codexTotals[key];
+}
 const processed = totals.input + totals.cacheCreation + totals.cacheRead + totals.output;
 console.log(
     JSON.stringify({
@@ -377,6 +524,8 @@ console.log(
         liveSession: LIVE,
         processed,
         ...totals,
+        agents: { 'claude-code': claudeOnly, codex: { requests: codexTotals.requests, sessions: codexTotals.sessions } },
+        codexHome: codex,
         files: files.size,
         projects: Object.keys(byProject).sort(),
         byProject,
