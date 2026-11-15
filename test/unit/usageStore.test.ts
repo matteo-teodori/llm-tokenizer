@@ -73,11 +73,21 @@ function ready(result: OpenResult): UsageStore {
  * or where it ran. The newest parser to hold the lease is where those builds
  * kept it.
  */
-function asSchema(file: string, schema: 1 | 2 | 3): void {
+function asSchema(file: string, schema: 1 | 2 | 3 | 4): void {
     assert.ok(sqlite, 'this runtime has no node:sqlite');
     const db = new sqlite.DatabaseSync(file);
-    // Schema 4 only added to schema 3.
+    // Schema 5 only added to schema 4, and schema 4 to schema 3.
+    const before5 = 'ALTER TABLE files DROP COLUMN reader_state;';
+    if (schema === 4) {
+        try {
+            db.exec(`BEGIN; ${before5} PRAGMA user_version = 4; COMMIT;`);
+        } finally {
+            db.close();
+        }
+        return;
+    }
     const before4 = `
+        ${before5}
         DROP TRIGGER clear_accounts;
         DROP TABLE accounts;
         DROP TABLE owner_changes;
@@ -217,7 +227,7 @@ suite('usage history store', () => {
         assert.strictEqual(store.generation(), 0);
         assert.match(store.storeId(), /^[0-9a-z]+-[0-9a-z]+$/);
         assert.ok(fs.existsSync(file));
-        assert.strictEqual(SCHEMA_VERSION, 4);
+        assert.strictEqual(SCHEMA_VERSION, 5);
     });
 
     test("a transcript's path is kept once, not in every request read from it", () => {
@@ -334,6 +344,7 @@ suite('usage history store', () => {
             oversizeLines: 1,
             malformedLines: 2,
             newestVersion: '2.1.292',
+            readerState: '{"total":[1,2]}',
         };
         store.transaction(() => store.putFile(checkpoint));
         assert.deepStrictEqual(store.getFile('claude-code', checkpoint.path), checkpoint);
@@ -347,7 +358,7 @@ suite('usage history store', () => {
             store.putFile({
                 provider: 'claude-code', path: '/f', root: '/r', kind: 'main', sessionId: 's', runId: null, agentId: null,
                 projectDir: 'p', dev: null, ino: null, size: 1, mtimeMs: 1, offset: 1, tailHash: null, parserVersion: 1,
-                oversizeLines: 0, malformedLines: 0, newestVersion: null,
+                oversizeLines: 0, malformedLines: 0, newestVersion: null, readerState: null,
             });
             store.putReadGuard({ provider: 'claude-code', path: '/f', inProgress: true, crashCount: 1, lastCrash: 1 });
         });
@@ -734,6 +745,43 @@ suite('usage history store', () => {
         assert.deepStrictEqual(migrated.accountNames('claude-code'), []);
     });
 
+    test("a version 4 history gains a reader's own state beside each checkpoint, with no backup or compaction, every row kept", () => {
+        const store = ready(open());
+        const checkpoint: FileCheckpoint = {
+            provider: 'claude-code', path: '/root/projects/p/session-a.jsonl', root: '/root', kind: 'main', sessionId: 'session-a', runId: null,
+            agentId: null, projectDir: 'p', dev: null, ino: null, size: 10, mtimeMs: 1, offset: 10, tailHash: null, parserVersion: PARSER_VERSION,
+            oversizeLines: 0, malformedLines: 0, newestVersion: null, readerState: null,
+        };
+        store.transaction(() => {
+            store.upsertRequests([req({ messageId: 'kept' })]);
+            store.putFile(checkpoint);
+        });
+        store.close();
+        opened.length = 0;
+        asSchema(file, 4);
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const prototype = sqlite.DatabaseSync.prototype as unknown as { exec: (this: unknown, sql: string) => void };
+        const exec = prototype.exec;
+        const statements: string[] = [];
+        prototype.exec = function (this: unknown, sql: string) {
+            statements.push(sql);
+            exec.call(this, sql);
+        };
+        let migrated: UsageStore;
+        try {
+            migrated = ready(open());
+        } finally {
+            prototype.exec = exec;
+        }
+        assert.deepStrictEqual(statements.filter(sql => /VACUUM/.test(sql)), [], 'it only adds: nothing to back up or give back');
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(file)).filter(name => name.includes('.bak-v')), []);
+        assert.deepStrictEqual([...migrated.requests()].map(r => r.messageId), ['kept']);
+        assert.deepStrictEqual(migrated.getFile('claude-code', checkpoint.path), checkpoint);
+        // And the state a reader keeps is kept with the checkpoint from then on.
+        migrated.transaction(() => migrated.putFile({ ...checkpoint, readerState: '{"thread":"t"}' }));
+        assert.strictEqual(migrated.getFile('claude-code', checkpoint.path)?.readerState, '{"thread":"t"}');
+    });
+
     const A = { accountUuid: 'a', organizationUuid: 'o' };
     const B = { accountUuid: 'b', organizationUuid: null };
     const MAIN = '/root/projects/p/session-a.jsonl';
@@ -938,6 +986,7 @@ suite('usage history store', () => {
         oversizeLines: 0,
         malformedLines: 0,
         newestVersion: null,
+        readerState: null,
     });
 
     /** The columns of the index on owner changes, in its order. */
@@ -1764,7 +1813,7 @@ suite('usage history store', () => {
         const SUB = '/root/projects/p/session-a/subagents/agent-x.jsonl';
         const checkpoint = (provider: 'claude-code' | 'codex', path: string, kind: 'main' | 'task', sessionId: string) => ({
             provider, path, root: '/r', kind, sessionId, runId: null, agentId: null, projectDir: 'p', dev: null, ino: null, size: 1, mtimeMs: 1,
-            offset: 1, tailHash: null, parserVersion: 3, oversizeLines: 0, malformedLines: 0, newestVersion: null,
+            offset: 1, tailHash: null, parserVersion: 3, oversizeLines: 0, malformedLines: 0, newestVersion: null, readerState: null,
         });
         const hit = (provider: 'claude-code' | 'codex', uuid: string, sessionId: string, owner: SessionOwner) =>
             ({ provider, uuid, sessionId, timestamp: t(3), limitType: 'five_hour', resetsAt: null, owner });

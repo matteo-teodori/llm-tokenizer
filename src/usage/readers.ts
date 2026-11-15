@@ -10,7 +10,8 @@
 
 import type { MalformedCategory, ReadCheckpoint, Restart } from './lines';
 import { ROWS_SINCE, needsOwnerScan, readTranscript, transcriptsAt, walkProjects, type TranscriptFile } from './transcripts';
-import type { Compaction, LimitHit, OwnerChange, SessionOwner, UsageProvider, UsageRequest } from './types';
+import { CODEX_ROWS_SINCE, isCompressed, readRollout, rolloutsAt, walkRollouts } from './codex';
+import type { Compaction, LimitHit, OwnerChange, SessionOwner, TranscriptKind, UsageProvider, UsageRequest } from './types';
 
 /** What reading a file found since its checkpoint. */
 export interface ReadResult {
@@ -25,11 +26,19 @@ export interface ReadResult {
     requests: UsageRequest[];
     compactions: Compaction[];
     limitHits: LimitHit[];
+    /**
+     * Limit hits an earlier read of the file kept, by their uuid, that this
+     * one found were none: a Codex snapshot a read ended on, which the
+     * response it was the headers of followed after all.
+     */
+    withdrawnLimitHits?: string[];
     /** The first cwd of a main transcript, when this read reached it, and its record's time. */
     firstCwd: string | null;
     firstCwdTs: number | null;
     /** The session id the records gave, for files whose path does not. */
     sessionId: string | null;
+    /** The file's kind, where its path does not say it and its records do: a Codex rollout's first line. */
+    kind?: TranscriptKind;
     /**
      * Each session's owner changing, in the order of the transcript: an
      * owner record that names another account than the one before it, the
@@ -84,7 +93,12 @@ export interface AgentReader {
      *
      * @throws the file system's error, for the importer to count as a skip reason.
      */
-    read(file: TranscriptFile, previous: ReadCheckpoint | undefined, progress?: () => void, inForce?: ReadonlyMap<string, SessionOwner>): ReadResult;
+    read(
+        file: TranscriptFile,
+        previous: ReadCheckpoint | undefined,
+        progress?: () => void,
+        inForce?: ReadonlyMap<string, SessionOwner>,
+    ): ReadResult | Promise<ReadResult>;
     /** Whether a read of `file` on from `previous` takes the whole file: what the read guard reckons it costs. */
     readsWhole(file: TranscriptFile, previous: ReadCheckpoint): boolean;
     /** Whether `file` records its sessions' owners: its changes of owner are kept with its rows. */
@@ -117,11 +131,24 @@ export const CLAUDE_CODE_READER: AgentReader = {
     searchesOwners: needsOwnerScan,
 };
 
-const READERS: Partial<Record<UsageProvider, AgentReader>> = {
-    'claude-code': CLAUDE_CODE_READER,
+/** Codex's: `<root>/sessions` and `<root>/archived_sessions`, read by codex.ts. */
+export const CODEX_READER: AgentReader = {
+    provider: 'codex',
+    walk: walkRollouts,
+    filesAt: rolloutsAt,
+    read: (file, previous, progress) => readRollout(file, previous, progress),
+    readsWhole: (file, previous) => isCompressed(file) || previous.parserVersion < CODEX_ROWS_SINCE,
+    // Codex records who created a thread, not who made each request in it.
+    recordsOwners: () => false,
+    searchesOwners: () => false,
 };
 
-/** The reader of `provider`'s records, or undefined for an agent none reads yet. */
+const READERS: Record<UsageProvider, AgentReader> = {
+    'claude-code': CLAUDE_CODE_READER,
+    codex: CODEX_READER,
+};
+
+/** The reader of `provider`'s records, or undefined for one this build does not know. */
 export function readerOf(provider: UsageProvider): AgentReader | undefined {
-    return READERS[provider];
+    return Object.hasOwn(READERS, provider) ? READERS[provider] : undefined;
 }

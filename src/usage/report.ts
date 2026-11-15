@@ -255,7 +255,7 @@ export const MAX_ACCOUNTS = 50;
 export const MAX_ACCOUNTS_SEEN = 200;
 /** A session's accounts named, in its row: real sessions have one or two. */
 export const MAX_SESSION_ACCOUNTS = 3;
-const KIND_ORDER: readonly TranscriptKind[] = ['main', 'task', 'workflow', 'other'];
+const KIND_ORDER: readonly TranscriptKind[] = ['main', 'task', 'workflow', 'subagent', 'other'];
 
 /** The largest UTC offset in use, +14:00: no local day starts earlier than its UTC midnight minus this. */
 const MAX_OFFSET_MS = 14 * 60 * 60 * 1000;
@@ -798,7 +798,11 @@ function sessionKey(provider: UsageProvider, sessionId: string): string {
     return `${provider}\u0000${sessionId}`;
 }
 
-/** Limit hits in the range, one row per window: an agent, an account, a limit type and its reset time. */
+/**
+ * Limit hits in the range, one row per window: an agent, an account, a limit
+ * type and its reset time, or, where no hit said when it resets, the local
+ * day: a limit refused all week is not one window.
+ */
 function limitWindows(
     hits: LimitHit[],
     accountOf: (hit: LimitHit) => string | null,
@@ -812,8 +816,8 @@ function limitWindows(
             continue;
         }
         const account = accountOf(hit);
-        // No account is a key's empty string: none holds a NUL either.
-        const key = `${hit.provider}\u0000${account ?? ''}\u0000${hit.limitType}\u0000${hit.resetsAt ?? ''}`;
+        // No account is a key's empty string: none holds a NUL either; nor a reset time a day.
+        const key = `${hit.provider}\u0000${account ?? ''}\u0000${hit.limitType}\u0000${hit.resetsAt ?? date}`;
         const window = windows.get(key);
         if (!window) {
             windows.set(key, { provider: hit.provider, account, limitType: hit.limitType, resetsAt: hit.resetsAt, hits: 1, firstTs: hit.timestamp, date });

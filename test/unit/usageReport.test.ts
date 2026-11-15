@@ -711,6 +711,28 @@ suite('usage report', () => {
         assert.strictEqual(report.limitWindows.length, 1);
     });
 
+    test('limits that say no reset time are a window a day, not one of every refusal in the range', () => {
+        const at = (day: number, hour: number) => Date.UTC(2026, 9, day, hour);
+        const hit = (ts: number, uuid: string) => ({ provider: 'codex' as const, uuid, sessionId: 'x', timestamp: ts, limitType: 'premium', resetsAt: null, owner: null });
+        const report = buildReport(
+            {
+                sums: [],
+                sessions: [],
+                compactions: [],
+                limitHits: [hit(at(8, 9), 'a'), hit(at(8, 15), 'b'), hit(at(9, 10), 'c')],
+                coverage: { start: at(8, 9), newest: at(9, 10), requests: 0, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },
+            },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual(
+            report.limitWindows.map(w => [w.date, w.hits, w.resetsAt]),
+            [
+                ['2026-10-08', 2, null],
+                ['2026-10-09', 1, null],
+            ],
+        );
+    });
+
     describeAccounts();
 
     /** The account tests: sessions of two accounts, one with two organizations, and one that records none. */

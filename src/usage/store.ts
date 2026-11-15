@@ -48,7 +48,7 @@ import type {
 } from './types';
 
 /** `PRAGMA user_version` of the schema this code writes. */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** How old a lease's heartbeat must be before another window may take it. */
 export const LEASE_TAKEOVER_MS = 20_000;
@@ -148,6 +148,8 @@ export interface FileCheckpoint {
     oversizeLines: number;
     malformedLines: number;
     newestVersion: string | null;
+    /** The reader's own state at the checkpoint, where it keeps one (see `ReadCheckpoint`). */
+    readerState: string | null;
 }
 
 /** A session as stored: what the imports saw of it, merged, with the accounts it was signed in to. */
@@ -756,13 +758,17 @@ const DATA_TABLES = ['files', 'read_guards', 'requests', 'paths', 'sessions', 'c
  * MIGRATE_TO_3), and is the one that is not additive: the file is compacted
  * after it, and a build before it told to stop writing. On 229,000 requests
  * it took 3.1 to 3.8 s, backup included. Version 4 keeps the account each
- * request was made with (see MIGRATE_TO_4).
+ * request was made with (see MIGRATE_TO_4). Version 5 keeps a reader's own
+ * state with a file's checkpoint, what a line before it meant where that
+ * gives a later one its meaning, as a Codex rollout's running totals do: a
+ * column, null for every file read before, and for Claude Code's.
  */
 const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
     1: db => db.exec(SCHEMA),
     2: db => db.exec('ALTER TABLE requests ADD COLUMN speed TEXT; ALTER TABLE requests ADD COLUMN inference_geo TEXT;'),
     3: db => db.exec(MIGRATE_TO_3),
     4: db => db.exec(MIGRATE_TO_4),
+    5: db => db.exec('ALTER TABLE files ADD COLUMN reader_state TEXT'),
 };
 
 /**
@@ -1748,6 +1754,18 @@ export class UsageStore {
         this.db.prepare('DELETE FROM requests WHERE provider = ? AND file = (SELECT id FROM paths WHERE path = ?)').run(provider, file);
     }
 
+    /** Remove the limit hits with these uuids: a read found them none (see `ReadResult.withdrawnLimitHits`). */
+    deleteLimitHits(provider: UsageProvider, uuids: readonly string[]): void {
+        if (uuids.length === 0) {
+            return;
+        }
+        this.assertWritable();
+        const remove = this.db.prepare('DELETE FROM limit_hits WHERE provider = ? AND uuid = ?');
+        for (const uuid of uuids) {
+            remove.run(provider, uuid);
+        }
+    }
+
     /** Every stored request, for the queries and the tests. */
     *requests(): IterableIterator<UsageRequest> {
         const all = `SELECT requests.*, paths.path, accounts.account_uuid, accounts.organization_uuid FROM requests
@@ -1771,11 +1789,11 @@ export class UsageStore {
                 `INSERT OR REPLACE INTO files (
                     provider, path, root, kind, session_id, run_id, agent_id, project_dir, dev, ino,
                     size, mtime_ms, offset, tail_hash, parser_version, oversize_lines, malformed_lines,
-                    newest_version
+                    newest_version, reader_state
                 ) VALUES (
                     :provider, :path, :root, :kind, :sessionId, :runId, :agentId, :projectDir, :dev, :ino,
                     :size, :mtimeMs, :offset, :tailHash, :parserVersion, :oversizeLines, :malformedLines,
-                    :newestVersion
+                    :newestVersion, :readerState
                 )`,
             )
             .run({ ...checkpoint });
@@ -2135,6 +2153,8 @@ function toCheckpoint(row: Record<string, unknown>): FileCheckpoint {
         oversizeLines: row.oversize_lines as number,
         malformedLines: row.malformed_lines as number,
         newestVersion: row.newest_version as string | null,
+        // A history a newer build migrated past this schema may have none.
+        readerState: (row.reader_state as string | null | undefined) ?? null,
     };
 }
 

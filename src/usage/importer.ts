@@ -32,8 +32,9 @@ export interface AgentRoots {
 /**
  * Why a file was not read this pass. `newer`: a newer parser read it, in a
  * window running a newer LLM Tokenizer, and this one must not rewrite it.
+ * `unsupported`: a compressed file, which this runtime cannot decode.
  */
-export type SkipReason = 'missing' | 'unreadable' | 'busy' | 'crashed' | 'newer' | 'error';
+export type SkipReason = 'missing' | 'unreadable' | 'busy' | 'crashed' | 'newer' | 'unsupported' | 'error';
 
 export interface ImportSummary {
     roots: number;
@@ -270,7 +271,7 @@ async function runImport(
                 // Where a file that records its sessions' owners was read to,
                 // its owners then: the lines read on from there are under them.
                 const inForce = previous && reader.recordsOwners(file) ? store.ownersInForce(reader.provider, file.path) : undefined;
-                result = reader.read(file, previous, options.progress, inForce);
+                result = await reader.read(file, previous, options.progress, inForce);
             } catch (error) {
                 if (guard) {
                     // A failure the reader caught is not a crash.
@@ -441,6 +442,7 @@ function write(store: UsageStore, reader: AgentReader, file: TranscriptFile, res
     store.upsertRequests(requests);
     store.insertCompactions(result.compactions);
     store.insertLimitHits(result.limitHits);
+    store.deleteLimitHits(provider, result.withdrawnLimitHits ?? []);
     if (reader.recordsOwners(file)) {
         store.putOwnerChanges(provider, file.path, file.projectDir, result.ownerChanges, result.firstRequestTs, result.restarted !== null);
         if (result.restarted === null && previous && previous.offset > 0 && reader.searchesOwners(file, previous)) {
@@ -454,6 +456,8 @@ function write(store: UsageStore, reader: AgentReader, file: TranscriptFile, res
     // earlier session, and each request, limit and change of owner needs its
     // session's row, which the report's sessions and accounts are read from.
     const sessionId = file.sessionId ?? result.sessionId;
+    // Where the file's path does not say what it is, its records do.
+    const kind = result.kind ?? file.kind;
     const spans = new Map<string, { firstTs: number | null; lastTs: number | null }>();
     for (const id of [sessionId, ...result.limitHits.map(h => h.sessionId), ...result.ownerChanges.map(c => c.sessionId)]) {
         if (id && !spans.has(id)) {
@@ -470,7 +474,7 @@ function write(store: UsageStore, reader: AgentReader, file: TranscriptFile, res
     for (const [id, span] of spans) {
         // The cwd is the file's own session's, and only a main transcript
         // says where a session started.
-        const own = id === sessionId && file.kind === 'main';
+        const own = id === sessionId && kind === 'main';
         const sighting: SessionSighting = {
             sessionId: id,
             root: file.root,
@@ -494,7 +498,7 @@ function write(store: UsageStore, reader: AgentReader, file: TranscriptFile, res
         provider,
         path: file.path,
         root: file.root,
-        kind: file.kind,
+        kind,
         sessionId,
         runId: file.runId,
         agentId: file.agentId,
@@ -509,6 +513,7 @@ function write(store: UsageStore, reader: AgentReader, file: TranscriptFile, res
         oversizeLines: (carried?.oversizeLines ?? 0) + result.oversize,
         malformedLines: (carried?.malformedLines ?? 0) + malformed,
         newestVersion: result.newestVersion ?? carried?.newestVersion ?? null,
+        readerState: result.checkpoint.readerState ?? null,
     });
 }
 
@@ -524,6 +529,8 @@ function skipReason(error: unknown): SkipReason {
         // Not a regular file: refused by the reader, never opened blocking.
         case 'ENOTREG':
             return 'unreadable';
+        case 'ZSTD_UNSUPPORTED':
+            return 'unsupported';
         default:
             return 'error';
     }

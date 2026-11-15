@@ -1,6 +1,7 @@
 /**
- * The domain of Claude Code usage: what one request is, as read from Claude
- * Code's own session records, and what an aggregate of them reports.
+ * The domain of coding agents' usage: what one request is, as read from an
+ * agent's own session records (Claude Code's transcripts, Codex's
+ * rollouts), and what an aggregate of them reports.
  *
  * No file system and no `vscode` here or in the other core modules
  * (provenance, model ids, accounting, rollups), so they can be tested, and
@@ -26,9 +27,11 @@ export type UsageProvider = 'claude-code' | 'codex';
  * - `main`: `<project>/<session>.jsonl`, and its documented set-aside copies;
  * - `task`: `<project>/<session>/subagents/agent-<id>.jsonl`;
  * - `workflow`: `…/subagents/workflows/wf_<run>/agent-<id>.jsonl`;
- * - `other`: a `.jsonl` at a path not recognised, that still holds usage.
+ * - `other`: a `.jsonl` at a path not recognised, that still holds usage;
+ * - `subagent`: a Codex thread a session spawned, or delegated a review or
+ *   a compaction to, in a rollout of its own; its session is its root's.
  */
-export type TranscriptKind = 'main' | 'task' | 'workflow' | 'other';
+export type TranscriptKind = 'main' | 'task' | 'workflow' | 'other' | 'subagent';
 
 /**
  * The four categories a request's tokens fall into. `input` excludes the
@@ -42,12 +45,15 @@ export interface TokenCounts {
     output: number | null;
 }
 
-/** One request: the record chosen to represent one `message.id`. */
+/**
+ * One request: the record chosen to represent one model response, Claude
+ * Code's `message.id`, or Codex's response or running total.
+ */
 export interface UsageRequest extends TokenCounts {
     provider: UsageProvider;
-    /** The request's key within its agent, across files and roots. */
+    /** The request's key within its agent, across files and roots: the agent's own id for it, or one its line's content makes. */
     messageId: string;
-    /** An attribute only: OpenTelemetry joins on it. */
+    /** An attribute only: Claude Code's request id, which OpenTelemetry joins on; Codex's response id. */
     requestId: string | null;
     sessionId: string;
     kind: TranscriptKind;
@@ -55,7 +61,7 @@ export interface UsageRequest extends TokenCounts {
     isMain: boolean;
     /** UTC epoch milliseconds. */
     timestamp: number;
-    /** `message.model`, verbatim; never mapped through the tokenizer registry. */
+    /** The model as the record names it (`message.model`, a turn's context), verbatim; never mapped through the tokenizer registry. */
     model: string;
     /** A routing suffix such as `1m`, from `requestedModel`'s brackets. */
     variant: string | null;
@@ -77,6 +83,7 @@ export interface UsageRequest extends TokenCounts {
     effort: string | null;
     webSearchRequests: number | null;
     webFetchRequests: number | null;
+    /** The agent's version that wrote it: Claude Code's, or Codex's `cli_version`. */
     claudeCodeVersion: string | null;
     agentId: string | null;
     runId: string | null;

@@ -112,6 +112,7 @@ const KIND_LABELS: Record<string, string> = {
     main: 'Main conversation',
     task: 'Task subagents',
     workflow: 'Workflow agents',
+    subagent: 'Subagents',
     other: 'Other transcripts',
 };
 

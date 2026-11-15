@@ -11,6 +11,8 @@
 
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import { pipeline } from 'stream/promises';
+import * as zlib from 'zlib';
 
 /**
  * Bumped whenever what a line becomes changes, in any agent's reader: one
@@ -18,9 +20,10 @@ import * as fs from 'fs';
  * and a window running an older build must stop writing once a newer one
  * has (see `UsageStore.outdated`). Claude Code's own history of it is in
  * transcripts.ts, beside `ROWS_SINCE`, the oldest of its parsers whose rows
- * it keeps.
+ * it keeps; 6 is the first that reads Codex's rollouts too, and changes
+ * nothing a Claude Code line becomes.
  */
-export const PARSER_VERSION = 5;
+export const PARSER_VERSION = 6;
 
 /** Bytes read at a time. */
 const CHUNK_BYTES = 1 << 20;
@@ -62,6 +65,12 @@ export interface ReadCheckpoint extends FileState {
     offset: number;
     tailHash: string | null;
     parserVersion: number;
+    /**
+     * What the reader had made of the lines before the checkpoint, where the
+     * meaning of a line depends on them, as a running total's does: its own
+     * text, never a line's bytes. Null for a reader that needs none.
+     */
+    readerState?: string | null;
 }
 
 /** A file's state, from `stat` or `fstat` with `bigint: true`. */
@@ -151,16 +160,75 @@ export function tailHash(fd: number, offset: number): string | null {
 }
 
 /**
- * Split the bytes of `fd` from `start` to `size` into lines, and hand each
- * whole one to `use`, without its newline or a CR before it, with the offset
- * it starts at; a line of over MAX_LINE_BYTES is passed over, and
- * `oversize` told. `consumed` is told the byte after each newline, which is
- * where a checkpoint may be put: never past the last newline, so a line
- * still being written is read once it is complete.
- *
- * The unterminated tail is held as a list of chunks and joined only once its
- * newline arrives, never on every read: joining on every chunk is quadratic
- * on a long line.
+ * Lines out of chunks as they come: a line of over MAX_LINE_BYTES is passed
+ * over, the rest handed to `use` whole, without its newline or a CR before
+ * it, with the offset it starts at; `consumed` is told the byte after each
+ * newline, where a checkpoint may be put. The unterminated tail is held as a
+ * list of chunks and joined only once its newline arrives, never on every
+ * chunk: joining on every chunk is quadratic on a long line.
+ */
+export class LineSplitter {
+    private pending: Buffer[] = [];
+    private pendingBytes = 0;
+    private skipping = false;
+    private position: number;
+    private lineStart: number;
+
+    constructor(
+        start: number,
+        private readonly use: (line: Buffer, offset: number) => void,
+        private readonly oversize: () => void,
+        private readonly consumed: (offset: number) => void,
+    ) {
+        this.position = start;
+        this.lineStart = start;
+    }
+
+    /** Take the next `chunk` of the file; it may be reused once this returns. */
+    push(chunk: Buffer): void {
+        let from = 0;
+        while (from < chunk.length) {
+            const newline = chunk.indexOf(0x0a, from);
+            if (newline === -1) {
+                // The rest of this chunk is a line still to be finished.
+                const piece = chunk.subarray(from);
+                if (!this.skipping && this.pendingBytes + piece.length > MAX_LINE_BYTES) {
+                    this.skipping = true;
+                    this.pending = [];
+                    this.pendingBytes = 0;
+                }
+                if (!this.skipping) {
+                    // Copied: the chunk may be reused.
+                    this.pending.push(Buffer.from(piece));
+                    this.pendingBytes += piece.length;
+                }
+                break;
+            }
+            const piece = chunk.subarray(from, newline);
+            const lineOffset = this.lineStart;
+            this.lineStart = this.position + newline + 1;
+            if (this.skipping || this.pendingBytes + piece.length > MAX_LINE_BYTES) {
+                // Too long to be a record: dropped, and the checkpoint moves past it anyway.
+                this.oversize();
+                this.skipping = false;
+            } else {
+                const line = this.pendingBytes === 0 ? piece : Buffer.concat([...this.pending, piece], this.pendingBytes + piece.length);
+                // Tolerate a CRLF file: the record is the same.
+                this.use(line.length > 0 && line[line.length - 1] === 0x0d ? line.subarray(0, line.length - 1) : line, lineOffset);
+            }
+            this.pending = [];
+            this.pendingBytes = 0;
+            this.consumed(this.lineStart);
+            from = newline + 1;
+        }
+        this.position += chunk.length;
+    }
+}
+
+/**
+ * Split the bytes of `fd` from `start` to `size` into lines, as
+ * `LineSplitter` does: a checkpoint is never put past the last newline, so a
+ * line still being written is read once it is complete.
  */
 export function eachLine(
     fd: number,
@@ -172,56 +240,206 @@ export function eachLine(
     progress?: () => void,
 ): void {
     const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
+    const lines = new LineSplitter(start, use, oversize, consumed);
     let position = start;
-    let lineStart = start;
-    let pending: Buffer[] = [];
-    let pendingBytes = 0;
-    let skipping = false;
-
     while (position < size) {
         progress?.();
         const read = fs.readSync(fd, chunk, 0, Math.min(CHUNK_BYTES, size - position), position);
         if (read <= 0) {
             break;
         }
-        const view = chunk.subarray(0, read);
-        let from = 0;
-        while (from < read) {
-            const newline = view.indexOf(0x0a, from);
-            if (newline === -1) {
-                // The rest of this chunk is a line still to be finished.
-                const piece = view.subarray(from);
-                if (!skipping && pendingBytes + piece.length > MAX_LINE_BYTES) {
-                    skipping = true;
-                    pending = [];
-                    pendingBytes = 0;
-                }
-                if (!skipping) {
-                    // Copied: the chunk is reused by the next read.
-                    pending.push(Buffer.from(piece));
-                    pendingBytes += piece.length;
-                }
+        lines.push(chunk.subarray(0, read));
+        position += read;
+    }
+}
+
+/** The runtime's zstd decoder, where it has one: Node 22.15 and later. */
+function zstdDecoder(): (() => NodeJS.ReadWriteStream) | undefined {
+    const create = (zlib as unknown as { createZstdDecompress?: () => NodeJS.ReadWriteStream }).createZstdDecompress;
+    return typeof create === 'function' ? create : undefined;
+}
+
+/** Whether this runtime can read a zstd-compressed file. */
+export function canDecodeZstd(): boolean {
+    return zstdDecoder() !== undefined;
+}
+
+/**
+ * The lines of the zstd-compressed file open at `fd`, as `LineSplitter`
+ * splits them, read whole through the runtime's own decoder as a stream,
+ * never decoded whole into memory. Offsets are the decoded bytes'. Every
+ * editor this extension supports has the decoder: measured on VS Code
+ * 1.105 (Node 22.19), Antigravity 2.7.0 (22.21) and VS Code 1.141 (24.21),
+ * with no warning.
+ *
+ * Each frame is walked whole, to its last block and its checksum, before
+ * its bytes are read, and that is how a cut is found: the decoder of most
+ * runtimes gives a cut frame's complete blocks as all there is (measured:
+ * Node 22.19, 22.21, 24.18 and 26.3; 24.21 says so itself, `Z_BUF_ERROR`).
+ * The frames are walked one at a time, as they are read, so that a file of
+ * millions of them holds one. All go through one decoder, each frame's
+ * bytes in writes of their own: given a write that holds the end of a frame
+ * and more, the decoder of most runtimes drops the rest of the write unless
+ * the frame's output ends just as an output chunk fills (Node 22.19, 22.21,
+ * 24.21 and 26.3; 24.22 decodes on), so a file of several frames, as zstd
+ * writes from several inputs, as two files put end to end and pzstd make,
+ * would be read as its first. A decoder for each frame would read it whole,
+ * but on Node 22 each keeps its buffers until the next collection: for a
+ * hundred frames of 8 MiB windows, 616 MB more, where one decoder takes 37
+ * (measured on 22.19). A decoder that took less than it was given stopped
+ * short, as 24.22's does, without a word, at bytes that open no frame. The
+ * bytes are read where they are, by position: a stream given the descriptor
+ * closes it itself as a decoder fails, and the caller's own close then
+ * closes whatever has had the number since, another thread's file in the
+ * extension host for one.
+ *
+ * @returns how many decoded bytes there were.
+ * @throws with the code `ZSTD_UNSUPPORTED` where the runtime has no
+ *   decoder; with `ZSTD_TRUNCATED` where the file holds no frame but
+ *   skippable ones, or a frame, a block or a checksum ends past it, or the
+ *   file is shorter as it is read than it was walked; with `ZSTD_UNDECODED`
+ *   where the decoder took less than it was given. The decoder refuses
+ *   other invalid bytes itself, a whole frame that declares a size it does
+ *   not hold among them (measured on the same runtimes, and 24.22); a file
+ *   both cut and invalid can fail either way.
+ */
+export async function eachLineOfZstd(
+    fd: number,
+    use: (line: Buffer, offset: number) => void,
+    oversize: () => void,
+    consumed: (offset: number) => void,
+    progress?: () => void,
+): Promise<number> {
+    const create = zstdDecoder();
+    if (!create) {
+        throw Object.assign(new Error('no zstd decoder'), { code: 'ZSTD_UNSUPPORTED' });
+    }
+    const size = fs.fstatSync(fd).size;
+    const decoder = create() as NodeJS.ReadWriteStream & { readonly bytesWritten: number };
+    const lines = new LineSplitter(0, use, oversize, consumed);
+    let given = 0;
+    let decoded = 0;
+    // Each frame walked whole, then its bytes, none in a write with another's.
+    async function* frameBytes(): AsyncGenerator<Buffer> {
+        for (const frame of zstdFrames(fd, size, progress)) {
+            given += frame.end - frame.start;
+            yield* bytesOf(fd, frame.start, frame.end);
+        }
+    }
+    await pipeline(frameBytes(), decoder, async (chunks: AsyncIterable<string | Buffer>) => {
+        for await (const chunk of chunks) {
+            // A decoder's chunks are bytes: it is given no encoding.
+            const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'latin1') : chunk;
+            progress?.();
+            lines.push(bytes);
+            decoded += bytes.length;
+        }
+    });
+    if (decoder.bytesWritten !== given) {
+        throw Object.assign(new Error('zstd bytes left undecoded'), { code: 'ZSTD_UNDECODED' });
+    }
+    return decoded;
+}
+
+function truncatedZstd(): Error {
+    return Object.assign(new Error('zstd frame cut short'), { code: 'ZSTD_TRUNCATED' });
+}
+
+/** The bytes from `start` to `end` of the file open at `fd`, read where they are: the descriptor stays the caller's. */
+async function* bytesOf(fd: number, start: number, end: number): AsyncGenerator<Buffer> {
+    for (let at = start; at < end; ) {
+        const chunk = Buffer.allocUnsafe(Math.min(CHUNK_BYTES, end - at));
+        const read = await new Promise<number>((resolve, reject) => fs.read(fd, chunk, 0, chunk.length, at, (error, n) => (error ? reject(error) : resolve(n))));
+        if (read === 0) {
+            // Shorter now than when its frames were walked.
+            throw truncatedZstd();
+        }
+        yield chunk.subarray(0, read);
+        at += read;
+    }
+}
+
+/** A zstd frame of a file: where it begins and ends. */
+interface ZstdFrame {
+    start: number;
+    end: number;
+}
+
+/**
+ * The zstd frames of the file open at `fd`, found from their frame and
+ * block headers alone (RFC 8878 §§3.1.1–3.1.2), their blocks' contents
+ * passed over: a frame streamed declares no size, and the sizes of its
+ * blocks are all that tell it whole. Skippable frames are passed over too.
+ * Of a frame header, its magic number and descriptor are read, 5 bytes,
+ * and of a block, its 3-byte header: nothing of their contents. Each frame
+ * is given as soon as it is walked, and none is kept. From an unknown magic
+ * number, or a block of the reserved type, the rest of the file is one last
+ * frame, for the decoder to refuse; after a whole frame, 24.22's takes none
+ * of a rest that opens no frame, and says nothing, so `eachLineOfZstd`
+ * refuses it itself (`ZSTD_UNDECODED`). A file of several frames cut just
+ * where one of them ends is a shorter file of whole frames, which nothing in
+ * the format tells apart: Codex writes one frame a file.
+ *
+ * @throws with the code `ZSTD_TRUNCATED` where the file holds no frame
+ *   but skippable ones, as one empty does, or pzstd's cut after its first,
+ *   or where a frame, a block or a checksum ends past it.
+ */
+function* zstdFrames(fd: number, size: number, progress?: () => void): Generator<ZstdFrame> {
+    const header = Buffer.alloc(4);
+    let frames = 0;
+    let at = 0;
+    const skip = (length: number) => {
+        at += length;
+        if (at > size) {
+            throw truncatedZstd();
+        }
+    };
+    const read = (length: number) => {
+        if (size - at < length || fs.readSync(fd, header, 0, length, at) !== length) {
+            throw truncatedZstd();
+        }
+        at += length;
+    };
+    while (at < size) {
+        progress?.();
+        const start = at;
+        read(4);
+        const magic = header.readUInt32LE(0);
+        if (magic >= 0x184d2a50 && magic <= 0x184d2a5f) {
+            read(4);
+            skip(header.readUInt32LE(0));
+            continue;
+        }
+        if (magic !== 0xfd2fb528) {
+            yield { start, end: size };
+            return;
+        }
+        read(1);
+        const descriptor = header[0];
+        const single = (descriptor & 0x20) !== 0;
+        // The window, the dictionary and the content size passed over: RFC 8878 §3.1.1.1.
+        skip((single ? 0 : 1) + [0, 1, 2, 4][descriptor & 0x03] + [single ? 1 : 0, 2, 4, 8][descriptor >> 6]);
+        for (;;) {
+            progress?.();
+            read(3);
+            const block = header.readUIntLE(0, 3);
+            const type = (block >> 1) & 3;
+            if (type === 3) {
+                yield { start, end: size };
+                return;
+            }
+            // RLE stores one byte, whatever decompressed length the block names.
+            skip(type === 1 ? 1 : block >> 3);
+            if (block & 1) {
                 break;
             }
-
-            const piece = view.subarray(from, newline);
-            const lineOffset = lineStart;
-            lineStart = position + newline + 1;
-            if (skipping || pendingBytes + piece.length > MAX_LINE_BYTES) {
-                // Too long to be a record: dropped, and the checkpoint moves
-                // past it anyway.
-                oversize();
-                skipping = false;
-            } else {
-                const line = pendingBytes === 0 ? piece : Buffer.concat([...pending, piece], pendingBytes + piece.length);
-                // Tolerate a CRLF file: the record is the same.
-                use(line.length > 0 && line[line.length - 1] === 0x0d ? line.subarray(0, line.length - 1) : line, lineOffset);
-            }
-            pending = [];
-            pendingBytes = 0;
-            consumed(lineStart);
-            from = newline + 1;
         }
-        position += read;
+        skip(descriptor & 0x04 ? 4 : 0);
+        frames++;
+        yield { start, end: at };
+    }
+    // Nothing, or skippable frames alone: no compressed rollout is that.
+    if (frames === 0) {
+        throw truncatedZstd();
     }
 }
