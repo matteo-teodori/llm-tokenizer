@@ -21,6 +21,7 @@ import { PAGE_TEXT_HELPERS, embed, escapeHtml } from '../html';
 import { formatNumber } from '../utils';
 import { ACCOUNT_PROVIDER, ALL_ACCOUNTS, NOT_RECORDED, accountLabels, type AccountLabel } from './accounts';
 import type { UsageTotals } from './aggregate';
+import { UNRECORDED_MODEL } from './modelIds';
 import { totalPrefix } from './provenance';
 import { ACTIVE_PAUSE_MS, AGENT_ORDER, type AccountRow, type ModelRow, type RangeKey, type UsageReport } from './report';
 import type { UsageProvider } from './types';
@@ -464,7 +465,7 @@ function previousDay(date: string): string {
 }
 
 function modelName(view: PanelView, model: string, variant: string | null): string {
-    return `${view.modelLabel(model)}${variant ? ` (${variant})` : ''}`;
+    return `${model === UNRECORDED_MODEL ? 'Model not recorded' : view.modelLabel(model)}${variant ? ` (${variant})` : ''}`;
 }
 
 /**
@@ -1052,7 +1053,7 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
     const rows = (report?.dayModels ?? []).map(r => [
         r.provider,
         r.date,
-        r.model,
+        r.model === UNRECORDED_MODEL ? '' : r.model,
         r.variant ?? '',
         r.speed ?? '',
         r.inferenceGeo ?? '',
@@ -1073,6 +1074,7 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
         ...exportNotes(view),
         // What a hand-made cost calculation needs to know of the columns.
         'speed and inference_geo are as each request recorded them, empty where it named none: fast, and us, are billed higher',
+        "model is empty where a response's records named none, as Codex's before 0.35 did not",
         "prompt_size is each request's input, cache writes and cache reads together, over 100,000 or 200,000 tokens or not: Claude Haiku 5.5 prices a request over 100,000 higher",
         'thinking_tokens are part of output_tokens; cache_creation_5m and cache_creation_1h split cache_creation_input_tokens where the requests recorded the split',
         "agent is claude-code or codex; Codex's input_tokens are what is left of its input once its cached and cache-written tokens are taken out, as the API's are, and its reasoning tokens are thinking_tokens",

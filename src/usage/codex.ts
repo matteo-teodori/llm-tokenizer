@@ -86,6 +86,7 @@ import {
     type MalformedCategory,
     type ReadCheckpoint,
 } from './lines';
+import { UNRECORDED_MODEL } from './modelIds';
 import type { ReadResult, RootWalk } from './readers';
 import type { TranscriptFile } from './transcripts';
 import type { LimitHit, TranscriptKind, UsageProvider, UsageRequest } from './types';
@@ -101,8 +102,6 @@ export const CODEX_ROWS_SINCE = 6;
 /** A rollout's name: its creation time, its thread, a revert's own id, and whether it is compressed. */
 const ROLLOUT = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\.jsonl(\.zst)?$/i;
 
-/** The model of a response no line names: Codex 0.32 to 0.34 recorded none. */
-export const UNRECORDED_MODEL = '<unrecorded>';
 
 /**
  * The longest pause between two lines of a copy of a parent's history, in

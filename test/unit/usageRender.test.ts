@@ -5,6 +5,7 @@ import * as vm from 'vm';
 
 import { escapeHtml } from '../../src/html';
 import { emptyTotals, type UsageTotals } from '../../src/usage/aggregate';
+import { UNRECORDED_MODEL } from '../../src/usage/modelIds';
 import { parsePanelMessage } from '../../src/usage/panel';
 import { cutPercent, renderFragments, renderUsagePage, type PanelFragments, type PanelView } from '../../src/usage/render';
 import type { UsageReport } from '../../src/usage/report';
@@ -1648,6 +1649,17 @@ suite('usage page, with two agents', () => {
             ...overrides,
         });
 
+    test('a model no record named is an empty cell in the CSV, with a note', () => {
+        const t = both().totals;
+        const fragments = renderFragments(
+            view({ report: both({ dayModels: [{ provider: 'codex', date: '2026-10-09', model: UNRECORDED_MODEL, variant: null, speed: null, inferenceGeo: null, promptSize: null, totals: t }] }) }),
+        );
+        const at = fragments.csv.header.indexOf('model');
+        assert.deepStrictEqual(fragments.csv.rows.map(r => [r[0], r[at]]), [['codex', '']]);
+        assert.ok(fragments.csv.notes.some(n => n.startsWith('model is empty where')), fragments.csv.notes.join('|'));
+        assert.ok(!JSON.stringify(fragments.csv).includes(UNRECORDED_MODEL));
+    });
+
     test("an agent filter, a By agent section, each session's agent and each limit's, once the history holds two agents'", () => {
         const fragments = renderFragments(view({ report: both(), agentsOn: { 'claude-code': true, codex: true } }));
         assert.deepStrictEqual(fragments.choices?.agent, {
@@ -1800,6 +1812,12 @@ suite('usage page, with two agents', () => {
         assert.deepStrictEqual([all.getAttribute('aria-pressed'), codex.getAttribute('aria-pressed'), controls.rebuilt, controls.agentsShown], ['false', 'true', 0, 0]);
         page.message(ORIGIN, renderFragments(view({ report: report() })));
         assert.deepStrictEqual([controls.rebuilt, controls.agentGroup, controls.agentsShown], [0, null, 1], 'the filter went with the second agent, and was not taken away');
+    });
+
+    test("a model no record named is shown as not recorded, never by its placeholder's id", () => {
+        const unnamed = report({ models: [{ model: '<unrecorded>', variant: null, totals: t }] });
+        const body = renderFragments(view({ report: unnamed })).body;
+        assert.ok(body.includes('Model not recorded') && !body.includes('&lt;unrecorded&gt;'));
     });
 
     test('the panel takes an agent it knows, and nothing else', () => {

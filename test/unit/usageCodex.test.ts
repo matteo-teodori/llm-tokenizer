@@ -5,7 +5,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as zlib from 'zlib';
 
-import { UNRECORDED_MODEL, readRollout, rolloutsAt, walkRollouts } from '../../src/usage/codex';
+import { readRollout, rolloutsAt, walkRollouts } from '../../src/usage/codex';
+import { UNRECORDED_MODEL } from '../../src/usage/modelIds';
 import { importSources } from '../../src/usage/importer';
 import { PARSER_VERSION, eachLineOfZstd } from '../../src/usage/lines';
 import { queryReport } from '../../src/usage/queries';
