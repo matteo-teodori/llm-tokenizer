@@ -237,6 +237,13 @@ async function runImport(
                 increment(summary.skipped, 'newer');
                 continue;
             }
+            // Left as an older parser left it, whose rows the next pass of
+            // every file forgets with all of the agent's, and never stamped as
+            // this one's, which would hide them from it.
+            if (previous && reader.forgetsBefore !== undefined && previous.parserVersion < reader.forgetsBefore) {
+                summary.unchanged++;
+                continue;
+            }
 
             let state: FileState;
             try {
@@ -352,8 +359,22 @@ export async function importUnderLease(
     };
     try {
         // What a window of a build made before 2.4.0's release wrote, its pass
-        // under way as this history was brought to this parser, is undone first.
-        store.transaction(() => store.undoPrereleasePasses());
+        // under way as this history was brought to this parser, is undone
+        // first; and before a pass of every file, what parsers older than an
+        // agent's reader keeps were read of its files is forgotten, where
+        // the pass reads that agent, for it to read them again whole. With
+        // its reading off, the agent's rows stay as they are.
+        store.transaction(() => {
+            store.undoPrereleasePasses();
+            if (!paths) {
+                for (const source of sources) {
+                    const forgetsBefore = readerOf(source.provider)?.forgetsBefore;
+                    if (forgetsBefore !== undefined && source.roots.length > 0) {
+                        store.forgetReadsBefore(source.provider, forgetsBefore);
+                    }
+                }
+            }
+        });
         return await (paths ? importSourcePaths(store, sources, paths, leased) : importSources(store, sources, leased));
     } finally {
         // Held only for the pass: another window's hint should not wait out

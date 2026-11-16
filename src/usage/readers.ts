@@ -109,6 +109,15 @@ export interface AgentReader {
      * are then given theirs.
      */
     searchesOwners(file: TranscriptFile, previous: ReadCheckpoint): boolean;
+    /**
+     * For an agent whose rows an older parser read are all forgotten rather
+     * than read again file by file, the oldest parser whose rows are kept: a
+     * pass of every file that reads the agent forgets them all first, where
+     * an older one checkpointed any of its files (see
+     * `UsageStore.forgetReadsBefore`), and no pass reads a file from such a
+     * checkpoint, which stays for that pass to find.
+     */
+    forgetsBefore?: number;
 }
 
 /** Claude Code's: `<root>/projects`, read by transcripts.ts. */
@@ -141,6 +150,7 @@ export const CODEX_READER: AgentReader = {
     // Codex records who created a thread, not who made each request in it.
     recordsOwners: () => false,
     searchesOwners: () => false,
+    forgetsBefore: CODEX_ROWS_SINCE,
 };
 
 const READERS: Record<UsageProvider, AgentReader> = {

@@ -2098,6 +2098,35 @@ export class UsageStore {
         return found.any === 1;
     }
 
+    /**
+     * Forget all that was read of `provider`'s files, their requests,
+     * limits, compactions, sessions and checkpoints, where a parser older
+     * than `parser` checkpointed any: the pass that follows reads each file
+     * again whole, into a history with nothing of the agent's, as a first
+     * import does (see `AgentReader.forgetsBefore`). For an agent that
+     * records no owners, as Codex. A history whose newest parser is older has
+     * every checkpoint at one; a history already at it has one only where a
+     * window not yet updated wrote after this history was brought to it, and
+     * no pass has read that file since. The rows of a file removed since go
+     * with the rest, and so do those under a root the pass does not read,
+     * until a pass reads it again. Call inside `transaction`, holding the
+     * import lease, before a pass of every file that reads the agent.
+     *
+     * @returns whether it found any.
+     */
+    forgetReadsBefore(provider: UsageProvider, parser: number): boolean {
+        this.assertWritable();
+        const found = this.db.prepare('SELECT EXISTS (SELECT 1 FROM files WHERE provider = ? AND parser_version < ?) AS any').get(provider, parser) as {
+            any: number;
+        };
+        if (found.any) {
+            for (const table of ['requests', 'limit_hits', 'compactions', 'sessions', 'files']) {
+                this.db.prepare(`DELETE FROM ${table} WHERE provider = ?`).run(provider);
+            }
+        }
+        return found.any === 1;
+    }
+
     releaseLease(role: string, holder: string): void {
         this.transaction(() => {
             this.db.prepare('DELETE FROM lease WHERE role = ? AND holder = ?').run(role, holder);

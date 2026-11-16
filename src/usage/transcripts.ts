@@ -56,10 +56,13 @@ const PROVIDER: UsageProvider = 'claude-code';
  *    searched for their owners again, the owners they took by time dropped,
  *    and their other files kept as they are; the bump also stops a window
  *    still running one (see `outdated`).
- * 6: a line is parsed only up to `MAX_PARSED_LINE_BYTES`, 2 MiB, where 5
- *    parsed up to 4: a longer one holding a record is skipped as oversize,
- *    and the rows parser 5 read from one are kept. Codex's rollouts are read
- *    from 6 on.
+ * 6: Codex's rollouts are read too. The earliest builds of 6 parsed a line
+ *    up to 4 MiB, as 5 did; the later only up to `MAX_PARSED_LINE_BYTES`,
+ *    2 MiB: a longer one holding a record is skipped as oversize, and the
+ *    rows read from one before are kept.
+ * 7: 2.5.0's, 6 having run only in builds tried before its release: a line
+ *    is parsed only up to 2 MiB, as by the later builds of 6, and Codex's
+ *    rows are kept from 7 on (see `CODEX_ROWS_SINCE` in codex.ts).
  */
 
 /**

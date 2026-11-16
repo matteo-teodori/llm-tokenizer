@@ -5,9 +5,9 @@ import * as os from 'os';
 import * as path from 'path';
 import * as zlib from 'zlib';
 
-import { readRollout, rolloutsAt, walkRollouts } from '../../src/usage/codex';
+import { CODEX_ROWS_SINCE, readRollout, rolloutsAt, walkRollouts } from '../../src/usage/codex';
 import { UNRECORDED_MODEL } from '../../src/usage/modelIds';
-import { importSources } from '../../src/usage/importer';
+import { importSources, importUnderLease } from '../../src/usage/importer';
 import { PARSER_VERSION, eachLineOfZstd } from '../../src/usage/lines';
 import { queryReport } from '../../src/usage/queries';
 import { resolveCodexRoots } from '../../src/usage/roots';
@@ -728,11 +728,13 @@ suite('usage Codex rollouts', () => {
         assert.deepStrictEqual((await read(under)).requests.map(r => r.requestId), ['resp_1']);
     });
 
-    test('a checkpoint an older parser left is read again whole, its rows replaced', async () => {
+    test('a checkpoint a parser older than CODEX_ROWS_SINCE left, as 6, the first that read Codex, did, is read again whole, its rows replaced', async () => {
         const file = rollout([meta(0), record(1, 1)]);
         const first = await read(file);
-        const older = await read(file, { ...first.checkpoint, parserVersion: PARSER_VERSION - 1, size: first.checkpoint.size - 1 });
-        assert.deepStrictEqual([older.restarted, older.requests.map(r => r.requestId)], ['parser', ['resp_1']]);
+        for (const parserVersion of [6, CODEX_ROWS_SINCE - 1]) {
+            const older = await read(file, { ...first.checkpoint, parserVersion, size: first.checkpoint.size - 1 });
+            assert.deepStrictEqual([older.restarted, older.requests.map(r => r.requestId)], ['parser', ['resp_1']], `parser ${parserVersion}`);
+        }
     });
 
     test('rollouts are found in sessions and archived_sessions, compressed or not, the plain copy read where both are there, and never Codex\'s temporary files', async () => {
@@ -1145,6 +1147,142 @@ suite('usage Codex rollouts', () => {
             // Read again, nothing changes.
             const again = await importSources(store, [{ provider: 'codex', roots: [home] }]);
             assert.deepStrictEqual([again.read, again.unchanged], [0, 2]);
+        } finally {
+            store.close();
+        }
+    });
+
+    test("a pass of every file that reads Codex forgets what a parser older than CODEX_ROWS_SINCE read of its rollouts, compressed or compressed since, limits and compactions too, and reads them again whole; a pass of named files, or one with Codex's reading off, leaves it as it is, and Claude Code's rows stay", async function () {
+        if (!sqlite) {
+            this.skip();
+        }
+        const lines = [meta(0), context(1, 'gpt-5.5'), record(2, 1)];
+        const plain = rollout(lines);
+        const compressed = `${plain}.zst`;
+        fs.writeFileSync(compressed, zlib.zstdCompressSync(Buffer.from(lines.join(''))));
+        fs.rmSync(plain);
+        const claude = path.join(home, 'claude');
+        fs.mkdirSync(path.join(claude, 'projects'), { recursive: true });
+        const opened = UsageStore.open(sqlite, path.join(home, 'history', 'usage.sqlite'));
+        assert.strictEqual(opened.status, 'ready');
+        if (opened.status !== 'ready') {
+            return;
+        }
+        const store = opened.store;
+        const codex = [{ provider: 'codex' as const, roots: [home] }];
+        try {
+            assert.ok(await importUnderLease(store, codex, 'window-a'));
+            const [fresh] = [...store.requests()];
+            const real = fs.realpathSync(compressed);
+            const checkpoint = store.getFile('codex', real);
+            assert.ok(checkpoint);
+            // As an older parser left it: a row under a key this one no longer
+            // gives, a limit and a compaction it no longer counts, and the rows,
+            // session and checkpoint of a plain rollout Codex has compressed
+            // since. And Claude Code's, which stay: a request, the checkpoint
+            // 2.4.0 left of a transcript removed since, a session, a limit and a
+            // compaction.
+            const older = CODEX_ROWS_SINCE - 1;
+            const gone = real.slice(0, -'.zst'.length);
+            const removed = path.join(claude, 'projects', 'p', 'removed.jsonl');
+            store.transaction(() => {
+                store.putFile({ ...checkpoint, parserVersion: older });
+                store.putFile({ ...checkpoint, path: gone, parserVersion: older });
+                store.putFile({ ...checkpoint, provider: 'claude-code', path: removed, parserVersion: 5 });
+                store.upsertRequests([
+                    { ...fresh, messageId: `${fresh.messageId}:older`, parserVersion: older },
+                    { ...fresh, messageId: `${fresh.messageId}:plain`, file: gone, sessionId: PARENT, parserVersion: older },
+                    { ...fresh, provider: 'claude-code', messageId: 'msg_kept', sessionId: 'sess-kept', parserVersion: 5 },
+                ]);
+                store.upsertSession('codex', { sessionId: PARENT, root: home, cwd: null, cwdTs: null, projectDir: '', firstTs: fresh.timestamp, lastTs: fresh.timestamp });
+                store.upsertSession('claude-code', { sessionId: 'sess-kept', root: claude, cwd: '/work', cwdTs: fresh.timestamp, projectDir: 'p', firstTs: fresh.timestamp, lastTs: fresh.timestamp });
+                for (const [provider, uuid, sessionId] of [['codex', `${THREAD}:older`, THREAD], ['claude-code', 'kept', 'sess-kept']] as const) {
+                    store.insertLimitHits([{ provider, uuid, sessionId, timestamp: fresh.timestamp, limitType: 'five_hour', resetsAt: null }]);
+                    store.insertCompactions([{ provider, uuid, sessionId, kind: 'main', timestamp: fresh.timestamp, trigger: null, preTokens: null, postTokens: null }]);
+                }
+            });
+            const state = () => ({
+                rows: [...store.requests()].map(r => [r.provider, r.messageId, r.parserVersion]),
+                limits: store.limitHits().map(h => [h.provider, h.uuid]).sort(),
+                compactions: store.compactions().map(c => [c.provider, c.uuid]).sort(),
+                sessions: store.sessions().map(s => [s.provider, s.sessionId]).sort(),
+                checkpoints: [store.getFile('codex', real)?.parserVersion, store.getFile('codex', gone)?.parserVersion, store.getFile('claude-code', removed)?.parserVersion],
+            });
+            const before = state();
+            // A pass of named files leaves the rollout as it is, for a pass of
+            // every file to forget; so does a pass with Codex's reading off, or
+            // with no home of Codex's to read.
+            const named = await importUnderLease(store, codex, 'window-a', {}, [compressed]);
+            assert.deepStrictEqual([named?.read, named?.unchanged], [0, 1]);
+            assert.ok(await importUnderLease(store, [{ provider: 'claude-code', roots: [claude] }], 'window-a'));
+            assert.ok(await importUnderLease(store, [{ provider: 'codex', roots: [] }], 'window-a'));
+            assert.deepStrictEqual(state(), before);
+            // A pass of every file that reads Codex forgets all of Codex's, reads the rollout again whole, and keeps Claude Code's.
+            const summary = await importUnderLease(store, codex, 'window-a');
+            assert.deepStrictEqual([summary?.files, summary?.read], [1, 1]);
+            assert.deepStrictEqual(state(), {
+                rows: [
+                    ['claude-code', 'msg_kept', 5],
+                    ['codex', fresh.messageId, PARSER_VERSION],
+                ],
+                limits: [['claude-code', 'kept']],
+                compactions: [['claude-code', 'kept']],
+                sessions: [
+                    ['claude-code', 'sess-kept'],
+                    ['codex', THREAD],
+                ],
+                checkpoints: [PARSER_VERSION, undefined, 5],
+            });
+            // The next pass reads nothing again.
+            const again = await importUnderLease(store, codex, 'window-a');
+            assert.deepStrictEqual([again?.read, again?.unchanged], [0, 1]);
+        } finally {
+            store.close();
+        }
+    });
+
+    test("a rollout a window not yet updated checkpoints at an older parser while a pass is under way is left as it is, for the next pass of every file to forget with all of Codex's", async function () {
+        if (!sqlite) {
+            this.skip();
+        }
+        const first = fs.realpathSync(rollout([meta(0), context(1, 'gpt-5.5'), record(2, 1)]));
+        const second = fs.realpathSync(rollout([meta(0, { id: PARENT, session_id: PARENT }), context(1, 'gpt-5.5'), record(2, 2, PARENT)], PARENT));
+        assert.ok(first < second, 'the first is read first');
+        const opened = UsageStore.open(sqlite, path.join(home, 'history', 'usage.sqlite'));
+        assert.strictEqual(opened.status, 'ready');
+        if (opened.status !== 'ready') {
+            return;
+        }
+        const store = opened.store;
+        const codex = [{ provider: 'codex' as const, roots: [home] }];
+        const rows = () => [...store.requests()].map(r => [r.requestId, r.parserVersion]);
+        try {
+            // Between the two, an outdated window writes the second's rows and checkpoint, as its parser reads them.
+            let wrote = false;
+            const pause = () => {
+                const checkpoint = store.getFile('codex', first);
+                if (!wrote && checkpoint) {
+                    wrote = true;
+                    const [row] = [...store.requests()];
+                    store.transaction(() => {
+                        store.putFile({ ...checkpoint, path: second, parserVersion: CODEX_ROWS_SINCE - 1 });
+                        store.upsertRequests([{ ...row, messageId: `r:${PARENT}:resp_older`, requestId: 'resp_older', sessionId: PARENT, file: second, parserVersion: CODEX_ROWS_SINCE - 1 }]);
+                    });
+                }
+                return Promise.resolve();
+            };
+            const during = await importUnderLease(store, codex, 'window-a', { filesPerYield: 1, pause });
+            assert.deepStrictEqual([wrote, during?.read, during?.unchanged, store.getFile('codex', second)?.parserVersion], [true, 1, 1, CODEX_ROWS_SINCE - 1]);
+            const next = await importUnderLease(store, codex, 'window-a');
+            assert.deepStrictEqual([next?.read, rows()], [
+                2,
+                [
+                    ['resp_1', PARSER_VERSION],
+                    ['resp_2', PARSER_VERSION],
+                ],
+            ]);
+            const again = await importUnderLease(store, codex, 'window-a');
+            assert.deepStrictEqual([again?.read, again?.unchanged], [0, 2]);
         } finally {
             store.close();
         }

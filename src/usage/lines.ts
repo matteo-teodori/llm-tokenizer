@@ -20,10 +20,12 @@ import * as zlib from 'zlib';
  * and a window running an older build must stop writing once a newer one
  * has (see `UsageStore.outdated`). Claude Code's own history of it is in
  * transcripts.ts, beside `ROWS_SINCE`, the oldest of its parsers whose rows
- * it keeps: 6 is the first that reads Codex's rollouts too, and parses a
- * line only up to 2 MiB, where 5 parsed 4.
+ * it keeps: 6 is the first that reads Codex's rollouts too; its earliest
+ * builds parsed a line up to 4 MiB, as 5 did, and the later only up to 2.
+ * 7 is the first whose rows of Codex's are kept (see `CODEX_ROWS_SINCE`),
+ * and parses a line only up to 2 MiB in every build.
  */
-export const PARSER_VERSION = 6;
+export const PARSER_VERSION = 7;
 
 /** Bytes read at a time. */
 const CHUNK_BYTES = 1 << 20;

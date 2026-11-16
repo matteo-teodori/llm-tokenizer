@@ -102,10 +102,24 @@ import type { LimitHit, TranscriptKind, UsageProvider, UsageRequest } from './ty
 const PROVIDER: UsageProvider = 'codex';
 
 /**
- * The oldest parser whose rows of Codex's this one keeps: the first that read
- * them. A Codex file an older parser checkpointed is read again whole.
+ * The oldest parser whose rows of Codex's this one keeps. Where an older
+ * one checkpointed any rollout, a pass of every file that reads Codex first
+ * forgets all that was read of Codex's, and reads each rollout again whole
+ * (see `UsageStore.forgetReadsBefore`): a compressed rollout read again only
+ * replaces the rows whose keys it gives again, a rollout compressed since
+ * it was read plain left its rows under a name that is gone, and a limit is
+ * never replaced. No pass reads a rollout from such a checkpoint, which
+ * stays for that pass to find: one a window not yet updated writes after
+ * the forgetting, or one a pass of named files comes to first. While
+ * Codex's reading is off, its rows stay as they are. Raising this forgets
+ * the rows of rollouts removed since, and, until a pass reads them again,
+ * those under a home the pass does not read. 6, the first parser that read
+ * them, ran in builds of 2.5.0 tried before its release: those made before
+ * compactions were counted counted none, and the earliest gave a response
+ * its effort, its model, a review's tokens and a limit otherwise than this
+ * reader does.
  */
-export const CODEX_ROWS_SINCE = 6;
+export const CODEX_ROWS_SINCE = 7;
 
 /** A rollout's name: its creation time, its thread, a revert's own id, and whether it is compressed. */
 const ROLLOUT = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\.jsonl(\.zst)?$/i;
