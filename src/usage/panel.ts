@@ -1,5 +1,5 @@
 /**
- * The Claude Code Usage panel: one, reused, and not kept alive while hidden.
+ * The Agent Usage panel: one, reused, and not kept alive while hidden.
  *
  * It holds the service while visible, so imports follow watcher hints, and
  * lets go when hidden. The page is rendered once; after that the panel posts
@@ -15,15 +15,16 @@ import * as vscode from 'vscode';
 import { contentSecurityPolicy, createNonce } from '../html';
 import { logoIcon } from '../logo';
 import { modelById } from '../tokenizer/registry';
-import { ALL_ACCOUNTS, MAX_GIVEN_NAME, accountLabels, givenNames, isAccountFilter, isAccountId, nameReplaces, showable } from './accounts';
+import { ACCOUNT_PROVIDER, ALL_ACCOUNTS, MAX_GIVEN_NAME, accountLabels, givenNames, isAccountFilter, isAccountId, nameReplaces, showable } from './accounts';
 import { isTimeZone, localMinute } from './aggregate';
-import { renderFragments, renderUsagePage, type PanelFragments, type PanelView } from './render';
-import { RANGE_KEYS, type RangeKey, type UsageReport } from './report';
-import { sourceLabel, tildePath } from './roots';
+import { AGENT_LABELS, renderFragments, renderUsagePage, type PanelFragments, type PanelView } from './render';
+import { AGENT_ORDER, RANGE_KEYS, type RangeKey, type UsageReport } from './report';
+import { codexSourceLabel, sourceLabel, tildePath } from './roots';
 import { CONFIG_SECTION } from './settings';
+import type { UsageProvider } from './types';
 import type { UsageService } from './usageService';
 
-/** Remembered between sessions: the zone the page reported, the range, the scope and the account. */
+/** Remembered between sessions: the zone the page reported, the range, the scope, the agent and the account. */
 const STATE_KEY = 'llm-tokenizer.claudeCodeUsage.panel';
 
 /** The names you give accounts, by account id: an application setting, so no repository can rename one. */
@@ -59,26 +60,43 @@ const MAX_EXPORT_CHARS = 16 << 20;
  */
 export async function openUsageSettings(remoteName: string | undefined = vscode.env.remoteName): Promise<void> {
     const command = remoteName ? 'workbench.action.openRemoteSettings' : 'workbench.action.openSettings';
-    await vscode.commands.executeCommand(command, { query: 'llm-tokenizer.enableClaudeCodeUsage' });
+    // Every agent's switch and folder: this extension's settings.
+    await vscode.commands.executeCommand(command, { query: '@ext:matteoteodori.llm-tokenizer' });
 }
 
+/** Each agent's own switch and data folder. */
+const AGENT_SETTINGS: Record<UsageProvider, { enable: string; folder: string }> = {
+    'claude-code': { enable: 'enableClaudeCodeUsage', folder: 'claudeCodeDataDirectory' },
+    codex: { enable: 'enableCodexUsage', folder: 'codexDataDirectory' },
+};
+
 /**
- * Turn the feature on, from the off page's Turn On: the person's own click,
- * so reading Claude Code's records stays something they chose. At the user
- * level, which VS Code turns into the remote host's settings in a remote
- * window, for a machine setting (`toEditableConfigurationTarget` in its
- * configurationService.ts, 1.105 and since): where the setting applies.
+ * Turn one agent's reading on, from a Turn On of the page: the person's own
+ * click, so reading an agent's records stays something they chose. At the
+ * user level, which VS Code turns into the remote host's settings in a
+ * remote window, for a machine setting (`toEditableConfigurationTarget` in
+ * its configurationService.ts, 1.105 and since): where the setting applies.
  */
-export async function turnOnUsage(): Promise<void> {
+export async function turnOnUsage(agent: UsageProvider): Promise<void> {
     try {
-        await vscode.workspace.getConfiguration(CONFIG_SECTION).update('enableClaudeCodeUsage', true, vscode.ConfigurationTarget.Global);
+        await vscode.workspace.getConfiguration(CONFIG_SECTION).update(AGENT_SETTINGS[agent].enable, true, vscode.ConfigurationTarget.Global);
     } catch {
         // A settings file VS Code will not write, one with errors in it say:
         // its Settings editor says why, and turns it on there.
-        if (await vscode.window.showErrorMessage('LLM Tokenizer: Claude Code usage could not be turned on here.', 'Open Settings')) {
+        if (await vscode.window.showErrorMessage(`LLM Tokenizer: ${AGENT_LABELS[agent]} usage could not be turned on here.`, 'Open Settings')) {
             await openUsageSettings();
         }
     }
+}
+
+/** Whether `value` is an agent this build reads. */
+function isAgent(value: unknown): value is UsageProvider {
+    return typeof value === 'string' && (AGENT_ORDER as readonly string[]).includes(value);
+}
+
+/** Whether the page shows accounts with `agent`'s sessions, or every agent's: accounts are Claude Code's alone. */
+function withAccounts(agent: UsageProvider | 'all'): boolean {
+    return agent === 'all' || agent === ACCOUNT_PROVIDER;
 }
 
 /** What the page may ask for. */
@@ -87,14 +105,15 @@ export type PanelMessage =
     | { type: 'refresh' }
     | { type: 'setRange'; range: RangeKey }
     | { type: 'setScope'; scope: 'all' | 'workspace' }
+    | { type: 'setAgent'; agent: UsageProvider | 'all' }
     /** `choice`: the page's number for it, which the updates after it carry back. */
     | { type: 'setAccount'; account: string; choice: number }
     | { type: 'nameAccount'; account: string }
     | { type: 'copy'; text: string }
     | { type: 'export'; text: string }
-    | { type: 'turnOn' }
+    | { type: 'turnOn'; agent: UsageProvider }
     | { type: 'openSettings' }
-    | { type: 'chooseFolder' }
+    | { type: 'chooseFolder'; agent: UsageProvider }
     | { type: 'clear' }
     | { type: 'showLog' }
     | { type: 'reloadWindow' };
@@ -112,6 +131,11 @@ export function parsePanelMessage(raw: unknown): PanelMessage | undefined {
             return RANGE_KEYS.includes(m.range as RangeKey) ? { type: 'setRange', range: m.range as RangeKey } : undefined;
         case 'setScope':
             return m.scope === 'all' || m.scope === 'workspace' ? { type: 'setScope', scope: m.scope } : undefined;
+        case 'setAgent':
+            return m.agent === 'all' || isAgent(m.agent) ? { type: 'setAgent', agent: m.agent } : undefined;
+        case 'turnOn':
+        case 'chooseFolder':
+            return isAgent(m.agent) ? { type: m.type, agent: m.agent } : undefined;
         case 'setAccount':
             return isAccountFilter(m.account)
                 ? { type: 'setAccount', account: m.account, choice: Number.isSafeInteger(m.choice) && (m.choice as number) >= 0 ? (m.choice as number) : 0 }
@@ -122,9 +146,7 @@ export function parsePanelMessage(raw: unknown): PanelMessage | undefined {
         case 'export':
             return typeof m.text === 'string' && m.text.length <= MAX_EXPORT_CHARS ? { type: m.type, text: m.text } : undefined;
         case 'refresh':
-        case 'turnOn':
         case 'openSettings':
-        case 'chooseFolder':
         case 'clear':
         case 'showLog':
         case 'reloadWindow':
@@ -138,6 +160,8 @@ interface PanelState {
     zone: string;
     range: RangeKey;
     scope: 'all' | 'workspace';
+    /** Every agent's sessions, or one's. */
+    agent: UsageProvider | 'all';
     /** ALL_ACCOUNTS, or one account's key. */
     account: string;
 }
@@ -164,7 +188,7 @@ export class UsagePanel implements vscode.Disposable {
             void UsagePanel.current.refresh();
             return;
         }
-        const panel = vscode.window.createWebviewPanel('llmTokenizer.claudeCodeUsage', 'Claude Code Usage', vscode.ViewColumn.Active, {
+        const panel = vscode.window.createWebviewPanel('llmTokenizer.claudeCodeUsage', 'Agent Usage', vscode.ViewColumn.Active, {
             enableScripts: true,
             // The page is self-contained: nothing on disk is needed.
             localResourceRoots: [],
@@ -176,8 +200,8 @@ export class UsagePanel implements vscode.Disposable {
             // No empty tab left open, and no raw message shown: the name
             // only, since what the feature had read could be in the message.
             panel.dispose();
-            log.warn(`Claude Code usage panel: could not be opened (${error instanceof Error ? error.name : 'Error'})`);
-            void vscode.window.showErrorMessage('LLM Tokenizer: the Claude Code Usage panel could not be opened; see the log.');
+            log.warn(`Agent usage panel: could not be opened (${error instanceof Error ? error.name : 'Error'})`);
+            void vscode.window.showErrorMessage('LLM Tokenizer: the Agent Usage panel could not be opened; see the log.');
         }
     }
 
@@ -188,11 +212,14 @@ export class UsagePanel implements vscode.Disposable {
         private readonly log: vscode.LogOutputChannel,
     ) {
         const saved = context.globalState.get<Partial<PanelState>>(STATE_KEY);
+        const agent = isAgent(saved?.agent) ? saved.agent : 'all';
         this.state = {
             zone: saved?.zone && isTimeZone(saved.zone) ? saved.zone : Intl.DateTimeFormat().resolvedOptions().timeZone,
             range: saved?.range && RANGE_KEYS.includes(saved.range) ? saved.range : '7d',
             scope: saved?.scope === 'workspace' ? 'workspace' : 'all',
-            account: isAccountFilter(saved?.account) ? saved.account : ALL_ACCOUNTS,
+            agent,
+            // An account kept beside an agent whose sessions are no account's, by a choice that came late, is none.
+            account: withAccounts(agent) && isAccountFilter(saved?.account) ? saved.account : ALL_ACCOUNTS,
         };
         this.hold = service.hold();
         this.disposables.push(
@@ -278,8 +305,20 @@ export class UsagePanel implements vscode.Disposable {
                 await this.saveState();
                 await this.update(false);
                 return;
+            case 'setAgent':
+                this.state.agent = message.agent;
+                // Accounts are Claude Code's: Codex's sessions are in none of them.
+                if (!withAccounts(message.agent)) {
+                    this.state.account = ALL_ACCOUNTS;
+                }
+                await this.saveState();
+                await this.update(false);
+                return;
             case 'setAccount':
-                this.state.account = message.account;
+                // A choice made before an agent with no accounts was: the page shows no account filter now.
+                if (withAccounts(this.state.agent)) {
+                    this.state.account = message.account;
+                }
                 this.choice = message.choice;
                 await this.saveState();
                 await this.update(false);
@@ -295,13 +334,13 @@ export class UsagePanel implements vscode.Disposable {
                 );
                 return;
             case 'turnOn':
-                await turnOnUsage();
+                await turnOnUsage(message.agent);
                 return;
             case 'openSettings':
                 await openUsageSettings();
                 return;
             case 'chooseFolder':
-                await this.chooseFolder();
+                await this.chooseFolder(message.agent);
                 return;
             case 'clear':
                 await vscode.commands.executeCommand('llm-tokenizer.clearClaudeCodeUsageHistory');
@@ -330,7 +369,7 @@ export class UsagePanel implements vscode.Disposable {
         const organized = report?.accountsSeen.some(a => a.owner?.accountUuid === account && (plain?.get(a.key)?.organization ?? null) !== null) ?? false;
         const typed = await vscode.window.showInputBox({
             title: 'Name a Claude account',
-            prompt: `Shown in Claude Code Usage in place of ${replaces}${organized ? ', beside its organization' : ''}. Leave it empty to show ${
+            prompt: `Shown in Agent Usage in place of ${replaces}${organized ? ', beside its organization' : ''}. Leave it empty to show ${
                 replaces === 'its number' ? 'that' : replaces
             } again.`,
             value: given[account] ?? '',
@@ -359,23 +398,27 @@ export class UsagePanel implements vscode.Disposable {
         }
     }
 
-    /** Ask for Claude Code's folder; a `projects` folder picked by mistake means its parent. */
-    private async chooseFolder(): Promise<void> {
+    /**
+     * Ask for an agent's folder: Claude Code's configuration folder, or
+     * Codex's home. The folder its records are in, picked by mistake, means
+     * its parent: Claude Code's `projects`, Codex's `sessions` or
+     * `archived_sessions`.
+     */
+    private async chooseFolder(agent: UsageProvider): Promise<void> {
         const picked = await vscode.window.showOpenDialog({
             canSelectFiles: false,
             canSelectFolders: true,
             canSelectMany: false,
             openLabel: 'Use This Folder',
-            title: "Claude Code's configuration folder, the one that contains projects",
+            title: agent === 'codex' ? "Codex's home folder, the one that contains sessions" : "Claude Code's configuration folder, the one that contains projects",
         });
         const folder = picked?.[0]?.fsPath;
         if (!folder) {
             return;
         }
-        const root = path.basename(folder) === 'projects' ? path.dirname(folder) : folder;
-        await vscode.workspace
-            .getConfiguration('llm-tokenizer')
-            .update('claudeCodeDataDirectory', root, vscode.ConfigurationTarget.Global);
+        const inner = agent === 'codex' ? ['sessions', 'archived_sessions'] : ['projects'];
+        const root = inner.includes(path.basename(folder)) ? path.dirname(folder) : folder;
+        await vscode.workspace.getConfiguration(CONFIG_SECTION).update(AGENT_SETTINGS[agent].folder, root, vscode.ConfigurationTarget.Global);
     }
 
     private async saveState(): Promise<void> {
@@ -404,7 +447,7 @@ export class UsagePanel implements vscode.Disposable {
                 }
             })
             .catch((error: unknown) => {
-                this.log.warn(`Claude Code usage panel: could not update (${error instanceof Error ? error.name : 'Error'})`);
+                this.log.warn(`Agent usage panel: could not update (${error instanceof Error ? error.name : 'Error'})`);
             });
         return this.updating;
     }
@@ -423,20 +466,22 @@ export class UsagePanel implements vscode.Disposable {
             state.scope === 'workspace'
                 ? (vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file').map(f => f.uri.fsPath)
                 : null;
-        let report = await this.service.report(state.range, state.zone, folders, state.account);
-        // An account the history no longer holds, after a Clear, is no filter
-        // left to show: every account is shown again. Not while the history
-        // is being read, which may not have reached that account's sessions.
-        if (
-            report &&
-            state.account !== ALL_ACCOUNTS &&
-            !this.service.reading &&
-            !report.accountsSeen.some(a => a.key === state.account) &&
-            this.state.account === state.account
-        ) {
-            this.state.account = state.account = ALL_ACCOUNTS;
+        const agent = state.agent === 'all' ? undefined : state.agent;
+        let report = await this.service.report(state.range, state.zone, folders, state.account, agent);
+        // An account or an agent the history no longer holds, after a Clear,
+        // is no filter left to show: every one is shown again. Not while the
+        // history is being read, which may not have reached their sessions.
+        const goneAccount = report && state.account !== ALL_ACCOUNTS && !report.accountsSeen.some(a => a.key === state.account);
+        const goneAgent = report && state.agent !== 'all' && !report.agentsSeen.includes(state.agent);
+        if (report && !this.service.reading && (goneAccount || goneAgent) && this.state.account === state.account && this.state.agent === state.agent) {
+            if (goneAccount) {
+                this.state.account = state.account = ALL_ACCOUNTS;
+            }
+            if (goneAgent) {
+                this.state.agent = state.agent = 'all';
+            }
             await this.saveState();
-            report = await this.service.report(state.range, state.zone, folders, state.account);
+            report = await this.service.report(state.range, state.zone, folders, state.account, state.agent === 'all' ? undefined : state.agent);
         }
         this.lastReport = report ?? this.lastReport;
         return this.viewOf(report, state);
@@ -445,6 +490,7 @@ export class UsagePanel implements vscode.Disposable {
     private viewOf(report: PanelView['report'], state: PanelState = this.state): PanelView {
         const zone = state.zone;
         const resolved = this.service.roots;
+        const codex = this.service.codexRoots;
         const summary = this.service.lastImport;
         const version = (this.context.extension.packageJSON as { version?: unknown }).version;
         const remote = vscode.env.remoteName;
@@ -453,6 +499,8 @@ export class UsagePanel implements vscode.Disposable {
             reading: this.service.reading,
             range: state.range,
             scope: state.scope,
+            agent: state.agent,
+            agentsOn: this.service.agentsOn,
             account: state.account,
             givenNames: readGivenNames(),
             zone,
@@ -463,6 +511,12 @@ export class UsagePanel implements vscode.Disposable {
             roots: (resolved?.candidates ?? []).map(c => ({
                 path: c.notAbsolute ? c.path : tildePath(c.path),
                 source: sourceLabel(c.source),
+                exists: c.exists,
+                ...(c.notAbsolute ? { notAbsolute: true as const } : {}),
+            })),
+            codexRoots: (codex?.candidates ?? []).map(c => ({
+                path: c.notAbsolute ? c.path : tildePath(c.path),
+                source: codexSourceLabel(c.source),
                 exists: c.exists,
                 ...(c.notAbsolute ? { notAbsolute: true as const } : {}),
             })),

@@ -1,6 +1,6 @@
 /**
- * One import pass: every transcript under the given roots, read from its
- * checkpoint into the store.
+ * One import pass: every file of each agent's under its roots, read from its
+ * checkpoint into the store by that agent's reader (readers.ts).
  *
  * Each file is deduplicated in memory with the comparator before it is
  * written, about 100 files go in each transaction, and every checkpoint is
@@ -17,32 +17,24 @@
 import * as fs from 'fs';
 
 import { dedupe } from './accounting';
-import {
-    GUARDED_READ_BYTES,
-    PARSER_VERSION,
-    ROWS_SINCE,
-    fileState,
-    isUnchanged,
-    needsOwnerScan,
-    readTranscript,
-    transcriptsAt,
-    walkProjects,
-    type FileState,
-    type MalformedCategory,
-    type ReadResult,
-    type TranscriptFile,
-} from './transcripts';
+import { GUARDED_READ_BYTES, PARSER_VERSION, fileState, isUnchanged, type FileState, type MalformedCategory } from './lines';
+import { readerOf, type AgentReader, type ReadResult } from './readers';
 import type { FileCheckpoint, ReadGuard, UsageStore } from './store';
-import type { SessionSighting } from './types';
+import type { TranscriptFile } from './transcripts';
+import type { SessionSighting, UsageProvider } from './types';
 
-const PROVIDER = 'claude-code';
+/** One agent's roots: the folders it keeps its records in, as found for this machine. */
+export interface AgentRoots {
+    provider: UsageProvider;
+    roots: readonly string[];
+}
 
-/** Why a file was not read this pass. */
 /**
  * Why a file was not read this pass. `newer`: a newer parser read it, in a
  * window running a newer LLM Tokenizer, and this one must not rewrite it.
+ * `unsupported`: a compressed file, which this runtime cannot decode.
  */
-export type SkipReason = 'missing' | 'unreadable' | 'busy' | 'crashed' | 'newer' | 'error';
+export type SkipReason = 'missing' | 'unreadable' | 'busy' | 'crashed' | 'newer' | 'unsupported' | 'error';
 
 export interface ImportSummary {
     roots: number;
@@ -99,36 +91,55 @@ const CRASH_RETRY_MS = 24 * 60 * 60 * 1000;
 
 const yieldToEvents = () => new Promise<void>(resolve => setImmediate(resolve));
 
+/** A pass over Claude Code's `roots` alone. */
 export function importRoots(store: UsageStore, roots: string[], options: ImportOptions = {}): Promise<ImportSummary> {
-    return runImport(store, roots.length, options, async (importFiles, summary) => {
-        for (const root of roots) {
-            const walk = walkProjects(root);
-            if (walk.projects === null) {
+    return importSources(store, [{ provider: 'claude-code', roots }], options);
+}
+
+/** A pass over every file of each agent's under its roots. */
+export function importSources(store: UsageStore, sources: readonly AgentRoots[], options: ImportOptions = {}): Promise<ImportSummary> {
+    return runImport(store, sources, options, async (importFiles, summary) => {
+        for (const { reader, root } of rootsOf(sources)) {
+            const walk = reader.walk(root);
+            if (walk.folder === null) {
                 summary.missingProjects++;
                 continue;
             }
             summary.symlinkedFolders += walk.symlinkedFolders;
             summary.unreadableFolders += walk.unreadableFolders;
-            summary.journals += walk.journals;
-            if (!(await importFiles(walk.files))) {
+            summary.journals += walk.passedOver;
+            if (!(await importFiles(reader, walk.files))) {
                 return;
             }
         }
     });
 }
 
-/**
- * A pass over only the transcripts in `paths`: the files a watcher reported
- * changed, so a hint costs what changed rather than a stat of every file.
- * A path outside every root's projects folder is left out.
- */
+/** `importSourcePaths` over Claude Code's `roots` alone. */
 export function importPaths(store: UsageStore, roots: string[], paths: readonly string[], options: ImportOptions = {}): Promise<ImportSummary> {
-    return runImport(store, roots.length, options, async importFiles => {
-        for (const root of roots) {
-            if (!(await importFiles(transcriptsAt(root, paths)))) {
+    return importSourcePaths(store, [{ provider: 'claude-code', roots }], paths, options);
+}
+
+/**
+ * A pass over only the files in `paths`: the files a watcher reported
+ * changed, so a hint costs what changed rather than a stat of every file.
+ * A path that is no agent's file under one of its roots is left out.
+ */
+export function importSourcePaths(store: UsageStore, sources: readonly AgentRoots[], paths: readonly string[], options: ImportOptions = {}): Promise<ImportSummary> {
+    return runImport(store, sources, options, async importFiles => {
+        for (const { reader, root } of rootsOf(sources)) {
+            if (!(await importFiles(reader, reader.filesAt(root, paths)))) {
                 return;
             }
         }
+    });
+}
+
+/** Each root of each agent that has a reader, with that reader. */
+function rootsOf(sources: readonly AgentRoots[]): { reader: AgentReader; root: string }[] {
+    return sources.flatMap(({ provider, roots }) => {
+        const reader = readerOf(provider);
+        return reader ? roots.map(root => ({ reader, root })) : [];
     });
 }
 
@@ -139,9 +150,9 @@ export function importPaths(store: UsageStore, roots: string[], paths: readonly 
  */
 async function runImport(
     store: UsageStore,
-    rootCount: number,
+    sources: readonly AgentRoots[],
     options: ImportOptions,
-    plan: (importFiles: (files: readonly TranscriptFile[]) => Promise<boolean>, summary: ImportSummary) => Promise<void>,
+    plan: (importFiles: (reader: AgentReader, files: readonly TranscriptFile[]) => Promise<boolean>, summary: ImportSummary) => Promise<void>,
 ): Promise<ImportSummary> {
     const started = performance.now();
     const filesPerTransaction = options.filesPerTransaction ?? 100;
@@ -151,7 +162,7 @@ async function runImport(
     const countCrashes = options.countCrashes ?? true;
     const now = options.now ?? Date.now;
     const summary: ImportSummary = {
-        roots: rootCount,
+        roots: sources.reduce((n, s) => n + s.roots.length, 0),
         files: 0,
         read: 0,
         unchanged: 0,
@@ -193,7 +204,7 @@ async function runImport(
         return !cleared;
     };
 
-    let batch: { file: TranscriptFile; result: ReadResult; previous: FileCheckpoint | undefined; guarded: boolean }[] = [];
+    let batch: { reader: AgentReader; file: TranscriptFile; result: ReadResult; previous: FileCheckpoint | undefined; guarded: boolean }[] = [];
     const flush = () => {
         if (batch.length === 0) {
             return;
@@ -201,17 +212,17 @@ async function runImport(
         const pending = batch;
         batch = [];
         writeIfCurrent(() => {
-            for (const { file, result, previous, guarded } of pending) {
-                write(store, file, result, previous);
+            for (const { reader, file, result, previous, guarded } of pending) {
+                write(store, reader, file, result, previous);
                 if (guarded) {
-                    store.deleteReadGuard(PROVIDER, file.path);
+                    store.deleteReadGuard(reader.provider, file.path);
                 }
             }
         });
     };
 
     let sinceYield = 0;
-    const importFiles = async (unsorted: readonly TranscriptFile[]): Promise<boolean> => {
+    const importFiles = async (reader: AgentReader, unsorted: readonly TranscriptFile[]): Promise<boolean> => {
         // A fixed order, so that equal records always resolve the same way.
         const files = [...unsorted].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
         for (const file of files) {
@@ -221,9 +232,16 @@ async function runImport(
             }
             options.progress?.();
             summary.files++;
-            const previous = store.getFile(PROVIDER, file.path);
+            const previous = store.getFile(reader.provider, file.path);
             if (previous && previous.parserVersion > PARSER_VERSION) {
                 increment(summary.skipped, 'newer');
+                continue;
+            }
+            // Left as an older parser left it, whose rows the next pass of
+            // every file forgets with all of the agent's, and never stamped as
+            // this one's, which would hide them from it.
+            if (previous && reader.forgetsBefore !== undefined && previous.parserVersion < reader.forgetsBefore) {
+                summary.unchanged++;
                 continue;
             }
 
@@ -240,9 +258,9 @@ async function runImport(
             }
 
             let guard: ReadGuard | undefined;
-            if (unreadBytes(file, previous, state) > guardedReadBytes) {
+            if (unreadBytes(reader, file, previous, state) > guardedReadBytes) {
                 flush();
-                guard = guardRead(store, file.path, now(), writeIfCurrent, countCrashes, () => summary.interrupted++);
+                guard = guardRead(store, reader.provider, file.path, now(), writeIfCurrent, countCrashes, () => summary.interrupted++);
                 if (!guard && cleared) {
                     // The guard was refused because another window cleared
                     // the history: the pass ends here, and nothing crashed.
@@ -257,10 +275,10 @@ async function runImport(
 
             let result: ReadResult;
             try {
-                // Where a main transcript was read to, its sessions' owners
-                // then: the lines read on from there are under them.
-                const inForce = previous && file.kind === 'main' ? store.ownersInForce(PROVIDER, file.path) : undefined;
-                result = readTranscript(file, previous, options.progress, inForce);
+                // Where a file that records its sessions' owners was read to,
+                // its owners then: the lines read on from there are under them.
+                const inForce = previous && reader.recordsOwners(file) ? store.ownersInForce(reader.provider, file.path) : undefined;
+                result = await reader.read(file, previous, options.progress, inForce);
             } catch (error) {
                 if (guard) {
                     // A failure the reader caught is not a crash.
@@ -289,7 +307,7 @@ async function runImport(
                 summary.malformed[category] = (summary.malformed[category] ?? 0) + n;
             }
 
-            batch.push({ file, result, previous, guarded: guard !== undefined });
+            batch.push({ reader, file, result, previous, guarded: guard !== undefined });
             // A guarded read is written at once, so that a crash in a later
             // file is never blamed on it.
             if (guard || batch.length >= filesPerTransaction) {
@@ -321,7 +339,7 @@ async function runImport(
  */
 export async function importUnderLease(
     store: UsageStore,
-    roots: string[],
+    sources: readonly AgentRoots[],
     holder: string,
     options: ImportOptions = {},
     paths?: readonly string[],
@@ -341,9 +359,23 @@ export async function importUnderLease(
     };
     try {
         // What a window of a build made before 2.4.0's release wrote, its pass
-        // under way as this history was brought to this parser, is undone first.
-        store.transaction(() => store.undoPrereleasePasses());
-        return await (paths ? importPaths(store, roots, paths, leased) : importRoots(store, roots, leased));
+        // under way as this history was brought to this parser, is undone
+        // first; and before a pass of every file, what parsers older than an
+        // agent's reader keeps were read of its files is forgotten, where
+        // the pass reads that agent, for it to read them again whole. With
+        // its reading off, the agent's rows stay as they are.
+        store.transaction(() => {
+            store.undoPrereleasePasses();
+            if (!paths) {
+                for (const source of sources) {
+                    const forgetsBefore = readerOf(source.provider)?.forgetsBefore;
+                    if (forgetsBefore !== undefined && source.roots.length > 0) {
+                        store.forgetReadsBefore(source.provider, forgetsBefore);
+                    }
+                }
+            }
+        });
+        return await (paths ? importSourcePaths(store, sources, paths, leased) : importSources(store, sources, leased));
     } finally {
         // Held only for the pass: another window's hint should not wait out
         // a heartbeat to import its own changes.
@@ -357,13 +389,14 @@ export async function importUnderLease(
  */
 function guardRead(
     store: UsageStore,
+    provider: UsageProvider,
     filePath: string,
     now: number,
     writeIfCurrent: (work: () => void) => boolean,
     countCrashes: boolean,
     onInterrupted: () => void,
 ): ReadGuard | undefined {
-    const previous = store.getReadGuard(PROVIDER, filePath);
+    const previous = store.getReadGuard(provider, filePath);
     if (previous?.inProgress) {
         onInterrupted();
     }
@@ -371,7 +404,7 @@ function guardRead(
     // window saw a crash; otherwise it was only interrupted.
     const crashed = previous?.inProgress === true && countCrashes;
     const guard: ReadGuard = {
-        provider: PROVIDER,
+        provider,
         path: filePath,
         inProgress: true,
         crashCount: (previous?.crashCount ?? 0) + (crashed ? 1 : 0),
@@ -388,15 +421,15 @@ function guardRead(
 
 /**
  * How many bytes reading `state` will take: from the checkpoint, or the whole
- * file where it is new, replaced, truncated, due to be read again by a newer
- * parser, or searched for owners before its checkpoint. A rewrite in place is
- * only found by reading, so it is not foreseen here.
+ * file where it is new, replaced, truncated, or read whole by its reader, as
+ * one due to be read again by a newer parser, or searched for owners before
+ * its checkpoint. A rewrite in place is only found by reading, so it is not
+ * foreseen here.
  */
-function unreadBytes(file: TranscriptFile, previous: FileCheckpoint | undefined, state: FileState): number {
+function unreadBytes(reader: AgentReader, file: TranscriptFile, previous: FileCheckpoint | undefined, state: FileState): number {
     const whole =
         !previous ||
-        previous.parserVersion < ROWS_SINCE ||
-        needsOwnerScan(file, previous) ||
+        reader.readsWhole(file, previous) ||
         state.size < previous.offset ||
         (previous.ino !== null && state.ino !== null && (state.ino !== previous.ino || state.dev !== previous.dev));
     return whole ? state.size : state.size - previous.offset;
@@ -406,20 +439,21 @@ function unreadBytes(file: TranscriptFile, previous: FileCheckpoint | undefined,
 function settleGuard(store: UsageStore, guard: ReadGuard, writeIfCurrent: (work: () => void) => boolean): void {
     writeIfCurrent(() =>
         guard.crashCount === 0
-            ? store.deleteReadGuard(PROVIDER, guard.path)
+            ? store.deleteReadGuard(guard.provider, guard.path)
             : store.putReadGuard({ ...guard, inProgress: false }),
     );
 }
 
 /** One file's rows, sightings and checkpoint. Runs inside the batch's transaction. */
-function write(store: UsageStore, file: TranscriptFile, result: ReadResult, previous: FileCheckpoint | undefined): void {
+function write(store: UsageStore, reader: AgentReader, file: TranscriptFile, result: ReadResult, previous: FileCheckpoint | undefined): void {
+    const provider = reader.provider;
     // A newer parser re-reads the file whole: its old rows go first, so a
     // change of key cannot leave doubles behind. Only when the file still
     // holds every line they came from, which is when the reader says
     // `parser`: the rows of lines Claude Code has since removed are kept,
     // each replaced only where the newer parser reads its request again.
     if (result.restarted === 'parser') {
-        store.deleteRequestsFromFile(PROVIDER, file.path);
+        store.deleteRequestsFromFile(provider, file.path);
     }
     // Each request and limit hit with the owner its own transcript records
     // before it, where it does; a subagent's records none, and its session's
@@ -427,13 +461,14 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     // the session, whatever order they are read in.
     const requests = [...dedupe(result.requests).values()];
     store.upsertRequests(requests);
-    store.insertCompactions(PROVIDER, result.compactions);
-    store.insertLimitHits(PROVIDER, result.limitHits);
-    if (file.kind === 'main') {
-        store.putOwnerChanges(PROVIDER, file.path, file.projectDir, result.ownerChanges, result.firstRequestTs, result.restarted !== null);
-        if (result.restarted === null && previous && previous.offset > 0 && needsOwnerScan(file, previous)) {
+    store.insertCompactions(result.compactions);
+    store.insertLimitHits(result.limitHits);
+    store.deleteLimitHits(provider, result.withdrawnLimitHits ?? []);
+    if (reader.recordsOwners(file)) {
+        store.putOwnerChanges(provider, file.path, file.projectDir, result.ownerChanges, result.firstRequestTs, result.restarted !== null);
+        if (result.restarted === null && previous && previous.offset > 0 && reader.searchesOwners(file, previous)) {
             // The rows an older parser read from the bytes just searched.
-            store.giveOwners(PROVIDER, file.path, result.ownerChanges);
+            store.giveOwners(provider, file.path, result.ownerChanges);
         }
     }
 
@@ -442,6 +477,8 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     // earlier session, and each request, limit and change of owner needs its
     // session's row, which the report's sessions and accounts are read from.
     const sessionId = file.sessionId ?? result.sessionId;
+    // Where the file's path does not say what it is, its records do.
+    const kind = result.kind ?? file.kind;
     const spans = new Map<string, { firstTs: number | null; lastTs: number | null }>();
     for (const id of [sessionId, ...result.limitHits.map(h => h.sessionId), ...result.ownerChanges.map(c => c.sessionId)]) {
         if (id && !spans.has(id)) {
@@ -458,7 +495,7 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
     for (const [id, span] of spans) {
         // The cwd is the file's own session's, and only a main transcript
         // says where a session started.
-        const own = id === sessionId && file.kind === 'main';
+        const own = id === sessionId && kind === 'main';
         const sighting: SessionSighting = {
             sessionId: id,
             root: file.root,
@@ -467,7 +504,7 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
             projectDir: file.projectDir,
             ...span,
         };
-        store.upsertSession(PROVIDER, sighting);
+        store.upsertSession(provider, sighting);
     }
 
     // Restarted reads count their lines afresh; a continued read adds to them.
@@ -479,10 +516,10 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
         }
     }
     store.putFile({
-        provider: PROVIDER,
+        provider,
         path: file.path,
         root: file.root,
-        kind: file.kind,
+        kind,
         sessionId,
         runId: file.runId,
         agentId: file.agentId,
@@ -497,6 +534,7 @@ function write(store: UsageStore, file: TranscriptFile, result: ReadResult, prev
         oversizeLines: (carried?.oversizeLines ?? 0) + result.oversize,
         malformedLines: (carried?.malformedLines ?? 0) + malformed,
         newestVersion: result.newestVersion ?? carried?.newestVersion ?? null,
+        readerState: result.checkpoint.readerState ?? null,
     });
 }
 
@@ -512,6 +550,8 @@ function skipReason(error: unknown): SkipReason {
         // Not a regular file: refused by the reader, never opened blocking.
         case 'ENOTREG':
             return 'unreadable';
+        case 'ZSTD_UNSUPPORTED':
+            return 'unsupported';
         default:
             return 'error';
     }

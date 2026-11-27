@@ -26,18 +26,22 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parentPort, workerData } from 'worker_threads';
 
-import { isAccountFilter } from './usage/accounts';
+import { ACCOUNT_PROVIDER, isAccountFilter } from './usage/accounts';
 import { isTimeZone } from './usage/aggregate';
 import { readClaudeAccounts } from './usage/claudeAccounts';
-import { importUnderLease } from './usage/importer';
+import { importUnderLease, type AgentRoots } from './usage/importer';
 import { queryReport } from './usage/queries';
 import { RANGE_KEYS, rangeUntil } from './usage/report';
-import { PARSER_VERSION, sessionTranscripts, walkProjects } from './usage/transcripts';
+import { PARSER_VERSION } from './usage/lines';
+import { readerOf } from './usage/readers';
+import { sessionTranscripts } from './usage/transcripts';
 import { HistoryFileError, claimFound, createHistory, publishHistory, removeHistory, removeLeftovers, resolveHistory, type Pointer } from './usage/historyFiles';
 import { UsageStore, loadSqlite, type OpenResult } from './usage/store';
 import {
+    MAX_ROOTS,
     SESSION_ID,
     isAccountFiles,
+    type AgentSource,
     type ImportProgress,
     type SqliteResult,
     type UsageFailure,
@@ -52,6 +56,27 @@ const port = parentPort;
 
 /** More named paths than this are a full pass's job. */
 const MAX_PATHS = 1000;
+
+/** Whether `roots` are a few folders, each an absolute path, as the host resolves them. */
+function isRoots(roots: unknown): roots is string[] {
+    return Array.isArray(roots) && roots.length <= MAX_ROOTS && roots.every(root => typeof root === 'string' && root.length > 0 && root.length <= 4096 && path.isAbsolute(root));
+}
+
+/** Whether `sources` name agents this build reads, each once, with a few roots. */
+function isSources(sources: unknown): sources is AgentSource[] {
+    if (!Array.isArray(sources)) {
+        return false;
+    }
+    const named = new Set<string>();
+    return sources.every(source => {
+        const s = source as Partial<AgentSource> | null;
+        if (typeof s !== 'object' || s === null || typeof s.provider !== 'string' || readerOf(s.provider) === undefined || named.has(s.provider)) {
+            return false;
+        }
+        named.add(s.provider);
+        return isRoots(s.roots);
+    });
+}
 
 
 /** Holds the import lease when the window does not name itself; unique per thread. */
@@ -90,7 +115,7 @@ let recovered: string | undefined;
 
 /** The import under way, for a report read meanwhile: how far it has gone. */
 interface Pass {
-    roots: string[];
+    sources: readonly AgentRoots[];
     paths: readonly string[] | undefined;
     /** Files gone through so far. */
     files: number;
@@ -107,7 +132,10 @@ let pass: Pass | undefined;
  */
 function progressOf(current: Pass, total: boolean): ImportProgress {
     if (total && current.of === undefined) {
-        current.of = current.roots.reduce((n, root) => n + walkProjects(root).files.length, 0);
+        current.of = current.sources.reduce((n, { provider, roots }) => {
+            const reader = readerOf(provider);
+            return reader ? roots.reduce((m, root) => m + reader.walk(root).files.length, n) : n;
+        }, 0);
     }
     // A transcript Claude Code started since the walk can take the pass past it.
     return current.of === undefined ? { files: current.files } : { files: current.files, of: Math.max(current.of, current.files) };
@@ -316,6 +344,11 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
         reply({ type: 'closed', id: request.id });
         return;
     }
+    if (request.type === 'cancel') {
+        // Answered once the passes before it have stopped.
+        reply({ type: 'cancelled', id: request.id });
+        return;
+    }
     if (!sqlite) {
         reply({ type: 'unavailable', id: request.id, node: process.versions.node, electron: process.versions.electron ?? null });
         return;
@@ -355,6 +388,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 !RANGE_KEYS.includes(request.range) ||
                 !isTimeZone(request.zone) ||
                 (request.account !== undefined && !isAccountFilter(request.account)) ||
+                (request.agent !== undefined && !(typeof request.agent === 'string' && readerOf(request.agent) !== undefined)) ||
                 (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles)) ||
                 (request.signedInFiles !== undefined && !isAccountFiles(request.signedInFiles))
             ) {
@@ -368,6 +402,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 now: Date.now(),
                 platform: process.platform,
                 account: request.account,
+                agent: request.agent,
                 configured: readClaudeAccounts(request.accountFiles ?? [], request.signedInFiles),
             });
             reply({
@@ -383,6 +418,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
         case 'import': {
             const paths = request.paths;
             if (
+                !isSources(request.sources) ||
                 (paths !== undefined && !(Array.isArray(paths) && paths.length <= MAX_PATHS && paths.every(p => typeof p === 'string' && p.length <= 4096))) ||
                 (request.accountFiles !== undefined && !isAccountFiles(request.accountFiles)) ||
                 (request.signedInFiles !== undefined && !isAccountFiles(request.signedInFiles))
@@ -394,14 +430,15 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
                 reply({ type: 'failed', id: request.id, failure: 'outdated', errorName: 'StoreError' });
                 return;
             }
-            const current: Pass = { roots: request.roots, paths, files: 0, of: paths?.length };
+            const sources: AgentRoots[] = request.sources;
+            const current: Pass = { sources, paths, files: 0, of: paths?.length };
             pass = current;
             let summary: Awaited<ReturnType<typeof importUnderLease>>;
             try {
                 summary = await holdingStore(() =>
                     importUnderLease(
                         store,
-                        request.roots,
+                        sources,
                         holderOf(request),
                         {
                             // The importer asks this once before each file: the count is how far it has gone.
@@ -427,7 +464,7 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             return;
         }
         case 'liveContext': {
-            if (typeof request.sessionId !== 'string' || !SESSION_ID.test(request.sessionId)) {
+            if (typeof request.sessionId !== 'string' || !SESSION_ID.test(request.sessionId) || !isRoots(request.roots)) {
                 reply({ type: 'failed', id: request.id, failure: 'bad-request', errorName: 'RangeError' });
                 return;
             }
@@ -437,14 +474,21 @@ async function handle(request: UsageWorkerRequest, isCancelled: () => boolean, s
             if (paths.length > 0 && result.status === 'ready' && !store.outdated(PARSER_VERSION)) {
                 // Null when another window holds the lease: what is stored is read all the same.
                 await holdingStore(() =>
-                    importUnderLease(store, request.roots, holderOf(request), { isCancelled, countCrashes: request.crashed === true, progress: beat }, paths),
+                    importUnderLease(
+                        store,
+                        [{ provider: 'claude-code', roots: request.roots }],
+                        holderOf(request),
+                        { isCancelled, countCrashes: request.crashed === true, progress: beat },
+                        paths,
+                    ),
                 );
             }
             reply({
                 type: 'liveContext',
                 id: request.id,
-                latest: store.latestMainRequest(request.sessionId, rangeUntil(Date.now())) ?? null,
-                compactions: store.sessionCompactions(request.sessionId, rangeUntil(Date.now())).slice(0, 20),
+                // The status item's: Claude Code's live sessions alone.
+                latest: store.latestMainRequest('claude-code', request.sessionId, rangeUntil(Date.now())) ?? null,
+                compactions: store.sessionCompactions('claude-code', request.sessionId, rangeUntil(Date.now())).slice(0, 20),
                 ...takeRecovered(),
             });
             return;
@@ -488,8 +532,9 @@ function settleAccounts(store: UsageStore, files: string[], read: 'whole' | 'som
         if (read === 'whole') {
             readThrough = history;
         }
-        if (read !== 'none' && readThrough === history && store.hasUnnumberedAccounts('claude-code')) {
-            store.transaction(() => store.numberAccounts('claude-code'));
+        // Numbered as the report reads them; the names below are Claude Code's own configuration's.
+        if (read !== 'none' && readThrough === history && store.hasUnnumberedAccounts(ACCOUNT_PROVIDER)) {
+            store.transaction(() => store.numberAccounts(ACCOUNT_PROVIDER));
         }
         const { names } = readClaudeAccounts(files);
         const said = JSON.stringify([store.file, store.storeId(), store.generation(), names]);
@@ -554,7 +599,7 @@ let fullPasses = 0;
 
 port.on('message', (request: UsageWorkerRequest) => {
     const sequence = ++received;
-    if (request.type === 'clear' || request.type === 'close') {
+    if (request.type === 'clear' || request.type === 'close' || request.type === 'cancel') {
         cancelBefore = sequence;
     }
     const full = request.type === 'import' && request.paths === undefined;

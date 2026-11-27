@@ -1,5 +1,5 @@
 /**
- * Claude Code usage at activation: its three commands, one settings
+ * Agent usage at activation: its three commands, one settings
  * listener, and the context key that shows the editor title's T, and
  * nothing more. The feature itself is a bundle of its own, out/usage.js,
  * loaded the first time it is needed: at activation if it is on, when it is
@@ -11,24 +11,24 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { CONFIG_SECTION, affectsUsage } from './settings';
+import { AGENT_SWITCHES, CONFIG_SECTION, affectsUsage } from './settings';
 import type { UsageCommands, startClaudeCodeUsage } from './usageService';
 
 type Start = typeof startClaudeCodeUsage;
 
-/** Claude Code's VS Code extension; its id is compared without regard to case. */
-const CLAUDE_CODE_EXTENSION = 'anthropic.claude-code';
+/** The VS Code extensions of the agents the panel reads, Claude Code's and Codex's; ids compare without regard to case. */
+const AGENT_EXTENSIONS = ['anthropic.claude-code', 'openai.chatgpt'];
 
 /**
- * True while Claude Code's VS Code extension is installed and enabled. The
- * T shows then, or while the feature is on: for the people who use Claude
- * Code, not for everyone who counts tokens for other models. Claude Code's
- * is a workspace extension, as this one is, so the two run in one extension
- * host, locally and in a remote window alike, which is where the stable
- * getExtension looks. Claude Code used only as its CLI is not seen; Show
- * Claude Code Usage opens the panel all the same.
+ * True while the VS Code extension of an agent the panel reads is installed
+ * and enabled: Claude Code's, or Codex's. The T shows then, or while the
+ * feature is on: for the people who use those agents, not for everyone who
+ * counts tokens for other models. Both are workspace extensions, as this one
+ * is, so they run in one extension host, locally and in a remote window
+ * alike, which is where the stable getExtension looks. An agent used only as
+ * its CLI is not seen; Show Agent Usage opens the panel all the same.
  */
-export const CLAUDE_CODE_INSTALLED = 'llm-tokenizer.claudeCodeInstalled';
+export const AGENT_INSTALLED = 'llm-tokenizer.agentInstalled';
 
 /**
  * The feature's bundle, beside this one in out/, as the encoders are: an
@@ -61,14 +61,14 @@ export function registerClaudeCodeUsage(
             try {
                 start = load();
             } catch (error) {
-                log.error(`Claude Code usage could not be loaded: ${error instanceof Error ? error.message : String(error)}`);
+                log.error(`Agent usage could not be loaded: ${error instanceof Error ? error.message : String(error)}`);
                 return undefined;
             }
             try {
                 feature = start(context, log, startupSettled);
             } catch (error) {
                 // The name only: what the feature had read could be in the message.
-                log.error(`Claude Code usage could not be started (${error instanceof Error ? error.name : 'Error'})`);
+                log.error(`Agent usage could not be started (${error instanceof Error ? error.name : 'Error'})`);
                 return undefined;
             }
         }
@@ -78,18 +78,21 @@ export function registerClaudeCodeUsage(
     const forCommand = (): UsageCommands | undefined => {
         const commands = started();
         if (!commands) {
-            void vscode.window.showErrorMessage('LLM Tokenizer: Claude Code usage could not be loaded; see the log.');
+            void vscode.window.showErrorMessage('LLM Tokenizer: agent usage could not be loaded; see the log.');
         }
         return commands;
     };
     // As written in settings.json, of any type: only `true` is consent, never a "false" string.
-    const enabled = () => vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown>('enableClaudeCodeUsage') === true;
+    const enabled = () => {
+        const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        return AGENT_SWITCHES.some(key => config.get<unknown>(key) === true);
+    };
     // Not kept between sessions: the T shows once activation has run.
-    const markClaudeCode = () =>
-        void vscode.commands.executeCommand('setContext', CLAUDE_CODE_INSTALLED, extensions.getExtension(CLAUDE_CODE_EXTENSION) !== undefined);
-    markClaudeCode();
+    const markAgents = () =>
+        void vscode.commands.executeCommand('setContext', AGENT_INSTALLED, AGENT_EXTENSIONS.some(id => extensions.getExtension(id) !== undefined));
+    markAgents();
     context.subscriptions.push(
-        extensions.onDidChange(markClaudeCode),
+        extensions.onDidChange(markAgents),
         // Always registered: while the feature is off, the panel says what turning it on does.
         vscode.commands.registerCommand('llm-tokenizer.showClaudeCodeUsage', () => forCommand()?.show()),
         vscode.commands.registerCommand('llm-tokenizer.refreshClaudeCodeUsage', () => forCommand()?.refresh()),

@@ -14,11 +14,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { accountKey } from './accounts';
+import { ACCOUNT_PROVIDER, accountKey } from './accounts';
 import type { ConfiguredAccounts } from './claudeAccounts';
 import { comparablePath, isWithin, projectOf, sessionRoot } from './projects';
 import { buildReport, rangeSince, rangeUntil, type RangeKey, type ReportSession, type UsageReport } from './report';
 import type { AccountName, StoredSession, UsageStore } from './store';
+import type { UsageProvider } from './types';
 
 export interface ReportQuery {
     range: RangeKey;
@@ -29,6 +30,8 @@ export interface ReportQuery {
     platform: NodeJS.Platform;
     /** One account's requests only, by key; every request when absent. */
     account?: string;
+    /** One agent's sessions only; every agent's when absent. */
+    agent?: UsageProvider;
     /** What Claude Code's configuration says now of its accounts. */
     configured?: ConfiguredAccounts;
     /** Resolves symlinks; the path itself when it no longer exists (tests). */
@@ -45,9 +48,11 @@ export function queryReport(store: UsageStore, query: ReportQuery): UsageReport 
         sessions: store.sessions(until),
         compactions: store.compactions(since, until),
         limitHits: store.limitHits(since, until),
-        coverage: store.coverage(until),
-        accountNames: store.accountNames(),
-        accountNumbers: store.accountNumbers(),
+        coverage: store.coverage(until, query.agent),
+        // What was read, whichever agent is shown.
+        history: query.agent === undefined ? undefined : store.coverage(until),
+        accountNames: store.accountNames(ACCOUNT_PROVIDER),
+        accountNumbers: store.accountNumbers(ACCOUNT_PROVIDER),
     }));
     const configured = query.configured ?? { names: [], current: [] };
     return buildReport(
@@ -57,7 +62,14 @@ export function queryReport(store: UsageStore, query: ReportQuery): UsageReport 
             accountNames: mergeNames(configured.names, input.accountNames),
             currentAccounts: configured.current.map(accountKey),
         },
-        { range: query.range, zone: query.zone, now: query.now, scope: query.workspaceFolders ? 'workspace' : 'all', account: query.account },
+        {
+            range: query.range,
+            zone: query.zone,
+            now: query.now,
+            scope: query.workspaceFolders ? 'workspace' : 'all',
+            account: query.account,
+            agent: query.agent,
+        },
     );
 }
 
@@ -79,7 +91,12 @@ function mergeNames(now: AccountName[], kept: AccountName[]): AccountName[] {
     return [...merged.values()];
 }
 
-/** Each stored session with its project, its grouping key and whether it is in the workspace. */
+/**
+ * Each stored session with its project, its grouping key and whether it is
+ * in the workspace. Sessions of two agents in one folder are one project; one
+ * with no cwd is grouped by its project folder, which only Claude Code's
+ * layout names, and another agent's apart from it.
+ */
 export function reportSessions(
     sessions: StoredSession[],
     query: Pick<ReportQuery, 'workspaceFolders' | 'platform' | 'realpath'>,
@@ -99,10 +116,14 @@ export function reportSessions(
     return sessions.map(s => {
         const root = s.cwd === null ? null : sessionRoot(s.cwd);
         const real = root === null ? null : resolve(root);
+        // Claude Code's key as it always was; another agent's opens with its
+        // name, as none of Claude Code's does, whatever a folder is named.
+        const folder = s.provider === 'claude-code' ? `dir:${s.projectDir}` : `${s.provider}:dir:${s.projectDir}`;
         return {
+            provider: s.provider,
             sessionId: s.sessionId,
             project: projectOf(root, s.projectDir),
-            projectKey: real === null ? `dir:${s.projectDir}` : `root:${comparablePath(real, query.platform)}`,
+            projectKey: real === null ? folder : `root:${comparablePath(real, query.platform)}`,
             inWorkspace: real !== null && folders.some(folder => isWithin(real, folder, query.platform)),
             firstTs: s.firstTs,
             lastTs: s.lastTs,

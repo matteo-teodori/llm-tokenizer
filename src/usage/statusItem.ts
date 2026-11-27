@@ -129,7 +129,8 @@ export function describeLive(input: LiveInput): LiveView {
     if (input.reading) {
         tooltip.push("Still reading Claude Code's records, so this can be behind.");
     }
-    tooltip.push('', 'Click to show Claude Code usage.');
+    // The panel it opens is every agent's, as the page shows them: Agent Usage.
+    tooltip.push('', 'Click to show Agent Usage.');
     return { text, tooltip, status };
 }
 
@@ -283,7 +284,8 @@ export class UsageStatusItem implements vscode.Disposable {
             item.show();
             return;
         }
-        const report = await this.service.report('today', this.deps.zone(), folders);
+        // Claude Code's alone, as the session it shows: another agent's tokens are not its today's.
+        const report = await this.service.report('today', this.deps.zone(), folders, undefined, 'claude-code');
         if (item !== this.item) {
             return;
         }

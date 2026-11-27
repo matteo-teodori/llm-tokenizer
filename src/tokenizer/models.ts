@@ -263,11 +263,6 @@ const HF = {
         revision: 'f0e1c1e04d40177e4673a22097036854f536e9c0',
         keptSha256: '344bf7982f214f550119e613df190e03f9fc992b2c81c9782648b837386f637e',
     },
-    minimaxLegacy: {
-        repo: 'MiniMaxAI/MiniMax-M2',
-        revision: '757303d492a50514c312788b5247a4f696a4c6a3',
-        keptSha256: 'cb3a1f4117827aa9c4fdc0e82370db4df611d0c3afa51bf6096159496818ed29',
-    },
     /**
      * V2.6 is published as -RL and -MOPD checkpoints of Pro and Flash, and all
      * four serve a byte-identical tokenizer.json (sha256 ff15eb92…), so one
@@ -615,16 +610,12 @@ export const MODELS: ModelInfo[] = [
     // it. Its tokenizer.json is M3's byte for byte (sha256 bb1f1626…), so it
     // shares HF.minimax.
     //
-    // M2.1 and M2 are retired. M2.7 and M2.5 closed to new users on
-    // 2026-10-19, when MiniMax began routing its plans' requests for them to
-    // M3.1 Flash, and retire on 2026-11-18 (platform.minimax.io/docs/faq/
-    // models, read 2026-11-12). Remove both after that, with aliases to
-    // MiniMax-M3.1-Flash, re-point `minimax-m2.7` and `minimax-m2.5`, and drop
-    // HF.minimaxLegacy.
+    // M2.7, M2.5, M2.1 and M2 are retired: M2.7 and M2.5 closed to new users
+    // on 2026-10-19, when MiniMax began routing its plans' requests for them
+    // to M3.1 Flash, and retired on 2026-11-18 (platform.minimax.io/docs/faq/
+    // models, read 2026-11-27), so they are aliased there.
     { id: 'MiniMax-M3.1-Flash', label: 'MiniMax M3.1 Flash', provider: 'MiniMax', contextLimit: 1_000_000, encoder: hf(HF.minimax, 3.6) },
     { id: 'MiniMax-M3', label: 'MiniMax M3', provider: 'MiniMax', contextLimit: 1_000_000, encoder: hf(HF.minimax, 3.6) },
-    { id: 'MiniMax-M2.7', label: 'MiniMax M2.7', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
-    { id: 'MiniMax-M2.5', label: 'MiniMax M2.5', provider: 'MiniMax', contextLimit: 204_800, encoder: hf(HF.minimaxLegacy, 3.6) },
 
     // ─────────────────────────────────────────────────────────────────────────
     // Moonshot Kimi — exact. Moonshot publishes a tiktoken rank table rather
@@ -775,11 +766,13 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     'mistral-large-4': 'mistral-large-4-0',
 
     // MiniMax: the API documents mixed-case ids only. M3.1 Flash serves its
-    // retired preview's name, and takes the retired M2.1 and M2 as it takes
-    // the plans' requests for M2.7 and M2.5.
+    // retired preview's name, took the plans' requests for M2.7 and M2.5
+    // before they retired, and takes the retired M2.1 and M2 with them.
     'minimax-m3': 'MiniMax-M3',
-    'minimax-m2.7': 'MiniMax-M2.7',
-    'minimax-m2.5': 'MiniMax-M2.5',
+    'MiniMax-M2.7': 'MiniMax-M3.1-Flash',
+    'minimax-m2.7': 'MiniMax-M3.1-Flash',
+    'MiniMax-M2.5': 'MiniMax-M3.1-Flash',
+    'minimax-m2.5': 'MiniMax-M3.1-Flash',
     'MiniMax-M3.1-Flash-Preview': 'MiniMax-M3.1-Flash',
     'MiniMax-M2.1': 'MiniMax-M3.1-Flash',
     'minimax-m2.1': 'MiniMax-M3.1-Flash',

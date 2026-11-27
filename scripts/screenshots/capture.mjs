@@ -10,13 +10,13 @@
  * only those.
  *
  * Nothing of the developer's own reaches it, and it checks that:
- * - HOME and CLAUDE_CONFIG_DIR are the demo home's, the profile and the
- *   extensions folder are new, the keychain is a mock and the login shell's
+ * - HOME, CLAUDE_CONFIG_DIR and CODEX_HOME are the demo home's, the profile
+ *   and the extensions folder are new, the keychain is a mock and the login shell's
  *   environment is not read; it refuses to run where Claude Code's managed
  *   settings could name another data folder;
  * - before any page of the usage panel is captured, it must show exactly the
  *   demo's requests, sessions and projects, and the extension must have read
- *   one data folder, the demo's;
+ *   two data folders, the demo's Claude Code and Codex homes;
  * - no text shown, the webviews' and the input boxes' included, may name this
  *   machine, its user or a real path, before the capture or after it.
  */
@@ -125,6 +125,7 @@ const env = {
     PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
     HOME: home,
     CLAUDE_CONFIG_DIR: claude,
+    CODEX_HOME: demo.codexHome,
     // The system's own: VS Code's sockets in it must fit in 103 characters.
     TMPDIR: process.env.TMPDIR ?? '/tmp',
     TZ: 'UTC',
@@ -223,6 +224,7 @@ function settings(theme) {
         'editor.hover.enabled': false,
         'editor.cursorBlinking': 'solid',
         'llm-tokenizer.enableClaudeCodeUsage': true,
+        'llm-tokenizer.enableCodexUsage': true,
         'llm-tokenizer.showClaudeCodeUsageInStatusBar': true,
         'llm-tokenizer.downloadTokenizers': false,
         'llm-tokenizer.defaultModel': 'gpt-5.6-sol',
@@ -552,7 +554,7 @@ async function menuItem(page, text) {
 async function openUsage(page) {
     await row(page, 'cart.ts').click();
     await sleep(300);
-    await page.locator('.editor-actions [aria-label="Show Claude Code Usage"]').first().click();
+    await page.locator('.editor-actions [aria-label="Show Agent Usage"]').first().click();
     return webview(page, 'button[data-range="30d"]');
 }
 
@@ -600,6 +602,24 @@ async function setAccount(usage, account, requests, sessions) {
     await sleep(700);
 }
 
+/**
+ * Choose an agent, or `all`, and wait for the page to show its `requests` and
+ * `sessions`, as `setAccount` does.
+ */
+async function setAgent(usage, agent, requests, sessions) {
+    await usage.click(`button[data-agent-filter="${agent}"]`);
+    const said = [`${requests.toLocaleString('en-US')} requests`, `${sessions.toLocaleString('en-US')} sessions`];
+    await usage.waitForFunction(
+        ([value, figures]) =>
+            document.querySelector(`button[data-agent-filter="${value}"]`)?.getAttribute('aria-pressed') === 'true' &&
+            figures.every(figure => (document.querySelector('.hero-meta')?.textContent ?? '').includes(figure)),
+        [agent, said],
+        { timeout: 10_000 },
+    );
+    await readThrough(usage);
+    await sleep(700);
+}
+
 /** The total's line says `requests` and `sessions`, as the demo wrote them. */
 async function expectCounts(usage, requests, sessions, what) {
     const meta = await usage.locator('.hero-meta').first().innerText();
@@ -633,7 +653,7 @@ async function checkDemo(usage, profile) {
     const logs = join(profile, 'logs');
     const found = readdirSync(logs, { recursive: true }).filter(f => String(f).endsWith('LLM Tokenizer.log'));
     const text = found.map(f => readFileSync(join(logs, String(f)), 'utf8')).join('\n');
-    if (!text.includes(`read ${demo.files} of ${demo.files} files in 1 root`)) {
+    if (!text.includes(`read ${demo.files} of ${demo.files} files in 2 roots`)) {
         throw new Error('the extension did not read the demo home alone');
     }
     await checkPages(usage);
@@ -787,8 +807,8 @@ async function gif() {
         await openCart(page);
         await rest(page);
         await frame(1.4);
-        await page.locator('.editor-actions [aria-label="Show Claude Code Usage"]').first().hover();
-        const tip = page.locator('.workbench-hover, .monaco-hover').filter({ hasText: 'Show Claude Code Usage' }).first();
+        await page.locator('.editor-actions [aria-label="Show Agent Usage"]').first().hover();
+        const tip = page.locator('.workbench-hover, .monaco-hover').filter({ hasText: 'Show Agent Usage' }).first();
         await tip.waitFor({ timeout: 10_000 });
         await opaque(tip);
         await frame(1.2);
@@ -826,6 +846,14 @@ async function gif() {
         await frame(2.0, [usage]);
         await setAccount(usage, 'all', demo.requests, demo.sessions);
         await expectCounts(usage, demo.requests, demo.sessions, 'the all accounts frame');
+        // Each agent's share, then Codex's alone, and every agent's again.
+        await scrollTo(usage, 'by agent');
+        await frame(2.2, [usage]);
+        await usage.evaluate(() => window.scrollTo(0, 0));
+        await setAgent(usage, 'codex', demo.agents.codex.requests, demo.agents.codex.sessions);
+        await uncut(usage, 20);
+        await frame(2.0, [usage]);
+        await setAgent(usage, 'all', demo.requests, demo.sessions);
         await scrollTo(usage, 'projects');
         await frame(2.6, [usage]);
         // The sessions, a page on: the pager says which ten are shown.

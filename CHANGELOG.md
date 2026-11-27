@@ -4,6 +4,67 @@ All notable changes to the "LLM Tokenizer" extension will be documented in this 
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [2.5.0] - 2026-11-27
+
+### Added
+- **Codex.** The usage panel reads OpenAI Codex's session records too, which
+  its command line, its editor extension and its desktop app all write under
+  Codex's home (`~/.codex`, or `CODEX_HOME`): its `sessions` and
+  `archived_sessions` folders, plain or compressed. Turned on apart, with a
+  setting of its own, **Enable Codex Usage**, off by default, and **Codex
+  Data Directory** for a home the editor cannot see; nothing is read until
+  it is. Each model response counts once, by its response id from Codex
+  0.153 and by the running total it moved before, on its model and effort,
+  in its session: a subagent's in the session of the thread that began it,
+  and a fork's copy of its parent's history in its parent's alone. A usage
+  limit reached is listed with the window that was full, or the meter Codex
+  names it by, as is the spend limit of an API key, a project or an
+  organization, and a compaction is counted in its session, with no size,
+  which Codex does not record. Of Codex's records only the lines that count
+  tokens, name a model, or say where a session, a turn or a review begins
+  and ends, or where a history is compacted, are read, never a response's
+  content or a tool's output; its credentials, configuration, prompt history
+  and databases are never opened. A compressed record cut short or damaged
+  is a file that could not be read, never one imported in part.
+- **Every agent's, or one's.** Once the history holds two agents' sessions,
+  a filter beside the range shows every agent's or one's: totals, days,
+  models, projects, sessions, limits and the CSV's rows. With every agent's,
+  a **By agent** section gives each one's share, the Sessions table says
+  whose each is, and each usage limit names its agent. The CSV and **Copy
+  Sessions** open with an `agent` column.
+
+### Changed
+- **The panel is Agent Usage.** Its commands are **Show Agent Usage**,
+  **Refresh Agent Usage** and **Clear Agent Usage History**, with the same
+  ids and settings as before, so nothing changes for whoever uses them. The
+  off page says what each agent's reading reads and keeps, each with a
+  **Turn On** of its own.
+- **Accounts are Claude Code's.** Another agent's requests are in no account,
+  the Accounts table's shares are of Claude Code's tokens, and with Codex's
+  alone the page has no account filter. The status item, which shows the
+  Claude Code session running in the workspace, counts Claude Code's tokens
+  of today alone.
+- A history of Claude Code's alone is read as fast as in 2.4.0, though every
+  read now tells two agents' sessions of one id apart.
+- A usage limit that says no reset time is a window a day, not one for every
+  refusal the range holds.
+- **MiniMax M2.7 and M2.5 are gone**, retired by MiniMax on 18 November
+  (platform.minimax.io, read 2026-11-27): a saved choice of either moves to
+  MiniMax M3.1 Flash, where MiniMax's plans sent their requests. That makes
+  95 models across 13 providers, 58 of them counted with the model's own
+  tokenizer.
+
+### Fixed
+- **A Refresh asked just as a read ends is a read of its own.** It was
+  answered with the read that was ending, and what it asked for waited for
+  the next change to a transcript, or the hourly read.
+- **A transcript line built to be costly to read no longer stops every
+  read of the history.** A line of up to 4 MiB was parsed whole, and one
+  nested deep enough took the reading worker's whole memory on the Node a
+  remote extension host runs, read after read. A line past 2 MiB, four
+  times the longest real one measured, is skipped and counted as too long
+  to read.
+
 ## [2.4.0] - 2026-11-14
 
 ### Added

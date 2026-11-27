@@ -11,13 +11,22 @@
 import type { ImportSummary } from './importer';
 import type { RangeKey, UsageReport } from './report';
 import type { LatestRequest } from './store';
-import type { Compaction } from './types';
+import type { Compaction, UsageProvider } from './types';
 
 /** A session id becomes part of a file name, so only what Claude Code's ids are made of. */
 export const SESSION_ID = /^[A-Za-z0-9_-]{1,200}$/;
 
 /** More configuration files than this are not Claude Code's: one or two a root. */
 export const MAX_ACCOUNT_FILES = 16;
+
+/** More roots than this, for one agent, are not one machine's: a handful at most. */
+export const MAX_ROOTS = 16;
+
+/** One agent's roots, for a pass to read with that agent's reader. */
+export interface AgentSource {
+    provider: UsageProvider;
+    roots: string[];
+}
 
 /** Whether `files` is a list of configuration files the worker may read. */
 export function isAccountFiles(files: unknown): files is string[] {
@@ -26,19 +35,20 @@ export function isAccountFiles(files: unknown): files is string[] {
 
 export type UsageWorkerRequest =
     /**
-     * With `paths`, only those transcripts: the ones a watcher reported
-     * changed. `holder` names the window, so that a worker it restarts is
-     * the same holder of the import lease as the one that died. `crashed`:
-     * the window saw its last worker crash, so a read it left unfinished
-     * counts as a crash of that file. `accountFiles`: Claude Code's
-     * configuration files, whose account names the history keeps;
-     * `signedInFiles`, those that say which account it is signed in to now.
+     * Each agent's roots, read by its reader; with `paths`, only those of
+     * their files: the ones a watcher reported changed. `holder` names the
+     * window, so that a worker it restarts is the same holder of the import
+     * lease as the one that died. `crashed`: the window saw its last worker
+     * crash, so a read it left unfinished counts as a crash of that file.
+     * `accountFiles`: Claude Code's configuration files, whose account names
+     * the history keeps; `signedInFiles`, those that say which account it is
+     * signed in to now.
      */
     | {
           type: 'import';
           id: number;
           storeFile: string;
-          roots: string[];
+          sources: AgentSource[];
           paths?: string[];
           holder?: string;
           crashed?: boolean;
@@ -49,8 +59,10 @@ export type UsageWorkerRequest =
      * `workspaceFolders` null reports every project. `progress`: with how
      * many files the running pass has to go through, which takes a walk of
      * every root; asked only once the page says how far a pass has gone.
-     * `account`: one account's sessions only, by `accountKey`, or those that
-     * recorded none; every session when absent. `accountFiles`: where
+     * `account`: one account's sessions only, by `accountKey`, or Claude
+     * Code's that recorded none (another agent's are no account's); every
+     * session when absent. `agent`: one agent's sessions only; every agent's
+     * when absent. `accountFiles`: where
      * Claude Code names its accounts; `signedInFiles`, those of them that
      * say which it is signed in to now.
      */
@@ -63,12 +75,15 @@ export type UsageWorkerRequest =
           workspaceFolders: string[] | null;
           progress?: boolean;
           account?: string;
+          agent?: UsageProvider;
           accountFiles?: string[];
           signedInFiles?: string[];
       }
-    /** Bring one session's main transcript up to date, then read its latest request and compactions. */
+    /** Bring one Claude Code session's main transcript up to date, then read its latest request and compactions. */
     | { type: 'liveContext'; id: number; storeFile: string; roots: string[]; sessionId: string; holder?: string; crashed?: boolean }
     | { type: 'clear'; id: number; storeFile: string }
+    /** Stop the passes sent before this at their next file, as a Clear or a close does, the history kept open. */
+    | { type: 'cancel'; id: number }
     | { type: 'close'; id: number };
 
 /**
@@ -114,6 +129,7 @@ export type UsageWorkerResponse =
      */
     | { type: 'cleared'; id: number; generation: number; settled: boolean; copiesLeft: number }
     | { type: 'closed'; id: number }
+    | { type: 'cancelled'; id: number }
     /** This runtime has no `node:sqlite` binding. */
     | { type: 'unavailable'; id: number; node: string; electron: string | null }
     | { type: 'failed'; id: number; failure: UsageFailure; errorName: string; sqlite?: SqliteResult }

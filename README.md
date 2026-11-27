@@ -4,7 +4,7 @@
   <h1>LLM Tokenizer</h1>
 
   <p><b>The ultimate AI token counter for your IDE.</b><br>
-  Token counting for 97 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
+  Token counting for 95 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
 
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
@@ -41,7 +41,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 ## Features
 
 ### 🎯 Core Features
-- **Exact counts, not guesses**: 60 of the 97 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
+- **Exact counts, not guesses**: 58 of the 95 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
 - **Real-time Token Count**: The active file's token count in the Status Bar
 - **Context Limit Warnings**: Indicators at 80% and 100% of the model's *usable input* limit
 - **Project-wide Counting**: Workspace totals with caching, cancellation, and multi-root support
@@ -50,17 +50,17 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 - **Selection Counting**: Count only the text you highlighted
 - **Runs off the UI thread**: Tokenizing happens in a worker thread, so the editor never blocks
 - **Persistent Preferences**: Your model choice is remembered
-- **Claude Code usage (optional, off by default)**: how many tokens Claude Code processed, by day, account, project, session and model, read from its own records on your machine. See [Claude Code Usage](#claude-code-usage).
+- **Agent usage (optional, off by default)**: how many tokens Claude Code and Codex processed, by day, project, session and model, and Claude Code's by account, read from their own records on your machine. See [Agent Usage](#agent-usage).
 
 ### 🔒 Privacy
 **Your code never leaves your machine.** There is no telemetry and no network
 request that contains file contents. The only network access is a one-time
 download of a model's *vocabulary file* from huggingface.co, which you can turn
 off with `llm-tokenizer.downloadTokenizers`; a repository's own settings can
-turn it off for that repository, never back on. Claude Code usage, if you turn it
-on, reads Claude Code's own session records, the accounts its configuration
-file names and its settings files, of which it keeps three entries, on this
-machine, and sends nothing anywhere.
+turn it off for that repository, never back on. Agent usage, if you turn it on,
+reads Claude Code's own session records, the accounts its configuration file
+names and its settings files, of which it keeps three entries, or Codex's own
+session records, on this machine, and sends nothing anywhere.
 
 ### ⚙️ Configuration
 - `llm-tokenizer.defaultModel`: Model used until you pick one
@@ -71,11 +71,13 @@ machine, and sends nothing anywhere.
 - `llm-tokenizer.enableClaudeCodeUsage`: Read Claude Code's session records to show its usage (off by default)
 - `llm-tokenizer.claudeCodeDataDirectory`: Claude Code's configuration folder, when Claude Code's own rules would not find it
 - `llm-tokenizer.showClaudeCodeUsageInStatusBar`: Show the live context of the Claude Code session in this workspace (off by default)
-- `llm-tokenizer.claudeCodeAccountNames`: Names of your own for Claude accounts in Claude Code usage, by account id (set with **Name…**)
+- `llm-tokenizer.claudeCodeAccountNames`: Names of your own for Claude accounts in Agent Usage, by account id (set with **Name…**)
+- `llm-tokenizer.enableCodexUsage`: Read Codex's session records to show its usage (off by default)
+- `llm-tokenizer.codexDataDirectory`: Codex's home folder, when `CODEX_HOME` is set where the editor does not see it
 
 ## Supported Models
 
-97 models across 13 providers. Every id is checked against the provider's own
+95 models across 13 providers. Every id is checked against the provider's own
 documentation, and a model its provider has retired is removed; one it has
 only deprecated stays until the date it is shut down. A model you picked from
 the status bar is migrated automatically, to the replacement its provider
@@ -104,7 +106,7 @@ name, shortened for Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 | Alibaba    | Qwen3.7 Max/Plus/Flash, Qwen3.6 Plus | Estimated |
 | Zhipu      | GLM-5.3, GLM-5.3-Flash, GLM-5.3-FlashX, GLM-5.2, GLM-5.1, GLM-5 | Exact¹ |
 | Zhipu      | GLM-5-Turbo | Estimated⁵ |
-| MiniMax    | MiniMax M3.1 Flash, M3, M2.7, M2.5 | Exact¹ |
+| MiniMax    | MiniMax M3.1 Flash, M3 | Exact¹ |
 | Moonshot   | Kimi K3.1 Pro, K3, K2.7 Code, K2.6 | Exact¹ |
 | Xiaomi     | MiMo V2.6 Pro, V2.6 Flash | Exact¹ |
 | Tencent    | Hy4 preview, Hy3 | Exact¹ |
@@ -144,7 +146,7 @@ Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
 - **Ignore Gitignored Files**: exclude `.gitignore` matches from counts (on by default)
 - **Enable Project Scan**: turn off workspace-wide counting on very large repositories
 - **Download Tokenizers**: allow the one-time download that makes counts exact
-- **Enable Claude Code Usage**, **Claude Code Data Directory**, **Show Claude Code Usage in Status Bar** and **Claude Code Account Names**: see [Claude Code Usage](#claude-code-usage)
+- **Enable Claude Code Usage**, **Claude Code Data Directory**, **Show Claude Code Usage in Status Bar**, **Claude Code Account Names**, **Enable Codex Usage** and **Codex Data Directory**: see [Agent Usage](#agent-usage)
 
 ### Context Warnings
 - **Normal**: under 80% of the model's usable input limit
@@ -153,23 +155,23 @@ Open Settings (Ctrl/Cmd+,) and search for "LLM Tokenizer":
 
 A leading `≈` means the count is an estimate rather than an exact tokenization.
 
-## Claude Code Usage
+## Agent Usage
 
-How many tokens Claude Code processed, read from the session records Claude
-Code keeps on your machine. It is off by default, and reads nothing until you
-turn it on. The LLM Tokenizer **T** at the top right of an editor opens it: the
-T is there when Claude Code's VS Code extension is installed or the feature is
-on, and **Show Claude Code Usage** opens it from the Command Palette either
-way. While it is off, the page says what turning it on reads and keeps, with
-**Turn On**, and **Open Settings** for **Enable Claude Code Usage**. To hide
-the T, right-click the editor's title bar and choose
-**Hide 'Show Claude Code Usage'**.
+How many tokens your coding agents processed, Claude Code's and OpenAI
+Codex's, read from the session records each keeps on your machine. Each
+agent is turned on apart: both are off by default, and nothing is read until
+one is. The LLM Tokenizer **T** at the top right of an editor opens it: the T
+is there when Claude Code's or Codex's VS Code extension is installed or
+either is on, and **Show Agent Usage** opens it from the Command Palette
+either way. While both are off, the page says what turning each on reads and
+keeps, each with a **Turn On** of its own, and **Open Settings**. To hide the
+T, right-click the editor's title bar and choose **Hide 'Show Agent Usage'**.
 
-<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Claude Code usage; the page goes from today to 30 days, to this workspace and back, to its accounts and one account alone and back, down to its projects, turns to the second page of its sessions, each with its active time, and the status item's tooltip shows the running session's context">
+<img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage.gif" alt="The T at the top right of an editor opens Agent Usage; the page goes from today to 30 days, to this workspace and back, to its accounts and one account alone and back, to each agent's share and Codex's alone and back, down to its projects, turns to the second page of its sessions, each with its agent and its active time, and the status item's tooltip shows the running Claude Code session's context">
 
 **The panel** shows today, the last 7 or 30 days, or everything since the
-history starts, for all projects or for this workspace, and for every Claude
-account or one:
+history starts, for all projects or for this workspace, for every agent or
+one, and for every Claude account or one:
 - tokens processed, split into input, cache writes, cache reads and output,
   with the share of it that was cache reads;
 - a column per day, in your time zone;
@@ -178,11 +180,14 @@ account or one:
   sortable, each session with its active time, and the usage limits you
   reached, newest first; a long list shows ten rows a page, and a swipe or
   the ‹ › beside its heading turns the page;
+- once the history holds two agents' sessions, a filter beside the range,
+  and, with every agent's, a By agent section with each one's share, the
+  Sessions table and each usage limit saying whose it is;
 - diagnostics: what was read, what was skipped and why, and where from.
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Claude Code usage for 30 days, every account: 1.6B tokens processed, 95% of them cache reads, in 12,050 requests and 87 sessions, split into cache reads, cache writes, input and output, by day and by model">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-panel-dark.png" alt="Agent Usage for 30 days, every agent and every account: 2.0B tokens processed, 95% of them cache reads, in 15,102 requests and 123 sessions, split into cache reads, cache writes, input and output, by day, and by agent: Claude Code 81%, Codex 18%">
 </picture>
 
 *Processed* is everything a request sent or received: input, cache writes,
@@ -232,6 +237,23 @@ recorded*: those Claude Code wrote before it began
 recording accounts, around version 2.1.318 in November 2026, those signed in
 with an API key or through a cloud provider, and those whose transcripts
 Claude Code had deleted before this version first read the history.
+Accounts are Claude Code's: Codex's requests are in none of them, the
+Accounts table's shares are of Claude Code's tokens, and with Codex's alone
+the page has no account filter.
+
+**Codex.** Codex's command line, its editor extension and its desktop app
+all write their session records under Codex's home, `~/.codex` or
+`CODEX_HOME`: in its `sessions` and `archived_sessions` folders, as plain
+files, or once Codex has compressed one idle for a week as zstd files, read
+whole. **Codex Data Directory** names a home of your own, for when
+`CODEX_HOME` is set where the editor does not see it, as in one terminal, or
+in a script or an alias that starts Codex; `CODEX_HOME` as the editor sees
+it, then `~/.codex`, are read as well. Each model response counts once, on
+its model and effort, in its session: a subagent's in the session of the
+thread that began it, and a fork's copy of its parent's history in its
+parent's alone. A usage limit reached is listed with the window that was
+full, five hours or a week, or else the meter Codex names it by, as
+*premium*, which has none.
 
 **The status item** (**Show Claude Code Usage in Status Bar**) shows how full
 the context of the Claude Code session running in this workspace is, as a
@@ -245,11 +267,12 @@ data folder's own sessions when it is set in that folder's `settings.json`.
 A project's own `.claude/settings.json` is not read, nor are policies
 delivered by MDM, the Windows registry or as server-managed settings. A context larger
 than the window a model was thought to have is shown with a `?`, and no
-colour. It reads Claude Code's running-session files too.
+colour. It reads Claude Code's running-session files too, and is Claude
+Code's alone.
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-light.png">
-  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-dark.png" alt="The status item at 532.8K · 53%, and its tooltip: the context's 532,842 of 1,000,000 tokens, the model, the last request, and today's tokens in this workspace">
+  <img src="https://raw.githubusercontent.com/matteo-teodori/llm-tokenizer/main/docs/images/usage-status-dark.png" alt="The status item at 532.8K · 53%, and its tooltip: the Claude Code session's context, 532,842 of 1,000,000 tokens, the model, the last request, today's tokens in this workspace, and a click that shows Agent Usage">
 </picture>
 
 **Export CSV** copies to the clipboard, per day and model, every count a
@@ -259,13 +282,16 @@ by what a request's price depends on besides its model: its speed (`fast` is
 billed higher), where it ran (`us` is billed higher), and its prompt size (up to
 100,000 tokens, up to 200,000, or more: Claude Haiku 5.5 prices a request over
 100,000 higher). Its notes say how to read each of those. It gives no prices.
-**Copy Sessions** copies the sessions, with each one's active minutes and
-account, for a spreadsheet. Both say in their notes which account they hold, when one is
-chosen.
+Rows are apart by agent too, `agent` leading: Codex's `input_tokens` are what
+is left of its input once its cached and cache-written tokens are taken out,
+as the API's are, and its reasoning tokens are `thinking_tokens`.
+**Copy Sessions** copies the sessions, with each one's agent, active minutes
+and account, for a spreadsheet. Both say in their notes which agent and which
+account they hold, when one is chosen.
 
 **What is kept, and where.** A database in this extension's own storage
 (the `claude-code-usage` folder in VS Code's global storage for LLM
-Tokenizer) keeps:
+Tokenizer) keeps, of Claude Code's records:
 - each request's token counts, model, effort, speed, where it ran, time and
   Claude Code version, and its ids: message, request, session, and the
   subagent or workflow run it came from;
@@ -281,19 +307,31 @@ Tokenizer) keeps:
 - the window's process id and this machine's name, which each import writes
   so that two windows never import at once.
 
+Of Codex's, the same database keeps:
+- each response's token counts, model, effort, time and Codex version, and
+  its ids: response, session, and the subagent thread it came from;
+- the folder each session started in;
+- each session record's path, size, file id and how far it was read, with a
+  hash of the last 64 bytes read and its running totals there, to read on
+  from them;
+- when each compaction happened, and the usage limits reached, with when they
+  reset;
+- the window's process id and this machine's name, which each import writes
+  so that two windows never import at once.
+
 Prompts, responses, thinking and tool inputs or results are never kept, and
-nothing is sent anywhere. The history outlives Claude Code's own records,
-which Claude Code deletes after 30 days by default. A history that can no
-longer be read is set aside, left as it is, and a new one started, and the
-panel says so until it is cleared; a version that builds part of the history
-anew keeps a copy of it as it was, and the copies earlier versions kept are
-removed once the history is converted. **Clear Claude Code Usage
-History** removes the history and every such copy, and leaves nothing of
-them readable on disk. What another window still holds, a copy it has open or a
-read it has not finished, goes once that window lets go of it, the next
-time any window uses the history; Clear says when a copy has to wait.
-Anything still on disk is read again at the next refresh. The panel also
-remembers its range, its scope, the account chosen and your time zone, in the
+nothing is sent anywhere. The history outlives the agents' own records, which
+Claude Code deletes after 30 days by default, and Codex compresses or deletes.
+A history that can no longer be read is set aside, left as it is, and a new
+one started, and the panel says so until it is cleared; a version that builds
+part of the history anew keeps a copy of it as it was, and the copies earlier
+versions kept are removed once the history is converted. **Clear Agent Usage
+History** removes the history and every such copy, and leaves nothing of them
+readable on disk. What another window still holds, a copy it has open or a
+read it has not finished, goes once that window lets go of it, the next time
+any window uses the history; Clear says when a copy has to wait. Anything
+still on disk is read again at the next refresh. The panel also remembers its
+range, its scope, the agent and the account chosen and your time zone, in the
 editor's own state.
 
 From Claude Code's configuration file it reads only the account signed in now
@@ -305,6 +343,13 @@ managed settings files, it keeps three `env` entries and nothing else:
 `CLAUDE_CONFIG_DIR`, which says where the records are,
 `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
 
+Of Codex's records it reads only the lines that count a response's tokens or
+name its model and effort, where a turn or a review begins and ends, where a
+history is compacted, the folder a session started in, and the usage limits
+reached: a response's content, a tool's output and a compacted history are
+never decoded. Codex's credentials, configuration, prompt history and
+databases are never opened.
+
 Its settings are machine settings, so a repository's settings cannot turn it
 on or point it at another folder; the names you give accounts are an
 application setting, which only your own settings hold: the Default profile's,
@@ -312,15 +357,16 @@ whichever profile is in use. Settings Sync leaves each of them out while LLM
 Tokenizer is installed in the profile whose settings hold it. Where it is not,
 add them to `settingsSync.ignoredSettings` to keep them on this machine: the
 names with LLM Tokenizer installed only in a profile other than Default, or in
-a remote window, where it runs on the remote; and all four
+a remote window, where it runs on the remote; and all six
 (`llm-tokenizer.enableClaudeCodeUsage`,
 `llm-tokenizer.claudeCodeDataDirectory`,
-`llm-tokenizer.showClaudeCodeUsageInStatusBar` and
-`llm-tokenizer.claudeCodeAccountNames`) with it in a profile that uses another
+`llm-tokenizer.showClaudeCodeUsageInStatusBar`,
+`llm-tokenizer.claudeCodeAccountNames`, `llm-tokenizer.enableCodexUsage` and
+`llm-tokenizer.codexDataDirectory`) with it in a profile that uses another
 profile's settings. In a dev container, though, the container's settings can
 come from the repository's `devcontainer.json`.
 
-**Before uninstalling**, run **Clear Claude Code Usage History**: the editor
+**Before uninstalling**, run **Clear Agent Usage History**: the editor
 may leave this extension's storage on disk after the extension is gone. The
 names you gave accounts stay in your settings until you remove **Claude Code
 Account Names**, and once LLM Tokenizer is gone Settings Sync no longer leaves
@@ -329,9 +375,9 @@ add them to `settingsSync.ignoredSettings`.
 
 ### What it counts, and what it cannot see
 
-- Only the machine the extension runs on: other computers and claude.ai are
-  not seen. In a remote window that is normally the remote host, and the
-  panel names it.
+- Only the machine the extension runs on: other computers, claude.ai and
+  Codex's cloud tasks are not seen. In a remote window that is normally the
+  remote host, and the panel names it.
 - Nothing Claude Code had already deleted before the first import.
 - Sessions run with `CLAUDE_CODE_SKIP_PROMPT_HISTORY`, which keeps no
   transcripts at all.
@@ -348,8 +394,17 @@ add them to `settingsSync.ignoredSettings`.
   Claude Code had deleted before this version read it: Not recorded. A
   session from before then that was resumed since records the account it was
   resumed with, and its older requests count under that one.
+- Codex's model before version 0.35, which its records never named: *Model
+  not recorded*.
+- A Codex review before version 0.142, whose records name no session to count
+  in: it is a session of its own.
+- A Codex refusal at a usage limit before version 0.41, which wrote nothing.
+- The size of a Codex compaction, which its records never give: a session's
+  compactions are counted, with no sizes on hover.
+- A compressed Codex record cut short: it is counted among the files that
+  could not be read.
 
-The records' format is internal to Claude Code and may change with it; the
+The records' formats are internal to each agent and may change with it; the
 diagnostics say when lines could not be read.
 
 ## Accuracy

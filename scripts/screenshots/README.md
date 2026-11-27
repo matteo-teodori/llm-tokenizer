@@ -10,7 +10,10 @@ of Claude Code records for it and four other invented projects, from a seeded
 generator, on three invented Claude accounts, two of which a Claude Code
 configuration file of its own names (the third the panel numbers). Sessions
 record their account from 4 November 2026, when Claude Code began to, and
-never in the first six of the 30 days. No one's own usage is read, and
+never in the first six of the 30 days. Beside them, 27 days of Codex rollouts
+for three of those projects, as Codex 0.169 writes them, subagents and a
+usage limit reached included, from a generator of their own, so that Claude
+Code's figures stay as they were. No one's own usage is read, and
 `capture.mjs` checks that.
 
 ## Prerequisites
@@ -55,7 +58,7 @@ neither is tracked.
 
 ## What keeps it to the demo
 
-- HOME and CLAUDE_CONFIG_DIR are the demo home's, and TZ is UTC.
+- HOME, CLAUDE_CONFIG_DIR and CODEX_HOME are the demo home's, and TZ is UTC.
 - Each run has a new profile, in `.p/` here (a profile's IPC socket must fit in
   103 characters; in the system's temporary folder, removed after the run,
   when this path is too long), and a new extensions folder, into which VS
@@ -63,16 +66,18 @@ neither is tracked.
 - `--use-mock-keychain` and `--force-disable-user-env`; workspace trust,
   telemetry, updates and AI features off.
 - `guard.mjs`, which both scripts run before they write anything, refuses a
-  work folder that is or holds the home, that is in `~/.claude` or in
-  `$CLAUDE_CONFIG_DIR` (links resolved, case aside, as macOS compares paths),
-  that is inside any folder named `projects`, which a data folder named in a
-  setting would read, or that holds files it did not make; and both refuse to
+  work folder that is or holds the home, that is in `~/.claude`,
+  `$CLAUDE_CONFIG_DIR`, `~/.codex` or `$CODEX_HOME` (links resolved, case
+  aside, as macOS compares paths), that is inside any folder named
+  `projects`, `sessions` or `archived_sessions`, which a data folder named in
+  a setting would read, or that holds files it did not make; and both refuse to
   run before 02:00 UTC. `capture.mjs` also refuses to run where Claude Code's
   managed settings exist (`/Library/Application Support/ClaudeCode`,
   `/etc/claude-code`), which could name another data folder.
 - Before any page of the usage panel is captured, the panel must show exactly
   the demo's requests, sessions and projects, and the extension's log must say
-  it read the demo's files in one data folder. Each GIF frame's range and
+  it read the demo's files in two data folders, its Claude Code and Codex
+  homes. Each GIF frame's range and
   scope must show their own figures.
 - Every state captured is checked, before the capture and after it, for this
   machine's home, temporary and scratch paths anywhere in the text, and for

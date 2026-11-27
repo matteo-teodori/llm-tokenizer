@@ -21,6 +21,12 @@ export function isSyntheticModel(model: string): boolean {
 }
 
 /**
+ * The model of a request no record names: Codex 0.32 to 0.34 wrote none.
+ * Kept under this id, which no model has, and shown as not recorded.
+ */
+export const UNRECORDED_MODEL = '<unrecorded>';
+
+/**
  * The routing suffix of a requested model id, `1m` for `claude-opus-5-5[1m]`,
  * or null when it has none.
  */

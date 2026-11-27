@@ -11,7 +11,7 @@ import { inFolders, queryReport, reportSessions, type ReportQuery } from '../../
 import { buildReport, ownerAt, rangeSince, rangeUntil, type RangeKey } from '../../src/usage/report';
 import { createHistory, currentHistory, publishHistory, resolveHistory } from '../../src/usage/historyFiles';
 import { SCHEMA_VERSION, UsageStore, loadSqlite } from '../../src/usage/store';
-import { PARSER_VERSION } from '../../src/usage/transcripts';
+import { PARSER_VERSION } from '../../src/usage/lines';
 import type { UsageRequest } from '../../src/usage/types';
 import { WorkerHost } from '../../src/workerHost';
 
@@ -163,6 +163,8 @@ suite('usage projects', () => {
         assert.strictEqual(projectLabel({ kind: 'root', path: 'C:\\work\\api' }), 'api');
         assert.strictEqual(projectLabel({ kind: 'root', path: '/' }), '/');
         assert.strictEqual(projectLabel({ kind: 'unattributed', projectDir: '-repo-app' }), 'Unattributed (-repo-app)');
+        // A Codex session whose rollouts name no cwd: its agent's layout has no folder for it.
+        assert.strictEqual(projectLabel({ kind: 'unattributed', projectDir: '' }), 'Unattributed');
     });
 });
 
@@ -236,7 +238,7 @@ suite('usage report', () => {
         );
         assert.deepStrictEqual(session.compactions.map(c => [c.trigger, c.preTokens, c.postTokens]), [['auto', 160_000, 12_000]]);
         assert.deepStrictEqual(report.limitWindows, [
-            { account: 'none', limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
+            { provider: 'claude-code', account: 'none', limitType: 'five_hour', resetsAt: 1791561600, hits: 1, firstTs: Date.parse('2026-10-09T10:06:00.000Z'), date: '2026-10-09' },
         ]);
         assert.deepStrictEqual(report.omitted, { sessions: 0, projects: 0, models: 0, efforts: 0, dayModels: 0, limitWindows: 0, accounts: 0, accountsSeen: 0 });
         assert.deepStrictEqual([report.coverage.requests, report.coverage.files], [4, 4]);
@@ -665,6 +667,7 @@ suite('usage report', () => {
     test('limit windows are capped at the newest, the rest counted', () => {
         const store = freshStore();
         const hits = Array.from({ length: 210 }, (_, i) => ({
+            provider: 'claude-code' as const,
             uuid: `l${i}`,
             sessionId: 's',
             timestamp: Date.UTC(2026, 9, 1) + i * 60_000,
@@ -708,6 +711,28 @@ suite('usage report', () => {
         const report = queryReport(store, query({ workspaceFolders: ['/elsewhere'] }));
         assert.strictEqual(report.totals.processed, 0);
         assert.strictEqual(report.limitWindows.length, 1);
+    });
+
+    test('limits that say no reset time are a window a day, not one of every refusal in the range', () => {
+        const at = (day: number, hour: number) => Date.UTC(2026, 9, day, hour);
+        const hit = (ts: number, uuid: string) => ({ provider: 'codex' as const, uuid, sessionId: 'x', timestamp: ts, limitType: 'premium', resetsAt: null, owner: null });
+        const report = buildReport(
+            {
+                sums: [],
+                sessions: [],
+                compactions: [],
+                limitHits: [hit(at(8, 9), 'a'), hit(at(8, 15), 'b'), hit(at(9, 10), 'c')],
+                coverage: { start: at(8, 9), newest: at(9, 10), requests: 0, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },
+            },
+            { range: 'coverage', zone: 'UTC', now: FIXTURE_NOW, scope: 'all' },
+        );
+        assert.deepStrictEqual(
+            report.limitWindows.map(w => [w.date, w.hits, w.resetsAt]),
+            [
+                ['2026-10-08', 2, null],
+                ['2026-10-09', 1, null],
+            ],
+        );
     });
 
     describeAccounts();
@@ -788,7 +813,7 @@ suite('usage report', () => {
                 ['none', 1, Date.parse('2026-10-09T06:30:00Z'), Date.parse('2026-10-09T06:30:00Z')],
             ]);
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
+            assert.deepStrictEqual([...store.accountNumbers('claude-code').keys()], [`${C}/`]);
             // Chosen, C shows its limit.
             assert.deepStrictEqual(queryReport(store, query({ account: `${C}/` })).limitWindows.map(w => w.account), [`${C}/`]);
         });
@@ -839,7 +864,7 @@ suite('usage report', () => {
             ]);
             // D was used first: it is 1, by its limit, not by C's request after it.
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers('claude-code')].map(([key, n]) => [key, n.ordinal])), { [`${D}/`]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
             // Everything held starts at that limit, and lists it; it ends at its newest record, the last limit before the clock.
             assert.strictEqual(report.coverage.start, Date.parse('2026-10-07T07:00:00Z'));
             assert.strictEqual(report.coverage.newest, Date.parse('2026-10-10T10:30:00Z'));
@@ -906,7 +931,7 @@ suite('usage report', () => {
             // F is used by that refusal: offered as the numbering takes it.
             store.transaction(() => store.numberAccounts('claude-code'));
             assert.ok(`${F}/` in seen, JSON.stringify(Object.keys(seen)));
-            assert.ok(store.accountNumbers().has(`${F}/`));
+            assert.ok(store.accountNumbers('claude-code').has(`${F}/`));
             // A session that records no account, its only record a refusal dated ahead: nothing to show, nothing offered.
             assert.ok(!('none' in seen), JSON.stringify(Object.keys(seen)));
         });
@@ -962,7 +987,7 @@ suite('usage report', () => {
             assert.deepStrictEqual(report.limitWindows.map(w => w.account), [`${C}/`]);
             assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions]), [[`${C}/`, 1], ['none', 1]]);
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.deepStrictEqual([...store.accountNumbers().keys()], [`${C}/`]);
+            assert.deepStrictEqual([...store.accountNumbers('claude-code').keys()], [`${C}/`]);
         });
 
         test('tokens are split by account and organization, subagents included, the sessions that record none in a row of their own', async () => {
@@ -1021,9 +1046,9 @@ suite('usage report', () => {
             assert.deepStrictEqual(numbers(), [
                 [keyA, null, null, 2], [keyB, null, null, 1], [keyA2, null, null, 2], ['none', null, null, 0],
             ]);
-            assert.deepStrictEqual(Object.fromEntries(store.accountNumbers()), {});
+            assert.deepStrictEqual(Object.fromEntries(store.accountNumbers('claude-code')), {});
             store.transaction(() => store.numberAccounts('claude-code'));
-            assert.strictEqual(store.accountNumbers().size, 3);
+            assert.strictEqual(store.accountNumbers('claude-code').size, 3);
             assert.deepStrictEqual(numbers(), [
                 [keyA, 1, 1, 2], [keyA2, 1, 2, 2], [keyB, 2, 1, 1], ['none', null, null, 0],
             ]);
@@ -1122,7 +1147,7 @@ suite('usage report', () => {
             const report = queryReport(store, query());
             assert.deepStrictEqual(report.accounts.map(a => [a.key, a.totals.output]), [[`${C}/`, 20], [keyA, 10]]);
             assert.deepStrictEqual(report.limitWindows.map(w => w.account), [`${E}/`]);
-            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers()].map(([key, n]) => [key, n.ordinal])), { [keyA]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
+            assert.deepStrictEqual(Object.fromEntries([...store.accountNumbers('claude-code')].map(([key, n]) => [key, n.ordinal])), { [keyA]: 1, [`${C}/`]: 2, [`${E}/`]: 3 });
         });
 
         test('one account chosen narrows a range too, and a request whose session the history has no row for counts under the owner it records, or none', async () => {
@@ -1174,6 +1199,7 @@ suite('usage report', () => {
     test('accounts are capped as the other lists are: those with most tokens listed, those with most sessions offered', () => {
         const owner = (i: number) => ({ accountUuid: `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`, organizationUuid: null });
         const sessions = Array.from({ length: 260 }, (_, i) => ({
+            provider: 'claude-code' as const,
             sessionId: `s${i}`,
             project: { kind: 'root' as const, path: '/repo' },
             projectKey: 'root:/repo',
@@ -1187,6 +1213,7 @@ suite('usage report', () => {
         const extra = Array.from({ length: 10 }, (_, k) => ({ ...sessions[250 + k], sessionId: `x${k}` }));
         const sums = [...sessions, ...extra].map((s, i) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
+            provider: 'claude-code' as const,
             sessionId: s.sessionId,
             model: 'claude-opus-5-5',
             variant: null,
@@ -1238,6 +1265,7 @@ suite('usage report', () => {
     test('accounts are offered by the numbers kept, whatever first use says now, and one a session or a limit names is kept past the cap', () => {
         const id = (i: number) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
         const session = (sessionId: string, accountUuid: string, firstTs: number) => ({
+            provider: 'claude-code' as const,
             sessionId,
             project: { kind: 'root' as const, path: '/repo' },
             projectKey: 'root:/repo',
@@ -1249,6 +1277,7 @@ suite('usage report', () => {
         });
         const sum = (sessionId: string, input: number) => ({
             bucket: Math.floor(Date.UTC(2026, 9, 9, 12) / BUCKET_MS),
+            provider: 'claude-code' as const,
             sessionId,
             model: 'claude-opus-5-5',
             variant: null,
@@ -1315,7 +1344,7 @@ suite('usage report', () => {
         const crowd = Array.from({ length: 201 }, (_, i) => [session(`a${i}`, id(i), i), session(`b${i}`, id(i), i)]).flat();
         const z = session('z', id(999), 1_000);
         const sums = [...crowd.map(s => sum(s.sessionId, 2)), sum('z', 1)];
-        const hit = { uuid: 'h', sessionId: 'z', timestamp: Date.UTC(2026, 9, 9, 12), limitType: 'five_hour', resetsAt: null };
+        const hit = { provider: 'claude-code' as const, uuid: 'h', sessionId: 'z', timestamp: Date.UTC(2026, 9, 9, 12), limitType: 'five_hour', resetsAt: null };
         const base = { sums, sessions: [...crowd, z], compactions: [], coverage };
         const zKey = `${id(999)}/`;
         const listed = buildReport({ ...base, limitHits: [] }, { ...options, maxSessions: 1_000 });
@@ -1332,6 +1361,7 @@ suite('usage report', () => {
         const owners = Array.from({ length: 300 }, (_, i) => ({ owner: { accountUuid: id(i), organizationUuid: null }, sinceTs: at(i) }));
         const sums = owners.map((o, i) => ({
             bucket: Math.floor(at(i) / BUCKET_MS),
+            provider: 'claude-code' as const,
             sessionId: 's',
             model: 'claude-opus-5-5',
             variant: null,
@@ -1358,7 +1388,7 @@ suite('usage report', () => {
         const report = buildReport(
             {
                 sums,
-                sessions: [{ sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null, limitSpans: [], uses: [] }],
+                sessions: [{ provider: 'claude-code', sessionId: 's', project: { kind: 'root', path: '/repo' }, projectKey: 'root:/repo', inWorkspace: false, firstTs: at(0), lastTs: at(299), owners, unownedHitTs: null, limitSpans: [], uses: [] }],
                 compactions: [],
                 limitHits: [],
                 coverage: { start: 0, newest: 0, requests: 300, ahead: 0, files: 1, oversizeLines: 0, malformedLines: 0 },
@@ -1367,6 +1397,387 @@ suite('usage report', () => {
         );
         assert.deepStrictEqual([report.sessions[0].accounts, report.sessions[0].moreAccounts], [[`${id(0)}/`, `${id(1)}/`, `${id(2)}/`], 297]);
         assert.deepStrictEqual([report.accountsSeen.length, report.omitted.accountsSeen], [200, 100]);
+    });
+
+    suite("two agents' sessions with one id, in each lookup and order", () => {
+        const A = { accountUuid: '00000000-0000-4000-8000-00000000000a', organizationUuid: null };
+        const keyA = `${A.accountUuid}/`;
+        const t = (minute: number) => Date.UTC(2026, 9, 10, 11, minute);
+        const session = (provider: 'claude-code' | 'codex', owners: { owner: typeof A; sinceTs: number | null }[]) => ({
+            provider,
+            sessionId: 'x',
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: true,
+            firstTs: t(1),
+            lastTs: t(10),
+            owners,
+            unownedHitTs: null,
+            limitSpans: [],
+            uses: [],
+        });
+        const hit = (provider: 'claude-code' | 'codex') => ({
+            provider,
+            uuid: `h-${provider}`,
+            sessionId: 'x',
+            timestamp: t(5),
+            limitType: 'five_hour',
+            resetsAt: null,
+            owner: null,
+        });
+        const sum = (provider: 'claude-code' | 'codex') => ({
+            bucket: Math.floor(t(1) / BUCKET_MS),
+            provider,
+            sessionId: 'x',
+            model: 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: t(1),
+            lastTs: t(2),
+            input: 5,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        });
+        const coverage = { start: t(1), newest: t(10), requests: 2, ahead: 0, files: 2, oversizeLines: 0, malformedLines: 0 };
+        const options = { range: 'today' as const, zone: 'UTC', now: FIXTURE_NOW, scope: 'workspace' as const };
+        const orders = [
+            ['claude-code', 'codex'],
+            ['codex', 'claude-code'],
+        ] as const;
+
+        test("a limit that records no owner takes its own agent's session's owner, and two agents' limits of one time are listed in agent order, in any order given", () => {
+            const owners = { 'claude-code': [{ owner: A, sinceTs: t(1) }], codex: [] };
+            for (const order of orders) {
+                const report = buildReport(
+                    { sums: [], sessions: order.map(p => session(p, owners[p])), compactions: [], limitHits: order.map(hit), coverage },
+                    options,
+                );
+                assert.deepStrictEqual(
+                    report.limitWindows.map(w => [w.provider, w.account]),
+                    [
+                        ['claude-code', keyA],
+                        ['codex', null],
+                    ],
+                    order.join(),
+                );
+            }
+        });
+
+        test('sessions alike in tokens and time are listed in agent order, in any order given, and kept so at the cap', () => {
+            for (const order of orders) {
+                const input = { sums: order.map(sum), sessions: order.map(p => session(p, [])), compactions: [], limitHits: [], coverage };
+                assert.deepStrictEqual(
+                    [buildReport(input, options).sessions.map(s => s.provider), buildReport(input, { ...options, maxSessions: 1 }).sessions.map(s => s.provider)],
+                    [['claude-code', 'codex'], ['claude-code']],
+                    order.join(),
+                );
+            }
+        });
+
+        test('a limit of an agent whose accounts are not told apart keeps no account that records none past the cap of accounts seen', () => {
+            const id = (i: number) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
+            // 201 accounts with a session each, then one session before the range that records none: past the cap of 200.
+            const sessions = [
+                ...Array.from({ length: 201 }, (_, i) => ({ ...session('claude-code', [{ owner: { accountUuid: id(i), organizationUuid: null }, sinceTs: null }]), sessionId: `s${i}` })),
+                { ...session('claude-code', []), sessionId: 'old', firstTs: t(1) - 86_400_000, lastTs: t(1) - 86_400_000 },
+                session('codex', []),
+            ];
+            const report = buildReport({ sums: [], sessions, compactions: [], limitHits: [hit('codex')], coverage }, options);
+            assert.deepStrictEqual(
+                [report.limitWindows.map(w => [w.provider, w.account]), report.accountsSeen.length, report.accountsSeen.some(a => a.key === 'none')],
+                [[['codex', null]], 200, false],
+            );
+        });
+    });
+
+    test("two agents' sessions with one id are two, each with its own time, project row, accounts, limits and compactions", () => {
+        const A = { accountUuid: '00000000-0000-4000-8000-00000000000a', organizationUuid: null };
+        const keyA = `${A.accountUuid}/`;
+        const t = (minute: number) => Date.UTC(2026, 9, 10, 11, minute);
+        const sum = (provider: 'claude-code' | 'codex', first: number, last: number, input: number) => ({
+            bucket: Math.floor(t(first) / BUCKET_MS),
+            provider,
+            sessionId: 'x',
+            model: provider === 'codex' ? 'gpt-5.5' : 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 2,
+            completeRequests: 2,
+            firstTs: t(first),
+            lastTs: t(last),
+            input,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        });
+        const session = (provider: 'claude-code' | 'codex', owners: { owner: typeof A; sinceTs: number | null }[]) => ({
+            provider,
+            sessionId: 'x',
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: true,
+            firstTs: t(1),
+            lastTs: t(10),
+            owners,
+            unownedHitTs: null,
+            limitSpans: [],
+            uses: [],
+        });
+        const hit = (provider: 'claude-code' | 'codex', owner: typeof A | null) => ({
+            provider,
+            uuid: `h-${provider}`,
+            sessionId: 'x',
+            timestamp: t(5),
+            limitType: 'five_hour',
+            resetsAt: null,
+            owner,
+        });
+        const compaction = (provider: 'claude-code' | 'codex', preTokens: number) => ({
+            provider,
+            uuid: 'c',
+            sessionId: 'x',
+            kind: 'main' as const,
+            timestamp: t(4),
+            trigger: 'auto',
+            preTokens,
+            postTokens: 1,
+        });
+        // Claude Code's x worked from 11:01 to 11:03 under A; Codex's x, from 11:02 to 11:10, under no account.
+        const input = {
+            sums: [sum('claude-code', 1, 3, 1), sum('codex', 2, 10, 10)],
+            sessions: [session('claude-code', [{ owner: A, sinceTs: null }]), session('codex', [])],
+            compactions: [compaction('claude-code', 100), compaction('codex', 200)],
+            limitHits: [hit('claude-code', A), hit('codex', null)],
+            coverage: { start: t(1), newest: t(10), requests: 4, ahead: 0, files: 2, oversizeLines: 0, malformedLines: 0 },
+        };
+        const options = { range: 'today' as const, zone: 'UTC', now: FIXTURE_NOW, scope: 'workspace' as const };
+        const report = buildReport(input, options);
+        const rows = Object.fromEntries(report.sessions.map(s => [s.provider, s]));
+        assert.deepStrictEqual(
+            [rows['claude-code'].activeMs, rows.codex.activeMs, rows['claude-code'].accounts, rows.codex.accounts],
+            [2 * 60_000, 8 * 60_000, [keyA], []],
+        );
+        assert.deepStrictEqual(
+            [rows['claude-code'].compactions.map(c => c.preTokens), rows.codex.compactions.map(c => c.preTokens)],
+            [[100], [200]],
+        );
+        // One folder, two sessions; accounts are Claude Code's, and Codex's tokens are in none of them.
+        assert.deepStrictEqual([report.projects.length, report.projects[0].sessions, report.totals.input], [1, 2, 11]);
+        assert.deepStrictEqual(report.accounts.map(a => [a.key, a.sessions, a.totals.input]), [[keyA, 1, 1]]);
+        assert.deepStrictEqual(report.accountsSeen.map(a => [a.key, a.sessions]), [[keyA, 1]]);
+        // Each agent's limit is a window of its own, Codex's of no account.
+        assert.deepStrictEqual(
+            report.limitWindows.map(w => [w.provider, w.account, w.hits]),
+            [
+                ['claude-code', keyA, 1],
+                ['codex', null, 1],
+            ],
+        );
+        // An account chosen is Claude Code's: none of Codex's requests or limits are its, nor those that record none.
+        const chosen = buildReport(input, { ...options, account: keyA });
+        assert.deepStrictEqual(
+            [chosen.totals.input, chosen.sessions.map(s => s.provider), chosen.limitWindows.map(w => w.provider)],
+            [1, ['claude-code'], ['claude-code']],
+        );
+        const none = buildReport(input, { ...options, account: 'none' });
+        assert.deepStrictEqual([none.totals.coverage.requests, none.sessions.length, none.limitWindows.length], [0, 0, 0]);
+    });
+
+    test('one agent chosen is the whole page, its limits and its CSV rows included; every agent seen is offered, whatever the range', () => {
+        const t = (minute: number) => Date.UTC(2026, 9, 10, 11, minute);
+        const sum = (provider: 'claude-code' | 'codex', sessionId: string, minute: number, input: number) => ({
+            bucket: Math.floor(t(minute) / BUCKET_MS),
+            provider,
+            sessionId,
+            model: provider === 'codex' ? 'gpt-5.5' : 'claude-opus-5-5',
+            variant: null,
+            kind: 'main' as const,
+            effort: null,
+            speed: null,
+            inferenceGeo: null,
+            promptSize: null,
+            owner: null,
+            requests: 1,
+            completeRequests: 1,
+            firstTs: t(minute),
+            lastTs: t(minute),
+            input,
+            cacheCreation: 0,
+            cacheRead: 0,
+            output: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            thinking: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+        });
+        const session = (provider: 'claude-code' | 'codex', sessionId: string, firstTs: number | null) => ({
+            provider,
+            sessionId,
+            project: { kind: 'root' as const, path: '/repo' },
+            projectKey: 'root:/repo',
+            inWorkspace: false,
+            firstTs,
+            lastTs: firstTs,
+            owners: [],
+            unownedHitTs: null,
+            limitSpans: [],
+            uses: [],
+        });
+        const input = {
+            sums: [sum('claude-code', 'a', 1, 1), sum('codex', 'b', 2, 10), sum('codex', 'c', 3, 100)],
+            // A Codex session sighted with nothing to show, as one it imported from another agent, is no reason to offer it.
+            sessions: [session('claude-code', 'a', t(1)), session('codex', 'b', t(2)), session('codex', 'c', t(3))],
+            compactions: [],
+            limitHits: [
+                { provider: 'claude-code' as const, uuid: 'h1', sessionId: 'a', timestamp: t(4), limitType: 'five_hour', resetsAt: null, owner: null },
+                { provider: 'codex' as const, uuid: 'h2', sessionId: 'b', timestamp: t(5), limitType: 'weekly', resetsAt: null, owner: null },
+            ],
+            coverage: { start: t(1), newest: t(5), requests: 3, ahead: 0, files: 3, oversizeLines: 0, malformedLines: 0 },
+        };
+        const options = { range: 'today' as const, zone: 'UTC', now: FIXTURE_NOW, scope: 'all' as const };
+        const all = buildReport(input, options);
+        assert.deepStrictEqual(
+            [all.agent, all.agentsSeen, all.agents.map(a => [a.provider, a.sessions, a.totals.input]), all.dayModels.map(r => [r.provider, r.model])],
+            [
+                'all',
+                ['claude-code', 'codex'],
+                [
+                    ['codex', 2, 110],
+                    ['claude-code', 1, 1],
+                ],
+                [
+                    ['codex', 'gpt-5.5'],
+                    ['claude-code', 'claude-opus-5-5'],
+                ],
+            ],
+        );
+        const codex = buildReport(input, { ...options, agent: 'codex' });
+        assert.deepStrictEqual(
+            [codex.agent, codex.totals.input, codex.sessions.map(s => s.sessionId).sort(), codex.limitWindows.map(w => w.limitType), codex.agents.map(a => a.provider), codex.agentsSeen],
+            ['codex', 110, ['b', 'c'], ['weekly'], ['codex'], ['claude-code', 'codex']],
+        );
+        const claude = buildReport(input, { ...options, agent: 'claude-code' });
+        assert.deepStrictEqual([claude.totals.input, claude.limitWindows.map(w => w.limitType), claude.dayModels.map(r => r.provider)], [1, ['five_hour'], ['claude-code']]);
+        // Sighted with nothing to show: not offered.
+        const quiet = buildReport({ ...input, sums: input.sums.slice(0, 1), sessions: [session('claude-code', 'a', t(1)), session('codex', 'z', null)], limitHits: [] }, options);
+        assert.deepStrictEqual(quiet.agentsSeen, ['claude-code']);
+        // An agent this build does not read, as a newer one sharing the history may: none of the report's.
+        const unknown = 'gemini' as 'codex';
+        const shared = buildReport(
+            {
+                ...input,
+                sums: [...input.sums, sum(unknown, 'g', 4, 1000)],
+                sessions: [...input.sessions, session(unknown, 'g', t(4))],
+                limitHits: [...input.limitHits, { provider: unknown, uuid: 'h3', sessionId: 'g', timestamp: t(6), limitType: 'weekly', resetsAt: null, owner: null }],
+            },
+            options,
+        );
+        assert.deepStrictEqual(
+            [shared.totals.input, shared.agentsSeen, shared.agents.map(a => a.provider), shared.sessions.length, shared.limitWindows.length, shared.dayModels.length],
+            [all.totals.input, all.agentsSeen, all.agents.map(a => a.provider), all.sessions.length, all.limitWindows.length, all.dayModels.length],
+        );
+        // What was read is the whole history's, whichever agent is shown.
+        const whole = { ...input.coverage, requests: 4, files: 4 };
+        assert.deepStrictEqual([all.history, buildReport({ ...input, history: whole }, { ...options, agent: 'codex' }).history], [input.coverage, whole]);
+    });
+
+    test("one agent's part of the history has its own span, size and files", () => {
+        const store = freshStore();
+        store.transaction(() => {
+            store.upsertRequests([
+                request({ messageId: 'a', timestamp: Date.UTC(2026, 9, 1), file: '/claude.jsonl' }),
+                request({ provider: 'codex', messageId: 'b', timestamp: Date.UTC(2026, 9, 5), file: '/codex.jsonl' }),
+                request({ provider: 'codex', messageId: 'c', timestamp: Date.UTC(2026, 9, 7), file: '/codex.jsonl' }),
+            ]);
+            store.insertLimitHits([{ provider: 'codex', uuid: 'h', sessionId: 's', timestamp: Date.UTC(2026, 9, 8), limitType: 'weekly', resetsAt: null, owner: null }]);
+        });
+        const span = (c: { start: number | null; newest: number | null; requests: number; files: number }) => [c.start, c.newest, c.requests, c.files];
+        const file = (provider: 'claude-code' | 'codex', name: string) =>
+            store.putFile({
+                provider, path: name, root: '/r', kind: 'main', sessionId: 's', runId: null, agentId: null, projectDir: '', dev: null, ino: null,
+                size: 1, mtimeMs: 1, offset: 1, tailHash: null, parserVersion: PARSER_VERSION, oversizeLines: 0, malformedLines: 0, newestVersion: null, readerState: null,
+            });
+        store.transaction(() => ['/claude.jsonl', '/codex.jsonl'].forEach((name, i) => file(i === 0 ? 'claude-code' : 'codex', name)));
+        // Each inside a read, as a report reads it, and outside one.
+        const both = (provider?: 'claude-code' | 'codex') => {
+            const outside = store.coverage(Number.MAX_SAFE_INTEGER, provider);
+            assert.deepStrictEqual(store.read(() => store.coverage(Number.MAX_SAFE_INTEGER, provider)), outside);
+            return span(outside);
+        };
+        assert.deepStrictEqual(both(), [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 8), 3, 2]);
+        assert.deepStrictEqual(both('codex'), [Date.UTC(2026, 9, 5), Date.UTC(2026, 9, 8), 2, 1]);
+        assert.deepStrictEqual(both('claude-code'), [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 1), 1, 1]);
+        const report = queryReport(store, query({ range: 'coverage', agent: 'codex' }));
+        assert.deepStrictEqual([report.agent, report.coverage.start, report.totals.coverage.requests], ['codex', Date.UTC(2026, 9, 5), 2]);
+        // Beside the agent's part, the whole history: what the page says was read, and how new it is.
+        assert.deepStrictEqual(span(report.history), [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 8), 3, 2]);
+        const every = queryReport(store, query({ range: 'coverage' }));
+        assert.deepStrictEqual(every.history, every.coverage);
+        // Codex's requests and limits gone, its file kept: Claude Code's part is every request there is, its files its own.
+        store.transaction(() => store.deleteRequestsFromFile('codex', '/codex.jsonl'));
+        assert.ok(sqlite, 'this runtime has no node:sqlite');
+        const raw = new sqlite.DatabaseSync(store.file);
+        try {
+            raw.exec("DELETE FROM limit_hits WHERE provider = 'codex'");
+        } finally {
+            raw.close();
+        }
+        assert.deepStrictEqual([both('claude-code'), both('codex'), both()], [
+            [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 1), 1, 1],
+            [null, null, 0, 1],
+            [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 1), 1, 2],
+        ]);
+    });
+
+    test("a session with no cwd is grouped by its project folder, another agent's apart from Claude Code's", () => {
+        const stored = (provider: 'claude-code' | 'codex', projectDir: string) => ({
+            provider,
+            sessionId: 'x',
+            root: '/root',
+            cwd: null,
+            cwdTs: null,
+            projectDir,
+            firstTs: 1,
+            lastTs: 1,
+            owners: [],
+            unownedHitTs: null,
+            limitSpans: [],
+            uses: [],
+        });
+        const sessions = reportSessions([stored('claude-code', 'p'), stored('codex', 'p'), stored('claude-code', 'codex:p')], query());
+        assert.deepStrictEqual(
+            sessions.map(s => [s.provider, s.projectKey]),
+            [
+                ['claude-code', 'dir:p'],
+                ['codex', 'codex:dir:p'],
+                // A folder named like another agent's key is still Claude Code's own.
+                ['claude-code', 'dir:codex:p'],
+            ],
+        );
     });
 
     test('a missing counter makes the report a lower bound', () => {
@@ -1460,7 +1871,7 @@ suite('usage worker queries', () => {
         const worker = host();
         const order: string[] = [];
         const [imported] = await Promise.all([
-            worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] }).then(r => (order.push(r.type), r)),
+            worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [path.join(tmp, 'root')] }] }).then(r => (order.push(r.type), r)),
             worker.send(ask(storeFile)).then(r => order.push(r.type)),
         ]);
         assert.deepStrictEqual(order, ['report', 'imported']);
@@ -1471,7 +1882,7 @@ suite('usage worker queries', () => {
     test('the fixtures, through the worker; a newer version\u2019s history can still be read', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] })).type, 'imported');
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] })).type, 'imported');
         const first = await worker.send(ask(storeFile));
         assert.ok(first.type === 'report' && first.report.totals.processed === 1_278, JSON.stringify(first).slice(0, 200));
         await worker.send({ type: 'close', id: 0 });
@@ -1482,7 +1893,7 @@ suite('usage worker queries', () => {
         raw.close();
         const again = await worker.send(ask(storeFile));
         assert.ok(again.type === 'report' && again.report.totals.processed === 1_278, JSON.stringify(again).slice(0, 200));
-        const refused = await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        const refused = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'store-read-only');
     });
 
@@ -1503,7 +1914,7 @@ suite('usage worker queries', () => {
         signedIn(A, 'a@example.com');
 
         const worker = host();
-        const imported = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], accountFiles: [config] });
+        const imported = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], accountFiles: [config] });
         assert.strictEqual(imported.type, 'imported');
         // Signed in to B now: A keeps the name it had.
         signedIn(B, 'b@example.com');
@@ -1532,8 +1943,13 @@ suite('usage worker queries', () => {
 
         const one = await worker.send(ask(storeFile, { account: `${A}/` }));
         assert.ok(one.type === 'report' && one.report.totals.output === 10 && one.report.account === `${A}/`, JSON.stringify(one).slice(0, 200));
+        // One agent's, through the worker; an agent it does not read is no filter.
+        const codexOnly = await worker.send(ask(storeFile, { agent: 'codex' }));
+        assert.ok(codexOnly.type === 'report' && codexOnly.report.agent === 'codex' && codexOnly.report.totals.coverage.requests === 0, JSON.stringify(codexOnly).slice(0, 200));
         for (const bad of [
             { account: 'everyone' },
+            { agent: 'gemini' as unknown as 'codex' },
+            { agent: 'constructor' as unknown as 'codex' },
             { accountFiles: 'not a list' as unknown as string[] },
             { accountFiles: Array.from({ length: 17 }, () => config) },
             { signedInFiles: 'not a list' as unknown as string[] },
@@ -1541,7 +1957,7 @@ suite('usage worker queries', () => {
             const refused = await worker.send(ask(storeFile, bad));
             assert.deepStrictEqual(refused.type === 'failed' && refused.failure, 'bad-request', JSON.stringify(bad).slice(0, 80));
         }
-        const badImport = await worker.send({ type: 'import', id: 0, storeFile, roots: [root], signedInFiles: [''] });
+        const badImport = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], signedInFiles: [''] });
         assert.deepStrictEqual(badImport.type === 'failed' && badImport.failure, 'bad-request');
     });
 
@@ -1569,25 +1985,25 @@ suite('usage worker queries', () => {
             return Object.fromEntries(answer.report.accountsSeen.map(a => [a.key, a.ordinal]));
         };
         // A pass over a few files: some accounts' first uses, not others'.
-        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [x] })).type, 'imported');
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], paths: [x] })).type, 'imported');
         assert.deepStrictEqual(await numbers(), { [`${X}/`]: null });
         // A whole pass, while another window holds the history: nothing read here, nothing numbered.
         assert.ok(sqlite, 'this runtime has no node:sqlite');
         const opened = UsageStore.open(sqlite, historyIn(storeFile));
         assert.ok(opened.status === 'ready');
         assert.ok(opened.store.acquireLease('import', 'another window', PARSER_VERSION));
-        const held = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        const held = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] });
         assert.ok(held.type === 'imported' && held.leaseHeldElsewhere, JSON.stringify(held).slice(0, 200));
         assert.deepStrictEqual(await numbers(), { [`${X}/`]: null });
         opened.store.releaseLease('import', 'another window');
         opened.store.close();
         // Read whole here: numbered as they were first used.
-        const whole = await worker.send({ type: 'import', id: 0, storeFile, roots: [root] });
+        const whole = await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] });
         assert.ok(whole.type === 'imported' && whole.summary && !whole.summary.cancelled, JSON.stringify(whole).slice(0, 200));
         assert.deepStrictEqual(await numbers(), { [`${Y}/`]: 1, [`${X}/`]: 2 });
         // After that, a pass over a few files numbers a new account at once.
         const z = session('z', Z, '2026-10-09T13:00:00Z');
-        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, roots: [root], paths: [z] })).type, 'imported');
+        assert.strictEqual((await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [root] }], paths: [z] })).type, 'imported');
         assert.deepStrictEqual(await numbers(), { [`${Y}/`]: 1, [`${X}/`]: 2, [`${Z}/`]: 3 });
     });
 
@@ -1620,7 +2036,7 @@ suite('usage worker queries', () => {
             fs.writeFileSync(path.join(projects, `s${i}.jsonl`), line(userRecord(`s${i}`, `/Secret-Client-0xFACE/repo-${i}`, '2026-10-09T09:59:00Z')) + line(assistantRecord(`s${i}`, `m${i}`, '2026-10-09T10:00:00Z')));
         }
         const worker = host({ busyTimeoutMs: 50 });
-        await worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] });
+        await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [path.join(tmp, 'root')] }] });
         assert.ok(sqlite, 'this runtime has no node:sqlite');
         const other = new sqlite.DatabaseSync(historyIn(storeFile));
         other.exec('BEGIN');
@@ -1693,7 +2109,7 @@ suite('usage worker queries', () => {
     test('a copy Clear could not remove is removed by a later request, and nothing set aside since', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         const stuck = path.join(path.dirname(storeFile), 'usage.sqlite.corrupt-1');
         // A folder where a file was expected stands in for a copy another window holds open.
         fs.mkdirSync(path.join(stuck, 'inside'), { recursive: true });
@@ -1717,7 +2133,7 @@ suite('usage worker queries', () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
         const order: string[] = [];
-        const imported = worker.send({ type: 'import', id: 0, storeFile, roots: [path.join(tmp, 'root')] }).then(r => (order.push('import'), r));
+        const imported = worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [path.join(tmp, 'root')] }] }).then(r => (order.push('import'), r));
         await worker.send(ask(storeFile));
         order.push('first query');
         replaceHistory(storeFile);
@@ -1739,7 +2155,7 @@ suite('usage worker queries', () => {
             const windows = [host(), host()];
             // A close loads each worker and touches no file: then both start together.
             await Promise.all(windows.map(w => w.send({ type: 'close', id: 0 })));
-            await Promise.all(windows.map(w => w.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] })));
+            await Promise.all(windows.map(w => w.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] })));
             const histories = fs.readdirSync(path.dirname(storeFile)).filter(name => /^usage-[0-9a-z]+\.sqlite$/.test(name));
             assert.strictEqual(histories.length, 1, `trial ${trial}: ${histories.join(', ')}`);
             for (const w of windows) {
@@ -1756,7 +2172,7 @@ suite('usage worker queries', () => {
         }
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         const pointer = path.join(path.dirname(storeFile), 'usage.current');
         const named = fs.readFileSync(pointer, 'utf8');
         fs.chmodSync(pointer, 0o000);
@@ -1799,7 +2215,7 @@ suite('usage worker queries', () => {
     test('a history deleted or replaced under a resident worker: the one at the path is the history', async () => {
         const storeFile = path.join(tmp, 'store', 'usage.sqlite');
         const worker = host();
-        await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+        await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
         const processed = async () => {
             const r = await worker.send(ask(storeFile));
             return r.type === 'report' ? r.report.totals.processed : -1;
@@ -1811,7 +2227,7 @@ suite('usage worker queries', () => {
             assert.strictEqual(await processed(), 0, 'it went on showing a deleted history');
             // Replaced, as another window replaces a corrupt one: a new
             // history, and the pointer at it.
-            await worker.send({ type: 'import', id: 0, storeFile, roots: [FIXTURE_ROOT] });
+            await worker.send({ type: 'import', id: 0, storeFile, sources: [{ provider: 'claude-code', roots: [FIXTURE_ROOT] }] });
             replaceHistory(storeFile);
             assert.strictEqual(await processed(), 0, 'it went on showing a replaced history');
         }

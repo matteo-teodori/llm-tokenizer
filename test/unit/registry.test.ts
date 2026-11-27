@@ -261,12 +261,17 @@ suite('model registry', () => {
             ['grok-4-1-fast', 'grok-4.3'],
             ['grok-3', 'grok-4.3'],
             ['grok-code-fast-1', 'grok-build-0.1'],
-            // MiniMax serves the preview's name with M3.1 Flash. It names no
-            // replacement for M2.1 and M2, which go where it routes its plans'
-            // requests for M2.7 and M2.5, and the lowercase ids follow.
+            // MiniMax serves the preview's name with M3.1 Flash, and routed its
+            // plans' requests for M2.7 and M2.5 there before retiring them on
+            // 2026-11-18. It names no replacement for M2.1 and M2, which go
+            // the same way, and the lowercase ids follow.
             ['MiniMax-M3.1-Flash-Preview', 'MiniMax-M3.1-Flash'],
+            ['MiniMax-M2.7', 'MiniMax-M3.1-Flash'],
+            ['MiniMax-M2.5', 'MiniMax-M3.1-Flash'],
             ['MiniMax-M2.1', 'MiniMax-M3.1-Flash'],
             ['MiniMax-M2', 'MiniMax-M3.1-Flash'],
+            ['minimax-m2.7', 'MiniMax-M3.1-Flash'],
+            ['minimax-m2.5', 'MiniMax-M3.1-Flash'],
             ['minimax-m2.1', 'MiniMax-M3.1-Flash'],
             ['minimax-m2', 'MiniMax-M3.1-Flash'],
             // Moonshot named K3 when it retired K2.5.

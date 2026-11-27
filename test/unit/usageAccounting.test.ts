@@ -2,7 +2,7 @@ import * as assert from 'assert';
 
 import { compareRecords, dedupe, preferred } from '../../src/usage/accounting';
 import { byDay, rollup, totalsOf } from '../../src/usage/aggregate';
-import { isSyntheticModel, variantOf } from '../../src/usage/modelIds';
+import { UNRECORDED_MODEL, isSyntheticModel, variantOf } from '../../src/usage/modelIds';
 import { addProvenance, isComplete, totalPrefix } from '../../src/usage/provenance';
 import type { UsageRequest } from '../../src/usage/types';
 import { findModel, modelById } from '../../src/tokenizer/registry';
@@ -108,7 +108,7 @@ suite('usage accounting', () => {
         assert.deepStrictEqual([winner.input, winner.cacheRead, winner.output], [90, 60, 20]);
     });
 
-    test('the comparator: parser, then main chain, then completeness, then output, then position', () => {
+    test('the comparator: parser, then main chain, then completeness, then output, then a model named, then position', () => {
         const base = req({ output: 10 });
         const cases: [string, UsageRequest, UsageRequest][] = [
             ['a newer parser wins whatever its output', req({ parserVersion: 2, output: 1 }), req({ output: 999 })],
@@ -116,6 +116,7 @@ suite('usage accounting', () => {
             ['all four counters reported beats a missing one', req({ output: 1 }), req({ cacheRead: null, output: 999 })],
             ['more output wins', req({ output: 20 }), base],
             ['missing output loses to a reported zero', req({ input: null, output: 0 }), req({ input: null, output: null })],
+            ['a named model beats none recorded', req({ model: 'gpt-6-astra', byteOffset: 20 }), req({ model: UNRECORDED_MODEL, byteOffset: 10 })],
             ['the earlier file wins a tie', req({ file: '/a.jsonl' }), req({ file: '/b.jsonl' })],
             ['then the earlier offset', req({ byteOffset: 10 }), req({ byteOffset: 20 })],
         ];

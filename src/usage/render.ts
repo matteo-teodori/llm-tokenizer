@@ -1,6 +1,7 @@
 /**
- * The Claude Code Usage page: one shell, rendered once, and fragments the
- * host renders and posts whenever the report changes.
+ * The Agent Usage page: one shell, rendered once, and fragments the host
+ * renders and posts whenever the report changes. It shows Claude Code's
+ * usage and Codex's, each read once turned on, apart or together.
  *
  * Every fragment is rendered here, in typed code, and every string from a
  * transcript (a cwd, a model id, a session id) goes through `escapeHtml`: a
@@ -18,11 +19,16 @@
 import { RANKED_BARS_CSS, THEME_TOKENS_CSS, rankedBars, type RankedValue } from '../charts';
 import { PAGE_TEXT_HELPERS, embed, escapeHtml } from '../html';
 import { formatNumber } from '../utils';
-import { ALL_ACCOUNTS, NOT_RECORDED, accountLabels, type AccountLabel } from './accounts';
+import { ACCOUNT_PROVIDER, ALL_ACCOUNTS, NOT_RECORDED, accountLabels, type AccountLabel } from './accounts';
 import type { UsageTotals } from './aggregate';
+import { UNRECORDED_MODEL } from './modelIds';
 import { totalPrefix } from './provenance';
-import { ACTIVE_PAUSE_MS, type AccountRow, type ModelRow, type RangeKey, type UsageReport } from './report';
+import { ACTIVE_PAUSE_MS, AGENT_ORDER, type AccountRow, type ModelRow, type RangeKey, type UsageReport } from './report';
+import type { UsageProvider } from './types';
 import type { Reading, UsageStatus } from './usageService';
+
+/** Each agent as the page names it. */
+export const AGENT_LABELS: Record<UsageProvider, string> = { 'claude-code': 'Claude Code', codex: 'Codex' };
 
 /** What the panel shows besides the report: status, scope, and diagnostics. */
 export interface PanelView {
@@ -33,6 +39,10 @@ export interface PanelView {
     scope: 'all' | 'workspace';
     /** The account filter: ALL_ACCOUNTS, or one account's key. */
     account: string;
+    /** The agent filter: every agent's sessions, or one's. */
+    agent: UsageProvider | 'all';
+    /** Which agents' reading is turned on. */
+    agentsOn: Record<UsageProvider, boolean>;
     /** The names you gave accounts, by account id, from the setting. */
     givenNames: Readonly<Record<string, string>>;
     zone: string;
@@ -42,8 +52,10 @@ export interface PanelView {
     report: UsageReport | undefined;
     /** A model id's label, from the registry by exact id; the id itself when unknown. */
     modelLabel(id: string): string;
-    /** Each root considered, as shown: `~`-relative, with what chose it in words. */
+    /** Each root of Claude Code's considered, as shown: `~`-relative, with what chose it in words. */
     roots: { path: string; source: string; exists: boolean; notAbsolute?: true }[];
+    /** Each Codex home considered, likewise. */
+    codexRoots: { path: string; source: string; exists: boolean; notAbsolute?: true }[];
     /** Claude Code's configuration files the account names are read from, as shown: `~`-relative. */
     accountFiles: string[];
     historyDisabled: boolean;
@@ -84,6 +96,8 @@ export interface Choices {
     since: string;
     /** The account filter, where the page shows one. */
     account: { value: string; options: { value: string; label: string; disabled?: true }[] } | null;
+    /** The agent filter, where the page shows one: once the history holds more than one agent's. */
+    agent: { value: UsageProvider | 'all'; options: { value: UsageProvider | 'all'; label: string }[] } | null;
 }
 
 /** What one post carries: the fragments, and the rows the page's exports are built from. */
@@ -112,6 +126,7 @@ const KIND_LABELS: Record<string, string> = {
     main: 'Main conversation',
     task: 'Task subagents',
     workflow: 'Workflow agents',
+    subagent: 'Subagents',
     other: 'Other transcripts',
 };
 
@@ -119,13 +134,15 @@ const KIND_LABELS: Record<string, string> = {
 function emptyState(view: PanelView): string | undefined {
     switch (view.status) {
         case 'off':
-            // The page the editor title's T opens for anyone with Claude
-            // Code's extension: what turning it on reads and keeps, listed
-            // as the README lists it, and nothing read until Turn On.
+            // The page the editor title's T opens for anyone with an agent's
+            // extension: what turning each agent on reads and keeps, listed
+            // as the README lists it, and nothing read until a Turn On.
             return `
             <section class="empty-state">
-                <h2>Claude Code usage is off</h2>
-                <p>Turned on, LLM Tokenizer reads Claude Code's own session records ${view.where ? escapeHtml(view.where) : 'on this machine'},
+                <h2>Agent usage is off</h2>
+                <p>LLM Tokenizer can show how many tokens your coding agents processed, read from their own session records ${view.where ? escapeHtml(view.where) : 'on this machine'}. Each agent is turned on apart, and nothing is read until one is.</p>
+                <h3>Claude Code</h3>
+                <p>Turned on, LLM Tokenizer reads Claude Code's own session records,
                 in the projects folder of its configuration folder (<code>~/.claude</code> by default), and shows how many tokens Claude Code processed: by day, account, project, session and model.
                 From Claude Code's configuration file (<code>~/.claude.json</code> by default, or <code>.claude.json</code> in its configuration folder, or <code>.config.json</code> there, the name older versions gave it) it reads only the Claude accounts it names,
                 and from its settings files (<code>settings.json</code> in <code>~/.claude</code> and in its configuration folder, and the organization's managed settings) it keeps three <code>env</code> entries alone: where its records are, and two switches.</p>
@@ -138,22 +155,36 @@ function emptyState(view: PanelView): string | undefined {
                     <li>compactions' sizes, and the usage limits reached, with when they reset and the account that reached each, by id;</li>
                     <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
                 </ul>
-                <p>Never kept: prompts, responses, thinking, tool inputs or results. Nothing is sent anywhere. The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Claude Code Usage History removes it.</p>
-                <p class="actions"><button type="button" class="primary" data-action="turnOn">Turn On</button><button type="button" data-action="openSettings">Open Settings</button>${
-                    view.remote ? '<span class="muted">The setting is in Remote settings, for this host, and Turn On sets it there.</span>' : ''
+                <p>Never kept: prompts, responses, thinking, tool inputs or results. Nothing is sent anywhere. The history outlives Claude Code's own records, which it deletes after 30 days by default; Clear Agent Usage History removes it.</p>
+                <p class="actions"><button type="button" class="primary" data-action="turnOn" data-agent="claude-code">Turn On Claude Code</button></p>
+                <h3>Codex</h3>
+                <p>Turned on, LLM Tokenizer reads Codex's own session records, its command line's, its editor extension's and its desktop app's alike,
+                in the sessions and archived_sessions folders of its home (<code>~/.codex</code> by default), and shows how many tokens Codex processed: by day, project, session and model.
+                Of those records it reads only the lines that count a response's tokens or name its model and effort, where a turn or a review begins and ends, where a history is compacted, the folder a session started in, and the usage limits reached;
+                Codex's credentials, configuration, prompt history and databases are never opened.</p>
+                <p>Kept, in the same database:</p>
+                <ul>
+                    <li>each response's token counts, model, effort, time and Codex version, and its ids: response, session, and the subagent thread it came from;</li>
+                    <li>the folder each session started in;</li>
+                    <li>each session record's path, size, file id and how far it was read, with a hash of the last 64 bytes read and its running totals there, to read on from them;</li>
+                    <li>when each compaction happened, and the usage limits reached, with when they reset;</li>
+                    <li>the window's process id and this machine's name, which each import writes so that two windows never import at once.</li>
+                </ul>
+                <p>Never kept: prompts, responses, reasoning, tool inputs or output. Nothing is sent anywhere. The history outlives Codex's own records, compressed or deleted; Clear Agent Usage History removes it.</p>
+                <p class="actions"><button type="button" class="primary" data-action="turnOn" data-agent="codex">Turn On Codex</button><button type="button" data-action="openSettings">Open Settings</button>${
+                    view.remote ? '<span class="muted">The settings are in Remote settings, for this host, and Turn On sets them there.</span>' : ''
                 }</p>
             </section>`;
         case 'no-roots':
             // With a history kept, the history is shown, under a banner.
-            if (view.report && view.report.coverage.requests > 0) {
+            // Whichever agent is chosen: one that has none yet is no history gone.
+            if (view.report && view.report.history.requests > 0) {
                 return undefined;
             }
             return `
             <section class="empty-state">
-                <h2>No Claude Code data folder found</h2>
-                <p>None of these exist:</p>
-                ${rootList(view)}
-                <p><button type="button" data-action="chooseFolder">Choose Folder…</button></p>
+                <h2>No data folder found</h2>
+                ${rootsOfAgents(view, true)}
             </section>`;
         case 'no-sqlite':
             return `
@@ -170,8 +201,17 @@ function emptyState(view: PanelView): string | undefined {
     }
 }
 
-function rootList(view: PanelView): string {
-    return `<ul class="plain-list">${view.roots
+/** Where each agent turned on is looked for, with a Choose Folder… of its own where `choose`. */
+function rootsOfAgents(view: PanelView, choose: boolean): string {
+    const of = (agent: UsageProvider, roots: PanelView['roots']) =>
+        `<h3>${escapeHtml(AGENT_LABELS[agent])}</h3>${roots.length > 0 ? `<p>None of these exist:</p>${rootList(roots)}` : ''}${
+            choose ? `<p><button type="button" data-action="chooseFolder" data-agent="${agent}">Choose Folder…</button></p>` : ''
+        }`;
+    return [view.agentsOn['claude-code'] ? of('claude-code', view.roots) : '', view.agentsOn.codex ? of('codex', view.codexRoots) : ''].join('');
+}
+
+function rootList(roots: PanelView['roots']): string {
+    return `<ul class="plain-list">${roots
         .map(
             r =>
                 `<li><span class="path">${escapeHtml(r.path)}</span><span class="reason">${escapeHtml(r.source)}${r.notAbsolute ? ', not an absolute path' : r.exists ? '' : ', not found'}</span></li>`,
@@ -183,13 +223,14 @@ function banner(view: PanelView): string {
     const lines: string[] = [];
     if (view.recoveredFrom) {
         lines.push(
-            `The history could not be read, so it was set aside as ${escapeHtml(view.recoveredFrom)}, and a new one started from what Claude Code still keeps.`,
+            `The history could not be read, so it was set aside as ${escapeHtml(view.recoveredFrom)}, and a new one started from what the agents still keep.`,
         );
     }
     if (view.status === 'no-roots') {
-        lines.push(
-            "No Claude Code data folder is found now, so this is the history kept so far. <button type=\"button\" data-action=\"chooseFolder\">Choose Folder…</button>",
-        );
+        const choose = AGENT_ORDER.filter(agent => view.agentsOn[agent])
+            .map(agent => `<button type="button" data-action="chooseFolder" data-agent="${agent}">Choose ${escapeHtml(AGENT_LABELS[agent])} Folder…</button>`)
+            .join(' ');
+        lines.push(`No data folder of an agent turned on is found now, so this is the history kept so far. ${choose}`);
     }
     if (view.status === 'read-only') {
         // Another window runs the newer version, or ran it: installed, it
@@ -212,7 +253,7 @@ function banner(view: PanelView): string {
 /** What the page says while the history is read, with how far this window's pass has gone where the worker said. */
 function readingLine(reading: Reading): string {
     if (reading.by === 'another window') {
-        return "Another window is reading Claude Code's records; these totals grow as it goes.";
+        return "Another window is reading the agents' records; these totals grow as it goes.";
     }
     const count = (n: number) => n.toLocaleString('en-US');
     const sofar =
@@ -221,7 +262,7 @@ function readingLine(reading: Reading): string {
             : reading.of === undefined
               ? `: ${count(reading.files)} files so far`
               : `: ${count(reading.files)} of ${count(reading.of)} files`;
-    return `Still reading Claude Code's records${sofar}. These totals grow until it is done.`;
+    return `Still reading the agents' records${sofar}. These totals grow until it is done.`;
 }
 
 /** A total's mark: `≥` while the history is still being read, or when some request did not report every counter. */
@@ -236,11 +277,27 @@ function choicesOf(view: PanelView): Choices {
         range: view.range,
         scope: view.scope,
         since: `${RANGE_LABELS.coverage}${report?.coverage.start != null ? ` ${view.formatDate(report.coverage.start)}` : ''}`,
-        account: accountFilter(view),
+        // Accounts are Claude Code's alone: none to choose among another agent's sessions.
+        account: view.agent !== 'all' && view.agent !== ACCOUNT_PROVIDER ? null : accountFilter(view),
+        agent: agentFilter(view),
     };
 }
 
-/** The range and scope buttons, and the account filter. */
+/**
+ * The agent filter, once the history holds more than one agent's sessions:
+ * all of them, or one. One chosen that the history no longer holds is still
+ * offered while it is.
+ */
+function agentFilter(view: PanelView): Choices['agent'] {
+    const seen = view.report?.agentsSeen ?? [];
+    const offered = AGENT_ORDER.filter(agent => seen.includes(agent) || agent === view.agent);
+    if (offered.length < 2) {
+        return null;
+    }
+    return { value: view.agent, options: [{ value: 'all', label: 'All agents' }, ...offered.map(agent => ({ value: agent, label: AGENT_LABELS[agent] }))] };
+}
+
+/** The range, agent and scope buttons, and the account filter. */
 function controls(choices: Choices): string {
     const range = (key: RangeKey) =>
         `<button type="button" data-range="${key}" aria-pressed="${choices.range === key}">${escapeHtml(key === 'coverage' ? choices.since : RANGE_LABELS[key])}</button>`;
@@ -254,8 +311,14 @@ function controls(choices: Choices): string {
               )
               .join('')}</select>`
         : '';
+    const agents = choices.agent
+        ? `<div class="segmented" role="group" aria-label="Agent">${choices.agent.options
+              .map(o => `<button type="button" data-agent-filter="${o.value}" aria-pressed="${choices.agent?.value === o.value}">${escapeHtml(o.label)}</button>`)
+              .join('')}</div>`
+        : '';
     return `
         <div class="segmented" role="group" aria-label="Range">${(['today', '7d', '30d', 'coverage'] as const).map(range).join('')}</div>
+        ${agents}
         <div class="segmented" role="group" aria-label="Scope">${scope('all', 'All projects')}${scope('workspace', 'This workspace')}</div>
         ${filter}`;
 }
@@ -263,7 +326,7 @@ function controls(choices: Choices): string {
 /** Refresh, and the line that says when the page was refreshed and how new its newest record is. */
 function status(view: PanelView): string {
     const report = view.report;
-    const newest = report?.coverage.newest != null ? `newest record ${escapeHtml(view.formatTime(report.coverage.newest))}` : '';
+    const newest = report?.history.newest != null ? `newest record ${escapeHtml(view.formatTime(report.history.newest))}` : '';
     const refreshed = view.refreshedAt !== undefined ? `refreshed ${escapeHtml(view.formatTime(view.refreshedAt))}` : '';
     // Busy while a pass reads, rather than a click that seems to do nothing:
     // Refresh would only wait for it. Still focusable, so focus stays put.
@@ -402,7 +465,7 @@ function previousDay(date: string): string {
 }
 
 function modelName(view: PanelView, model: string, variant: string | null): string {
-    return `${view.modelLabel(model)}${variant ? ` (${variant})` : ''}`;
+    return `${model === UNRECORDED_MODEL ? 'Model not recorded' : view.modelLabel(model)}${variant ? ` (${variant})` : ''}`;
 }
 
 /**
@@ -445,6 +508,14 @@ function overview(report: UsageReport, view: PanelView): string {
         ${notes.length > 0 ? `<p class="note">${notes.join(' · ')}</p>` : ''}
     </section>
     <section class="panel"><h2>By day</h2>${dayColumns(report, view)}</section>
+    ${
+        view.agent === 'all' && report.agents.length > 1
+            ? `<section class="panel"><h2>By agent</h2>${rankedBars(
+                  report.agents.map(a => ({ label: AGENT_LABELS[a.provider], tokens: a.totals.processed, share: share0(a.totals, t) })),
+                  cutPercent,
+              )}</section>`
+            : ''
+    }
     <section class="panel">
         <h2>By model</h2>
         ${rankedBars(report.models.map(m => ({ label: modelName(view, m.model, m.variant), tokens: m.totals.processed, share: share0(m.totals, t) })), cutPercent)}
@@ -517,15 +588,23 @@ function limitWindows(report: UsageReport, view: PanelView): string {
     // Newest first: the page in view on opening is the latest limits.
     const windows = [...report.limitWindows].reverse();
     // A limit is an account's: where the page holds more than one account's
-    // sessions, each says whose, though one account alone hit any.
+    // sessions, each says whose, though one account alone hit any. Another
+    // agent's, whose accounts are not told apart, names none.
     const labels = labelsOf(view);
-    const whose = new Set(windows.map(w => w.account)).size > 1 || (view.account === ALL_ACCOUNTS && report.accountsSeen.length > 1);
+    const hitBy = new Set(windows.flatMap(w => (w.account === null ? [] : [w.account])));
+    const whose = hitBy.size > 1 || (hitBy.size > 0 && view.account === ALL_ACCOUNTS && report.accountsSeen.length > 1);
+    // And which agent's, where the page holds more than one agent's sessions.
+    const which = view.agent === 'all' && report.agentsSeen.length > 1;
+    const prefix = (w: (typeof windows)[number]) => {
+        const parts = [which ? AGENT_LABELS[w.provider] : '', whose && w.account !== null ? labelOf(labels, w.account) : ''].filter(Boolean);
+        return parts.length > 0 ? `${escapeHtml(parts.join(', '))}: ` : '';
+    };
     const pages = pagesOf(windows).map(
         (page, i) =>
             `<ul class="page plain-list"${i > 0 ? ' inert' : ''}>${page
                 .map(
                     w =>
-                        `<li><span>${whose ? `${escapeHtml(labelOf(labels, w.account))}: ` : ''}${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
+                        `<li><span>${prefix(w)}${escapeHtml(w.limitType.replace(/_/g, ' '))} limit, ${w.hits.toLocaleString('en-US')} ${
                             w.hits === 1 ? 'request' : 'requests'
                         } refused from ${escapeHtml(view.formatTime(w.firstTs))}</span><span class="reason">${
                             w.resetsAt !== null ? `reset ${escapeHtml(view.formatTime(w.resetsAt * 1000))}` : ''
@@ -596,7 +675,9 @@ function accounts(report: UsageReport, view: PanelView): string {
     if (view.account !== ALL_ACCOUNTS || !report.accounts.some(a => a.owner !== null)) {
         return '';
     }
-    const total = report.totals.processed;
+    // A share of the tokens accounts hold: Claude Code's, another agent's being no account's.
+    const total = report.agents.find(a => a.provider === ACCOUNT_PROVIDER)?.totals.processed ?? report.totals.processed;
+    const others = report.agents.filter(a => a.provider !== ACCOUNT_PROVIDER && a.totals.processed > 0).map(a => AGENT_LABELS[a.provider]);
     const labels = labelsOf(view);
     const seen = new Map(report.accountsSeen.map(a => [a.key, a]));
     const current = new Set(report.currentAccounts);
@@ -632,7 +713,7 @@ function accounts(report: UsageReport, view: PanelView): string {
             unrecorded
                 ? ' Not recorded: sessions whose transcripts record no account, as those Claude Code wrote before it recorded accounts, from version 2.1.318 or so, in November 2026, those signed in with an API key or through a cloud provider, and those Claude Code had deleted before this version first read them.'
                 : ''
-        }</p>
+        }${others.length > 0 ? ` Shares are of Claude Code's tokens: ${others.join(' and ')}'s are in no account here.` : ''}</p>
     </section>`;
 }
 
@@ -703,21 +784,26 @@ function projects(report: UsageReport, view: PanelView): string {
 
 function sessions(report: UsageReport, view: PanelView): string {
     const labels = hasAccounts(report) ? labelsOf(view) : undefined;
+    // Which agent's each is, once the history holds more than one agent's.
+    const agents = view.agent === 'all' && report.agentsSeen.length > 1;
     return `
     <section class="panel">
         ${table(
             'sessions',
             'Sessions',
             [
-                { key: 'started', label: 'Started', width: '22%' },
+                { key: 'started', label: 'Started', width: agents ? '19%' : '22%' },
+                ...(agents ? [{ key: 'agent', label: 'Agent', width: '13%' }] : []),
                 { key: 'label', label: 'Project' },
-                { key: 'active', label: 'Active', numeric: true, width: '13%' },
-                { key: 'requests', label: 'Requests', numeric: true, width: '12%' },
-                { key: 'processed', label: 'Processed', numeric: true, width: '17%' },
-                { key: 'compactions', label: 'Compactions', numeric: true, width: '14%' },
+                { key: 'active', label: 'Active', numeric: true, width: agents ? '11%' : '13%' },
+                { key: 'requests', label: 'Requests', numeric: true, width: agents ? '11%' : '12%' },
+                { key: 'processed', label: 'Processed', numeric: true, width: agents ? '15%' : '17%' },
+                { key: 'compactions', label: 'Compactions', numeric: true, width: agents ? '13%' : '14%' },
             ],
             report.sessions.map(s => {
+                // The sizes the records give: Codex's give none.
                 const compactions = s.compactions
+                    .filter(c => c.preTokens !== null || c.postTokens !== null)
                     .map(c => `${c.preTokens?.toLocaleString('en-US') ?? '?'} → ${c.postTokens?.toLocaleString('en-US') ?? '?'}`)
                     .join(', ');
                 const between =
@@ -725,6 +811,7 @@ function sessions(report: UsageReport, view: PanelView): string {
                 return {
                     keys: {
                         started: s.firstTs ?? 0,
+                        ...(agents ? { agent: AGENT_LABELS[s.provider] } : {}),
                         label: s.label,
                         active: s.activeMs,
                         requests: s.totals.coverage.requests,
@@ -732,14 +819,15 @@ function sessions(report: UsageReport, view: PanelView): string {
                         compactions: s.compactions.length,
                     },
                     cells: [
-                        `<span title="${escapeHtml(`Session ${s.sessionId}${labels ? `\n${accountsLine(labels, s.accounts, s.moreAccounts)}` : ''}`)}">${escapeHtml(
-                            s.firstTs !== null ? view.formatTime(s.firstTs) : '—',
-                        )}</span>`,
+                        `<span title="${escapeHtml(
+                            `${AGENT_LABELS[s.provider]} session ${s.sessionId}${labels && s.accounts.length > 0 ? `\n${accountsLine(labels, s.accounts, s.moreAccounts)}` : ''}`,
+                        )}">${escapeHtml(s.firstTs !== null ? view.formatTime(s.firstTs) : '—')}</span>`,
+                        ...(agents ? [escapeHtml(AGENT_LABELS[s.provider])] : []),
                         `<span title="${escapeHtml(s.label)}">${escapeHtml(s.label)}</span>`,
                         between ? `<span title="${escapeHtml(between)}">${formatActive(s.activeMs)}</span>` : formatActive(s.activeMs),
                         s.totals.coverage.requests.toLocaleString('en-US'),
                         processedCell(view, s.totals, s.models),
-                        s.compactions.length > 0 ? `<span title="${escapeHtml(compactions)}">${s.compactions.length}</span>` : '0',
+                        compactions ? `<span title="${escapeHtml(compactions)}">${s.compactions.length}</span>` : String(s.compactions.length),
                     ],
                 };
             }),
@@ -748,7 +836,7 @@ function sessions(report: UsageReport, view: PanelView): string {
         ${capNote(report.omitted.sessions, 'sessions')}
         <p class="note">Active is a session's time between requests in this range, its subagents' included, leaving out every pause of over ${
             ACTIVE_PAUSE_MS / 60_000
-        } minutes: Claude and its tools at work, and your replies within that.</p>
+        } minutes: the agent and its tools at work, and your replies within that.</p>
     </section>`;
 }
 
@@ -806,21 +894,21 @@ function diagnostics(view: PanelView): string {
     if (report) {
         rows.push([
             'History',
-            `${report.coverage.requests.toLocaleString('en-US')} requests from ${report.coverage.files.toLocaleString('en-US')} files${
-                report.coverage.start !== null ? `, since ${escapeHtml(view.formatTime(report.coverage.start))}` : ''
+            `${report.history.requests.toLocaleString('en-US')} requests from ${report.history.files.toLocaleString('en-US')} files${
+                report.history.start !== null ? `, since ${escapeHtml(view.formatTime(report.history.start))}` : ''
             }`,
         ]);
-        if (report.coverage.ahead > 0) {
-            const n = report.coverage.ahead;
+        if (report.history.ahead > 0) {
+            const n = report.history.ahead;
             rows.push([
                 'Dated ahead',
                 `${n.toLocaleString('en-US')} ${n === 1 ? 'request' : 'requests'} dated more than a day after this machine's clock, kept and counted once it reaches ${n === 1 ? 'it' : 'them'}`,
             ]);
         }
-        if (report.coverage.oversizeLines + report.coverage.malformedLines > 0) {
+        if (report.history.oversizeLines + report.history.malformedLines > 0) {
             rows.push([
                 'Lines not read',
-                `${report.coverage.malformedLines.toLocaleString('en-US')} malformed, ${report.coverage.oversizeLines.toLocaleString('en-US')} too long to read`,
+                `${report.history.malformedLines.toLocaleString('en-US')} malformed, ${report.history.oversizeLines.toLocaleString('en-US')} too long to read`,
             ]);
         }
     }
@@ -845,20 +933,39 @@ function diagnostics(view: PanelView): string {
     if (view.recoveredFrom) {
         rows.push(['Set aside', escapeHtml(view.recoveredFrom)]);
     }
+    // Each agent, read or not: one turned off is turned on from here.
     rows.push([
-        'Account names',
-        view.accountFiles.length > 0
-            ? `from ${view.accountFiles.map(f => `<span class="path">${escapeHtml(f)}</span>`).join(', ')}`
-            : "no Claude Code configuration file found",
+        'Agents',
+        AGENT_ORDER.map(agent =>
+            view.agentsOn[agent]
+                ? `${escapeHtml(AGENT_LABELS[agent])} read`
+                : `${escapeHtml(AGENT_LABELS[agent])} off <button type="button" data-action="turnOn" data-agent="${agent}">Turn On</button>`,
+        ).join(' · '),
     ]);
+    if (view.agentsOn['claude-code']) {
+        rows.push([
+            'Account names',
+            view.accountFiles.length > 0
+                ? `from ${view.accountFiles.map(f => `<span class="path">${escapeHtml(f)}</span>`).join(', ')}`
+                : 'no Claude Code configuration file found',
+        ]);
+    }
     rows.push(['Time zone', escapeHtml(view.zone)]);
+    const claude = view.agentsOn['claude-code']
+        ? `<h3>Where Claude Code's records are read from</h3>
+        ${rootList(view.roots)}
+        <p class="note">Claude Code deletes its records after <code>cleanupPeriodDays</code> (30 by default), so an import catches up only on what is still on disk. Their format is internal to Claude Code, and may change with it.</p>`
+        : '';
+    const codex = view.agentsOn.codex
+        ? `<h3>Where Codex's records are read from</h3>
+        ${rootList(view.codexRoots)}
+        <p class="note">Codex compresses a session record idle for a week, which is read whole once, and deletes one you delete; an import catches up only on what is still on disk. Their format is internal to Codex, and may change with it.</p>`
+        : '';
     return `
     <details class="panel" id="diagnostics">
         <summary><h2>Diagnostics</h2></summary>
         <dl class="facts">${rows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join('')}</dl>
-        <h3>Where Claude Code's records are read from</h3>
-        ${rootList(view)}
-        <p class="note">Claude Code deletes its records after <code>cleanupPeriodDays</code> (30 by default), so an import catches up only on what is still on disk. Their format is internal to Claude Code, and may change with it.</p>
+        ${claude}${codex}
         <p class="actions">
             <button type="button" data-action="copy">Copy Sessions</button>
             <button type="button" data-action="export">Export CSV</button>
@@ -882,10 +989,12 @@ function emptyRange(report: UsageReport, view: PanelView): string {
             ? // A range the reading has not reached is not one without requests.
               'No request has been read in this range yet; the usage limits read in it so far are below.'
             : report.coverage.requests === 0
-              ? 'No Claude Code requests have been read yet.'
+              ? `No ${view.agent === 'all' ? '' : `${AGENT_LABELS[view.agent]} `}requests have been read yet.`
               : view.reading
                 ? 'Nothing has been read in this range yet.'
-                : view.account !== ALL_ACCOUNTS
+                : view.agent !== 'all' && view.account === ALL_ACCOUNTS
+                  ? `No ${AGENT_LABELS[view.agent]} request falls in this range${view.scope === 'workspace' ? ' in a folder of this workspace' : ''}.`
+                  : view.account !== ALL_ACCOUNTS
                   ? `${
                         view.account === NOT_RECORDED
                             ? 'No request of a session that records no account'
@@ -908,7 +1017,7 @@ export function renderFragments(view: PanelView): PanelFragments {
             ? report.totals.coverage.requests === 0
                 ? emptyRange(report, view)
                 : `${banner(view)}${overview(report, view)}${accounts(report, view)}${projects(report, view)}${sessions(report, view)}`
-            : `${banner(view)}<p class="muted">Reading Claude Code's records…</p>`);
+            : `${banner(view)}<p class="muted">Reading the agents' records…</p>`);
     const choices = empty ? null : choicesOf(view);
     return {
         controls: choices ? controls(choices) : '',
@@ -924,6 +1033,7 @@ export function renderFragments(view: PanelView): PanelFragments {
 function csvRows(view: PanelView): PanelFragments['csv'] {
     const report = view.report;
     const header = [
+        'agent',
         'date',
         'model',
         'variant',
@@ -943,8 +1053,9 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
         'complete',
     ];
     const rows = (report?.dayModels ?? []).map(r => [
+        r.provider,
         r.date,
-        r.model,
+        r.model === UNRECORDED_MODEL ? '' : r.model,
         r.variant ?? '',
         r.speed ?? '',
         r.inferenceGeo ?? '',
@@ -965,8 +1076,10 @@ function csvRows(view: PanelView): PanelFragments['csv'] {
         ...exportNotes(view),
         // What a hand-made cost calculation needs to know of the columns.
         'speed and inference_geo are as each request recorded them, empty where it named none: fast, and us, are billed higher',
+        "model is empty where a response's records named none, as Codex's before 0.35 did not",
         "prompt_size is each request's input, cache writes and cache reads together, over 100,000 or 200,000 tokens or not: Claude Haiku 5.5 prices a request over 100,000 higher",
         'thinking_tokens are part of output_tokens; cache_creation_5m and cache_creation_1h split cache_creation_input_tokens where the requests recorded the split',
+        "agent is claude-code or codex; Codex's input_tokens are what is left of its input once its cached and cache-written tokens are taken out, as the API's are, and its reasoning tokens are thinking_tokens",
     ];
     if (report && report.omitted.dayModels > 0) {
         notes.push(`${report.omitted.dayModels} older day-and-model rows are counted in the totals but not listed`);
@@ -978,6 +1091,7 @@ function copyRows(view: PanelView): PanelFragments['copy'] {
     const report = view.report;
     const labels = labelsOf(view);
     const rows = (report?.sessions ?? []).map(s => [
+        s.provider,
         s.firstTs !== null ? view.formatTime(s.firstTs) : '',
         s.label,
         s.sessionId,
@@ -992,9 +1106,9 @@ function copyRows(view: PanelView): PanelFragments['copy'] {
         notes.push(`${report.omitted.sessions} smaller sessions are counted in the totals but not listed`);
     }
     notes.push(
-        "account is the Claude account a session's requests were made with, as the panel names it, those of one resumed under another separated by semicolons, the first used first; Not recorded where its transcripts record none",
+        "account is the Claude account a session's requests were made with, as the panel names it, those of one resumed under another separated by semicolons, the first used first; Not recorded where its transcripts record none, and empty for another agent's session",
     );
-    return { header: ['started', 'project', 'session', 'requests', 'processed', 'active_minutes', 'account'], rows, notes };
+    return { header: ['agent', 'started', 'project', 'session', 'requests', 'processed', 'active_minutes', 'account'], rows, notes };
 }
 
 /** The `# key: value` lines every export opens with. */
@@ -1003,8 +1117,8 @@ function exportNotes(view: PanelView): string[] {
     return [
         `extension: LLM Tokenizer ${view.extensionVersion}`,
         `time zone: ${view.zone}`,
-        `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}${accountNote(view)}`,
-        'each request is its record with the largest output per message.id',
+        `range: ${report?.from ?? ''} to ${report?.to ?? ''}${view.scope === 'workspace' ? ', this workspace' : ''}${view.agent === 'all' ? '' : `, ${AGENT_LABELS[view.agent]} only`}${accountNote(view)}`,
+        "each request is one model response: Claude Code's record with the largest output per message.id, and Codex's by its response id, or by the running total it moved",
         `history since: ${report?.coverage.start !== null && report?.coverage.start !== undefined ? new Date(report.coverage.start).toISOString() : ''}`,
     ];
 }
@@ -1039,7 +1153,7 @@ export function renderUsagePage(nonce: string, csp: string, first: PanelFragment
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
-<title>Claude Code Usage</title>
+<title>Agent Usage</title>
 <style>
 ${THEME_TOKENS_CSS}
 * { box-sizing: border-box; }
@@ -1197,8 +1311,19 @@ ${PAGE_TEXT_HELPERS}
 
     // A table keeps the sort chosen for it across updates: every row, on
     // every page, is ordered, then dealt out a page's worth at a time.
+    /**
+     * The sort a table shows: the one chosen for it, while it has that
+     * column; else its own. A sort chosen by a column the table no longer
+     * has, as the Agent column once one agent is chosen, comes back with it.
+     */
+    function sortOf(strip) {
+        const kept = sorts[strip.id];
+        const has = key => Array.from(strip.querySelectorAll('th')).some(th => th.querySelector('button') && th.querySelector('button').dataset.sortKey === key);
+        return kept && has(kept.key) ? kept : { key: strip.dataset.sort, ascending: false };
+    }
+
     function applySort(strip) {
-        const state = sorts[strip.id] || { key: strip.dataset.sort, ascending: false };
+        const state = sortOf(strip);
         const bodies = pagesIn(strip).map(page => page.tBodies[0]);
         const rows = [];
         bodies.forEach(tbody => Array.prototype.push.apply(rows, Array.from(tbody.rows)));
@@ -1323,22 +1448,53 @@ ${PAGE_TEXT_HELPERS}
     function showChoices(fragments) {
         const next = fragments.choices;
         const select = controls.querySelector('select[data-account-filter]');
+        // The controls are rebuilt as the account filter comes or goes.
         if (!next || !choices || !next.account !== !select) {
             if (JSON.stringify(next) !== JSON.stringify(choices)) {
                 controls.innerHTML = fragments.controls;
                 // What was waiting for the select it replaces is not the new one's.
                 deferred = null;
             }
+            // An account chosen and not yet sent is moot where no account filter is left, as for Codex's alone.
+            if (!next || !next.account) {
+                clearTimeout(choosing);
+                choosing = undefined;
+            }
             choices = next;
             return;
+        }
+        // The agent filter that comes, goes or offers another agent is put in
+        // alone: the account filter, in use or not, and the buttons a click
+        // may be on, are left where they are.
+        const agents = choice => (choice.agent ? choice.agent.options.map(o => o.value).join(' ') : '');
+        if (agents(next) !== agents(choices)) {
+            showAgents(fragments.controls);
         }
         controls.querySelectorAll('button[data-range]').forEach(button => {
             press(button, button.dataset.range === next.range);
             if (button.dataset.range === 'coverage' && button.textContent !== next.since) { button.textContent = next.since; }
         });
         controls.querySelectorAll('button[data-scope]').forEach(button => press(button, button.dataset.scope === next.scope));
+        controls.querySelectorAll('button[data-agent-filter]').forEach(button => press(button, !!next.agent && button.dataset.agentFilter === next.agent.value));
         if (select && next.account) { updateSelect(select, next.account); }
         choices = next;
+    }
+
+    /** The agent filter as the markup has it, where the one shown is, or where the controls put it: after the range. */
+    function showAgents(markup) {
+        const template = document.createElement('template');
+        template.innerHTML = markup;
+        const group = '.segmented[aria-label="Agent"]';
+        const fresh = template.content.querySelector(group);
+        const shown = controls.querySelector(group);
+        if (shown && fresh) {
+            shown.replaceWith(fresh);
+        } else if (shown) {
+            shown.remove();
+        } else if (fresh) {
+            const range = controls.querySelector('.segmented[aria-label="Range"]');
+            if (range) { range.after(fresh); } else { controls.prepend(fresh); }
+        }
     }
 
     function press(button, pressed) {
@@ -1409,16 +1565,18 @@ ${PAGE_TEXT_HELPERS}
         const focused = document.activeElement;
         let selector = () => null;
         if (focused && focused.matches('button')) {
-            const attribute = ['data-action', 'data-range', 'data-scope', 'data-sort-key', 'data-page'].find(a => focused.getAttribute(a));
+            const attribute = ['data-action', 'data-range', 'data-scope', 'data-agent-filter', 'data-sort-key', 'data-page'].find(a => focused.getAttribute(a));
             // A header's button is found again on its list's page in view, once
             // the update is arranged, and a pager's in its pager: two lists
             // share their sort keys, and every page has a header.
             const strip = attribute === 'data-sort-key' && focused.closest('.pages[id]');
             const pager = attribute === 'data-page' && focused.closest('nav[data-pages]');
-            // An account's Name… is found again by its row's key: every row has one.
+            // An account's Name… is found again by its row's key: every row
+            // has one; an agent's Turn On or Choose Folder… by its agent.
             const key = focused.getAttribute('data-key');
+            const agent = focused.getAttribute('data-agent');
             const button = attribute
-                ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' + (key ? '[data-key="' + key + '"]' : '')
+                ? 'button[' + attribute + '="' + focused.getAttribute(attribute) + '"]' + (key ? '[data-key="' + key + '"]' : '') + (agent ? '[data-agent="' + agent + '"]' : '')
                 : null;
             selector = () =>
                 !button ? null
@@ -1471,6 +1629,8 @@ ${PAGE_TEXT_HELPERS}
             vscode.postMessage({ type: 'setRange', range: button.dataset.range });
         } else if (button.dataset.scope) {
             vscode.postMessage({ type: 'setScope', scope: button.dataset.scope });
+        } else if (button.dataset.agentFilter) {
+            vscode.postMessage({ type: 'setAgent', agent: button.dataset.agentFilter });
         } else if (button.dataset.page) {
             // Past either end, turn() stays at that end.
             const pager = button.closest('nav[data-pages]');
@@ -1480,7 +1640,8 @@ ${PAGE_TEXT_HELPERS}
             }
         } else if (button.dataset.sortKey) {
             const strip = button.closest('.pages');
-            const current = sorts[strip.id] || { key: strip.dataset.sort, ascending: false };
+            // From the sort shown: a click on the column shown sorted turns it round.
+            const current = sortOf(strip);
             const key = button.dataset.sortKey;
             sorts[strip.id] = { key, ascending: key === current.key ? !current.ascending : key === 'label' };
             applySort(strip);
@@ -1491,7 +1652,8 @@ ${PAGE_TEXT_HELPERS}
         } else if (button.dataset.action === 'export') {
             vscode.postMessage({ type: 'export', text: lines(exports.csv, ',', csv) });
         } else if (button.dataset.action) {
-            vscode.postMessage({ type: button.dataset.action });
+            // Turn On and Choose Folder… are an agent's.
+            vscode.postMessage(button.dataset.agent ? { type: button.dataset.action, agent: button.dataset.agent } : { type: button.dataset.action });
         }
     });
 

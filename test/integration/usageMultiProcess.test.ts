@@ -6,7 +6,7 @@ import * as path from 'path';
 
 import { totalsOf } from '../../src/usage/aggregate';
 import { currentHistory } from '../../src/usage/historyFiles';
-import { PARSER_VERSION } from '../../src/usage/transcripts';
+import { PARSER_VERSION } from '../../src/usage/lines';
 import { UsageStore, loadSqlite } from '../../src/usage/store';
 
 const FIXTURE_ROOT = path.join(__dirname, '..', '..', '..', 'test', 'fixtures', 'claude-config');
@@ -34,7 +34,7 @@ worker.on('message', message => {
         void worker.terminate();
     }
 });
-worker.postMessage({ type: 'import', id: 1, storeFile, roots: [root] });
+worker.postMessage({ type: 'import', id: 1, storeFile, sources: [{ provider: 'claude-code', roots: [root] }] });
 `;
 
 /** A process that takes the lease of the history at a path and exits holding it. */

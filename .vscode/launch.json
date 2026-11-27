@@ -33,7 +33,8 @@
                 "${workspaceFolder}/test/fixtures/workspace"
             ],
             "env": {
-                "CLAUDE_CONFIG_DIR": "${workspaceFolder}/test/fixtures/claude-config"
+                "CLAUDE_CONFIG_DIR": "${workspaceFolder}/test/fixtures/claude-config",
+                "CODEX_HOME": "${workspaceFolder}/test/fixtures/codex-home"
             },
             "outFiles": [
                 "${workspaceFolder}/out/**/*.js",

@@ -30,9 +30,10 @@ function run(label, version) {
             `--user-data-dir=${here(`.vscode-test/ud-${label}`)}`,
         ],
         env: {
-            // A stand-in for ~/.claude, so that nothing a test runs can read the
-            // developer's own Claude Code data.
+            // Stand-ins for ~/.claude and ~/.codex, so that nothing a test runs
+            // can read the developer's own Claude Code or Codex data.
             CLAUDE_CONFIG_DIR: here('test/fixtures/claude-config'),
+            CODEX_HOME: here('test/fixtures/codex-home'),
         },
     };
 }
