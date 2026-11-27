@@ -4,7 +4,7 @@
   <h1>LLM Tokenizer</h1>
 
   <p><b>The ultimate AI token counter for your IDE.</b><br>
-  Token counting for 97 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
+  Token counting for 95 models — exact where the tokenizer is public, honestly labelled where it is not.</p>
 
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=matteoteodori.llm-tokenizer">
@@ -41,7 +41,7 @@ Stop copying and pasting into web calculators. Get precise counts right where yo
 ## Features
 
 ### 🎯 Core Features
-- **Exact counts, not guesses**: 60 of the 97 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
+- **Exact counts, not guesses**: 58 of the 95 supported models are tokenized with the model's own tokenizer. The rest are clearly marked with `≈`.
 - **Real-time Token Count**: The active file's token count in the Status Bar
 - **Context Limit Warnings**: Indicators at 80% and 100% of the model's *usable input* limit
 - **Project-wide Counting**: Workspace totals with caching, cancellation, and multi-root support
@@ -77,7 +77,7 @@ session records, on this machine, and sends nothing anywhere.
 
 ## Supported Models
 
-97 models across 13 providers. Every id is checked against the provider's own
+95 models across 13 providers. Every id is checked against the provider's own
 documentation, and a model its provider has retired is removed; one it has
 only deprecated stays until the date it is shut down. A model you picked from
 the status bar is migrated automatically, to the replacement its provider
@@ -106,7 +106,7 @@ name, shortened for Llama: `llama-4-scout` is `Llama-4-Scout-17B-16E-Instruct`.
 | Alibaba    | Qwen3.7 Max/Plus/Flash, Qwen3.6 Plus | Estimated |
 | Zhipu      | GLM-5.3, GLM-5.3-Flash, GLM-5.3-FlashX, GLM-5.2, GLM-5.1, GLM-5 | Exact¹ |
 | Zhipu      | GLM-5-Turbo | Estimated⁵ |
-| MiniMax    | MiniMax M3.1 Flash, M3, M2.7, M2.5 | Exact¹ |
+| MiniMax    | MiniMax M3.1 Flash, M3 | Exact¹ |
 | Moonshot   | Kimi K3.1 Pro, K3, K2.7 Code, K2.6 | Exact¹ |
 | Xiaomi     | MiMo V2.6 Pro, V2.6 Flash | Exact¹ |
 | Tencent    | Hy4 preview, Hy3 | Exact¹ |
