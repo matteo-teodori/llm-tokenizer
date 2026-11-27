@@ -17,7 +17,7 @@ import type { TranscriptFile } from '../../src/usage/transcripts';
 
 /*
  * Codex's rollouts, as its recorder writes them: shapes from its source
- * (codex-rs at rust-v0.169.0 and earlier tags: RolloutLineRef, SessionMeta,
+ * (codex-rs at rust-v0.172.0 and earlier tags: RolloutLineRef, SessionMeta,
  * TurnContextItem, TokenCountEvent, TokenUsageRecord), values invented.
  */
 
@@ -440,7 +440,7 @@ suite('usage Codex rollouts', () => {
         assert.deepStrictEqual((await read(later)).limitHits.map(h => [h.timestamp, h.limitType, h.resetsAt]), [[Date.parse(at(2)), 'five_hour', 1_794_000_000]]);
     });
 
-    test("from Codex 0.145 a refusal names itself, in its snapshot and in its turn's end, which alone tells one with no snapshot, as an API key's quota; a full window it does not name is none", async () => {
+    test("from Codex 0.145 a refusal names itself, in its snapshot and in its turn's end, which alone tells one with no snapshot, as an API key's quota, from 0.172 a spend limit by a code of its own; a full window it does not name is none", async () => {
         const reset = 1_794_000_000;
         const limits = (primary: number, reached: string | null) => ({
             limit_id: 'codex',
@@ -486,6 +486,8 @@ suite('usage Codex rollouts', () => {
             context(70, 'gpt-5.5'),
             tokenCount(71, sum(1), usage(1), limits(64, 'workspace_member_usage_limit_reached')),
             end(71.04, 'usage_limit_exceeded'),
+            // From 0.172, the spend limit of an API key, a project or an organization, by a code of its own: a usage limit, as 0.171 wrote it.
+            ...['api_key', 'project', 'organization'].flatMap((scope, i) => [context(80 + 10 * i, 'gpt-5.5'), end(81 + 10 * i, `${scope}_spend_limit_exceeded`)]),
         ]);
         assert.deepStrictEqual(
             (await read(file)).limitHits.map(h => [h.timestamp, h.limitType, h.resetsAt]),
@@ -496,6 +498,9 @@ suite('usage Codex rollouts', () => {
                 [Date.parse(at(51.05)), 'premium', null],
                 [Date.parse(at(61.05)), 'usage', null],
                 [Date.parse(at(71)), 'workspace_usage', null],
+                [Date.parse(at(81)), 'usage', null],
+                [Date.parse(at(91)), 'usage', null],
+                [Date.parse(at(101)), 'usage', null],
             ],
         );
     });

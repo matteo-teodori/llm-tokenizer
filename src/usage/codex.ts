@@ -13,7 +13,7 @@
  *
  * Each line is `{"timestamp":"…Z",["ordinal":n,]"type":…,"payload":…}`, in
  * that order. What counts, from Codex's own source (rust-v0.32.0 to 0.169.0,
- * checked at each tag):
+ * checked at each tag, and what changed from there to 0.172.0):
  *
  * - From 0.153, a `token_usage_record` line for every model response, with
  *   its `response_id` and that response's usage: the only lines counted
@@ -162,8 +162,16 @@ const MAX_PARSED_BYTES = Math.min(MAX_PARSED_LINE_BYTES, 1 << 20);
 
 /** How every line starts: where a line a crash cut short ends, and the next one written onto it begins. */
 const LINE_START = Buffer.from('{"timestamp":"');
-/** A turn's end by a usage limit (0.145 on), as only Codex's own JSON writes it: a quote in a message is escaped. */
-const USAGE_LIMIT_ERROR = Buffer.from('"codex_error_info":"usage_limit_exceeded"');
+/**
+ * A turn's end by a usage limit (0.145 on), as only Codex's own JSON writes
+ * it: a quote in a message is escaped. From 0.172, a spend limit an API key,
+ * a project or an organization reached has a code of its own, which Codex
+ * counts as a usage limit (`CodexErrorInfo::is_usage_limit`) and 0.145 to
+ * 0.171 wrote as one.
+ */
+const USAGE_LIMIT_ERRORS = ['usage_limit_exceeded', 'api_key_spend_limit_exceeded', 'project_spend_limit_exceeded', 'organization_spend_limit_exceeded'].map(code =>
+    Buffer.from(`"codex_error_info":"${code}"`),
+);
 /** Within how long a second sighting of a limit is the same refusal: its snapshot sent again, or its turn's end. */
 const SAME_REFUSAL_MS = 5_000;
 /**
@@ -571,7 +579,7 @@ class Reading {
             this.state.opened = null;
             this.settle();
             // A turn a usage limit ended, which its snapshot, if any, did not name: an API key's quota.
-            if (bytes.includes(USAGE_LIMIT_ERROR)) {
+            if (USAGE_LIMIT_ERRORS.some(error => bytes.includes(error))) {
                 this.refused(ts);
             }
         } else if (type === 'turn_aborted') {
