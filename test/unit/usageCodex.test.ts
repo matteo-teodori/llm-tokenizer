@@ -1298,7 +1298,9 @@ suite("usage Codex homes", () => {
     let tmp: string;
 
     setup(() => {
-        tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-codex-homes-')));
+        // As the file system spells it, as roots are read: /private/var on
+        // macOS, and on Windows the long names of an 8.3 short one, RUNNER~1.
+        tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tokenizer-codex-homes-')));
     });
 
     teardown(() => {
